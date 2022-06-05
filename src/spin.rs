@@ -1,0 +1,130 @@
+use core::{
+    cell::{Cell, UnsafeCell},
+    hint,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+use crate::asm::{self, hartid};
+
+/// A Mutex backed by a spin-lock.
+///
+/// # Caution
+///
+/// It is important to **never drop locks out-of-order**:
+/// ```rust,ignore
+/// let guard1 = lock1.lock();
+/// let guard2 = lock2.lock();
+/// // ... //
+/// drop(guard1);
+/// drop(guard2);
+/// ```
+///
+/// Due to how the SpinLock is implemented, this may cause deadlocks by
+/// accidentally allowing interrupts to occur. For this reason, **always**
+/// block-scope your locks so that they are dropped in the correct order.
+///
+/// Additionally, do not enable interrupts while holding a lock. This may cause
+/// deadlocks due to the same reason.
+///
+/// These behaviours are not unsafe or unsound, but they may cause deadlocks,
+/// which are undesirable.
+// TODO: push_{off,on} similar to xv6
+pub struct SpinMutex<T> {
+    locked: AtomicBool,
+    data: UnsafeCell<T>,
+    held_by: Cell<Option<u64>>,
+}
+
+unsafe impl<T: Sync + Send> Send for SpinMutex<T> {}
+unsafe impl<T: Sync + Send> Sync for SpinMutex<T> {}
+
+impl<T> SpinMutex<T> {
+    pub const fn new(data: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            data: UnsafeCell::new(data),
+            held_by: Cell::new(None),
+        }
+    }
+
+    pub fn lock(&'_ self) -> SpinMutexGuard<'_, T> {
+        // Disable interrupts to prevent deadlocks.
+        let prev_intena = asm::intr_off();
+        let hartid = hartid();
+        if self.held_by.get() == Some(hartid) {
+            panic!("deadlock");
+        }
+
+        // Try to set the locked flag to `true` if it was `false`.
+        // We loop if it could not be done, or if the previous value was
+        // somehow `true`.
+        // The Acquire success ordering ensures that any other loops will
+        // see this acquisition before they load the locked flag.
+        // The Relaxed failure ordering means that it's okay to reorder loads
+        // and stores across failed iterations--as no synchronization is
+        // necessary there as we do not have access to the data.
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            hint::spin_loop();
+        }
+
+        self.held_by.set(Some(hartid));
+
+        SpinMutexGuard {
+            prev_intena,
+            mutex: self,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+pub struct SpinMutexGuard<'a, T> {
+    // Were interrupts enabled previously?
+    prev_intena: bool,
+    mutex: &'a SpinMutex<T>,
+    _phantom: PhantomData<&'a mut T>,
+}
+
+impl<'a, T> Deref for SpinMutexGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&'_ self) -> &'_ Self::Target {
+        // SAFETY: The data is valid due to our invariants.
+        // Additionally, we can return a &'_ T as we have a &'_ Self.
+        unsafe { &*self.mutex.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for SpinMutexGuard<'a, T> {
+    fn deref_mut(&'_ mut self) -> &'_ mut Self::Target {
+        // SAFETY: The data is valid due to our invariants.
+        // Additionally, we can return a &'_ mut T as we have a &'_ mut Self.
+        unsafe { &mut *self.mutex.data.get() }
+    }
+}
+
+impl<'a, T> Drop for SpinMutexGuard<'a, T> {
+    fn drop(&mut self) {
+        // Make sure, just in case, that interrupts are still off.
+        asm::intr_off();
+
+        // The held_by field is non-normative with respect to lock status, so
+        // it's fine to mutate it before we've released the lock.
+        self.mutex.held_by.set(None);
+
+        // Set the locked flag to false.
+        // The Release ordering ensures that the acquisition of this guard
+        // cannot occur after its release.
+        self.mutex.locked.store(false, Ordering::Release);
+
+        // If interrupts were previously enabled, re-enable them.
+        if self.prev_intena {
+            asm::intr_on();
+        }
+    }
+}
