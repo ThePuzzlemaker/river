@@ -54,6 +54,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     ///
     /// This function will panic if the address is not in the correct address
     /// space.
+    #[track_caller]
     pub fn from_ptr(ptr: Mut::RawPointer) -> Self {
         match Self::try_from_ptr(ptr) {
             Some(paddr) => paddr,
@@ -111,6 +112,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     }
 
     #[allow(clippy::should_implement_trait)]
+    #[track_caller]
     pub fn add(self, by: usize) -> Self {
         match self.checked_add(by) {
             Some(paddr) => paddr,
@@ -124,6 +126,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         Self::try_from_usize(paddr)
     }
 
+    #[track_caller]
     pub fn into_virt(self) -> Virtual<T, Map, Mut> {
         match self.try_into_virt() {
             Some(vaddr) => vaddr,
@@ -156,6 +159,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         PgOff::from_usize_truncate(self.addr)
     }
 
+    #[track_caller]
     pub fn from_components(ppn: Ppn, pgoff: Option<PgOff>) -> Self {
         match Self::try_from_components(ppn, pgoff) {
             Some(paddr) => paddr,
@@ -178,7 +182,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     }
 
     #[inline]
-    pub fn make_mut(self) -> Physical<T, Map, super::Mut> {
+    pub fn into_mut(self) -> Physical<T, Map, super::Mut> {
         Physical {
             addr: self.addr,
             _phantom: PhantomData,
@@ -186,7 +190,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     }
 
     #[inline]
-    pub fn make_const(self) -> Physical<T, Map, super::Const> {
+    pub fn into_const(self) -> Physical<T, Map, super::Const> {
         Physical {
             addr: self.addr,
             _phantom: PhantomData,

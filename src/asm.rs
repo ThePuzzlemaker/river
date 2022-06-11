@@ -1,9 +1,6 @@
 use core::arch::asm;
 
-use crate::{
-    addr::{DirectMapped, Physical, PhysicalMut},
-    paging::{RawPageTable, RawSatp},
-};
+use crate::paging::RawSatp;
 
 // TODO: proper bitflags-type thing
 /// Supervisor Interrupt Enable
@@ -83,14 +80,4 @@ pub fn get_satp() -> RawSatp {
     let satp: u64;
     unsafe { asm!("csrr {}, satp", out(reg) satp) };
     RawSatp::new_unchecked(satp)
-}
-
-#[inline]
-pub fn get_pagetable() -> &'static RawPageTable {
-    let satp = get_satp().decode();
-    let ppn = satp.ppn;
-    let paddr: PhysicalMut<_, DirectMapped> = Physical::from_components(ppn, None);
-    let vaddr = paddr.into_virt();
-    // TODO: actual lock around page table to make this "safe"
-    unsafe { &*vaddr.into_ptr() }
 }

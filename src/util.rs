@@ -135,3 +135,13 @@ pub fn print_u64_hex(mut x: u64) {
 }
 
 // end stolen from std //
+
+#[track_caller]
+pub fn round_up_pow2(x: usize, n: usize) -> usize {
+    debug_assert_eq!(
+        n & (n - 1),
+        0,
+        "util::round_up_pow2: n was not a power of two"
+    );
+    (x + n - 1) & !(n - 1)
+}

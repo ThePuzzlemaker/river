@@ -84,6 +84,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     ///
     /// This function will panic if the address is not in the correct address
     /// space.
+    #[track_caller]
     pub fn from_ptr(ptr: Mut::RawPointer) -> Self {
         match Self::try_from_ptr(ptr) {
             Some(paddr) => paddr,
@@ -129,6 +130,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         ]
     }
 
+    #[track_caller]
     pub fn from_components(vpns: [Vpn; 3], pgoff: Option<PgOff>) -> Self {
         match Self::try_from_components(vpns, pgoff) {
             Some(vaddr) => vaddr,
@@ -184,6 +186,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    #[track_caller]
     pub fn into_phys(self) -> Physical<T, Map, Mut> {
         match self.try_into_phys() {
             Some(paddr) => paddr,
@@ -201,7 +204,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     }
 
     #[inline]
-    pub fn make_const(self) -> Virtual<T, Map, super::Mut> {
+    pub fn into_const(self) -> Virtual<T, Map, super::Const> {
         Virtual {
             addr: self.addr,
             _phantom: PhantomData,
@@ -209,11 +212,26 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     }
 
     #[inline]
-    pub fn make_mut(self) -> Virtual<T, Map, super::Const> {
+    pub fn into_mut(self) -> Virtual<T, Map, super::Mut> {
         Virtual {
             addr: self.addr,
             _phantom: PhantomData,
         }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    #[track_caller]
+    pub fn add(self, by: usize) -> Self {
+        match self.checked_add(by) {
+            Some(vaddr) => vaddr,
+            None => panic!("Virtual::add out of range: self={:#p}, by={:#x}", self, by),
+        }
+    }
+
+    pub fn checked_add(self, by: usize) -> Option<Self> {
+        let vaddr = self.into_usize();
+        let vaddr = vaddr.checked_add(by)?;
+        Self::try_from_usize(vaddr)
     }
 }
 

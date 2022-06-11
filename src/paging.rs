@@ -13,10 +13,29 @@ use crate::{
         DirectMapped, Identity, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual, VirtualConst,
         VirtualMut,
     },
-    asm,
-    phys::{PMAlloc, PhysicalPage},
+    asm::{self, get_satp},
+    kalloc::phys::PMAlloc,
+    once_cell::OnceCell,
+    spin::SpinMutex,
     units::StorageUnits,
 };
+
+static ROOT_PAGE_TABLE: OnceCell<SpinMutex<PageTable>> = OnceCell::new();
+
+/// Do not call before paging is enabled.
+#[track_caller]
+pub fn root_page_table() -> &'static SpinMutex<PageTable> {
+    assert!(enabled(), "paging::root_page_table: paging must be enabled");
+    ROOT_PAGE_TABLE.get_or_init(|| {
+        let satp = get_satp().decode();
+        let ppn = satp.ppn;
+        let paddr: PhysicalMut<_, DirectMapped> = PhysicalMut::from_components(ppn, None);
+        let vaddr = paddr.into_virt();
+        // SAFETY: The pointer is valid and we have an exclusive reference to it.
+        let pgtbl = unsafe { PageTable::from_raw(vaddr) };
+        SpinMutex::new(pgtbl)
+    })
+}
 
 #[derive(Debug)]
 pub struct PageTable {
@@ -57,6 +76,7 @@ impl PageTable {
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) }
     }
 
+    #[track_caller]
     pub fn map_gib(
         &mut self,
         from: PhysicalConst<u8, Identity>,
@@ -87,6 +107,7 @@ impl PageTable {
         });
     }
 
+    #[track_caller]
     pub fn map(
         &mut self,
         from: PhysicalConst<u8, Identity>,
@@ -270,15 +291,16 @@ bitflags! {
 pub struct PagingAllocator;
 
 unsafe impl Allocator for PagingAllocator {
+    #[track_caller]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         assert_eq!(
             layout.align(),
             4096,
-            "the paging allocator must allocate 4KiB blocks"
+            "PagingAllocator::allocate the paging allocator must allocate 4KiB blocks"
         );
 
-        let page = PMAlloc::get().allocate().ok_or(AllocError)?;
-        let page = page.into_physical().into_virt();
+        let page = PMAlloc::get().allocate(0).ok_or(AllocError)?;
+        let page = page.into_virt();
 
         // SAFETY: The pointer is valid for 4096 bytes
         Ok(unsafe {
@@ -289,18 +311,18 @@ unsafe impl Allocator for PagingAllocator {
         })
     }
 
+    #[track_caller]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         assert_eq!(
             layout.align(),
             4096,
-            "the paging allocator must allocate 4KiB blocks"
+            "PagingAllocator::allocate the paging allocator must allocate 4KiB blocks"
         );
 
-        let vaddr: VirtualMut<[u8; 4096], DirectMapped> = Virtual::from_ptr(ptr.as_ptr()).cast();
+        let vaddr: VirtualMut<u8, DirectMapped> = Virtual::from_ptr(ptr.as_ptr());
         let paddr = vaddr.into_phys();
-        let page = PhysicalPage::from_physical(paddr);
 
-        PMAlloc::get().deallocate(page)
+        PMAlloc::get().deallocate(paddr, 0)
     }
 }
 
@@ -328,8 +350,9 @@ impl RawSatp {
         Self(x)
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn decode(self) -> Satp {
-        assert_eq!(self.0 >> 60, 8, "invalid SATP mode");
+        debug_assert_eq!(self.0 >> 60, 8, "RawSatp::decode: invalid SATP mode");
         // TODO: asid newtype
         let asid = (self.0 >> 44) & 0xFFFF;
         Satp {
@@ -347,6 +370,7 @@ impl RawSatp {
     }
 }
 
+#[inline]
 pub fn enabled() -> bool {
     let satp = asm::get_satp();
     satp.mode() == 8

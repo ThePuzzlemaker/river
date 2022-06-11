@@ -31,6 +31,7 @@ use crate::asm::{self, hartid};
 /// These behaviours are not unsafe or unsound, but they may cause deadlocks,
 /// which are undesirable.
 // TODO: push_{off,on} similar to xv6
+#[derive(Debug)]
 pub struct SpinMutex<T> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
@@ -49,12 +50,13 @@ impl<T> SpinMutex<T> {
         }
     }
 
+    #[track_caller]
     pub fn lock(&'_ self) -> SpinMutexGuard<'_, T> {
         // Disable interrupts to prevent deadlocks.
         let prev_intena = asm::intr_off();
         let hartid = hartid();
         if self.held_by.get() == Some(hartid) {
-            panic!("deadlock");
+            panic!("SpinMutex::lock: deadlock detected");
         }
 
         // Try to set the locked flag to `true` if it was `false`.
