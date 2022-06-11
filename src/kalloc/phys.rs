@@ -166,7 +166,10 @@ impl PMAlloc {
         }
 
         let alloc_off = (chunk.into_usize() - self.base.into_usize()) / (4096 * (1 << order));
-        let ix = self.bitree.ix_of(alloc_off, order).unwrap();
+        let ix = self
+            .bitree
+            .ix_of(alloc_off, order)
+            .expect("PMAlloc::deallocate: could not find ix of chunk");
 
         // Deallocate this node
         if !self.bitree.set(ix, false) {
@@ -329,7 +332,10 @@ impl Bitree {
         };
         let flag = (val as usize) << bit;
         let old = *word_ref;
-        *word_ref = old | flag;
+        // clear bit
+        *word_ref &= !(1 << bit);
+        // set bit
+        *word_ref |= flag;
         old & (1 << bit) != 0
     }
 
@@ -366,7 +372,7 @@ impl Bitree {
         if ix == 0 {
             return None;
         }
-        let ix = ix ^ 1;
+        let ix = if ix % 2 == 0 { ix - 1 } else { ix + 1 };
         if ix > self.n_bits {
             return None;
         }
@@ -403,7 +409,7 @@ impl Bitree {
         if ix == usize::MAX || ix > self.n_bits {
             return None;
         }
-        Some((ix + 1).log2())
+        Some(self.max_order - (ix + 1).log2())
     }
 
     /// Get the number of nodes in the order'th level of the tree, bottom-up
