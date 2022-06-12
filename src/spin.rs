@@ -6,7 +6,10 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::asm::{self, hartid};
+use crate::{
+    asm::{self, hartid},
+    hart_local::{self, LOCAL_HART},
+};
 
 /// A Mutex backed by a spin-lock.
 ///
@@ -30,7 +33,6 @@ use crate::asm::{self, hartid};
 ///
 /// These behaviours are not unsafe or unsound, but they may cause deadlocks,
 /// which are undesirable.
-// TODO: push_{off,on} similar to xv6
 // TODO: SpinRwLock?
 #[derive(Debug)]
 pub struct SpinMutex<T> {
@@ -54,8 +56,17 @@ impl<T> SpinMutex<T> {
     #[track_caller]
     pub fn lock(&'_ self) -> SpinMutexGuard<'_, T> {
         // Disable interrupts to prevent deadlocks.
-        let prev_intena = asm::intr_off();
-        let hartid = hartid();
+        // Interrupts will always be disabled before TLS is enabled,
+        // as it's enabled very early (before paging, even).
+        let hartid = if hart_local::enabled() {
+            LOCAL_HART.with(|hart| {
+                let mut hart = hart.borrow_mut();
+                hart.push_off();
+                hart.hartid
+            })
+        } else {
+            hartid()
+        };
         if self.held_by.get() == Some(hartid) {
             panic!("SpinMutex::lock: deadlock detected");
         }
@@ -79,7 +90,6 @@ impl<T> SpinMutex<T> {
         self.held_by.set(Some(hartid));
 
         SpinMutexGuard {
-            prev_intena,
             mutex: self,
             _phantom: PhantomData,
         }
@@ -87,8 +97,6 @@ impl<T> SpinMutex<T> {
 }
 
 pub struct SpinMutexGuard<'a, T> {
-    // Were interrupts enabled previously?
-    prev_intena: bool,
     mutex: &'a SpinMutex<T>,
     _phantom: PhantomData<&'a mut T>,
 }
@@ -126,8 +134,10 @@ impl<'a, T> Drop for SpinMutexGuard<'a, T> {
         self.mutex.locked.store(false, Ordering::Release);
 
         // If interrupts were previously enabled, re-enable them.
-        if self.prev_intena {
-            asm::intr_on();
+        // Interrupts will always be disabled before TLS is enabled,
+        // as it's enabled very early (before paging, even).
+        if hart_local::enabled() {
+            LOCAL_HART.with(|hart| hart.borrow_mut().pop_off())
         }
     }
 }

@@ -1,9 +1,9 @@
 use core::arch::asm;
 
 use crate::{
-    addr::{self, DirectMapped, Mapping, VirtualMut},
-    paging::{self, RawSatp},
-    HART_ID,
+    addr::{DirectMapped, VirtualMut},
+    hart_local::{self, LOCAL_HART},
+    paging::RawSatp,
 };
 
 // TODO: proper bitflags-type thing
@@ -55,22 +55,6 @@ pub fn intr_on() -> bool {
     r != 0
 }
 
-pub fn with_interrupts<T>(f: impl FnOnce() -> T) -> T {
-    intr_on();
-    let r = f();
-    intr_off();
-    r
-}
-
-pub fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
-    let prev = intr_off();
-    let r = f();
-    if prev {
-        intr_on();
-    }
-    r
-}
-
 #[inline]
 pub fn tp() -> u64 {
     let x: u64;
@@ -96,9 +80,8 @@ pub unsafe fn set_tp(v: VirtualMut<u8, DirectMapped>) -> u64 {
 pub fn hartid() -> u64 {
     let tp = tp() as usize;
     // Before TLS is enabled, tp contains the hartid.
-    // After it is, it contains the pointer to the thread-local storage.
-    if paging::enabled() && addr::DirectMapped::vaddr_space().contains(&tp) {
-        HART_ID.with(|x| x.get())
+    if hart_local::enabled() {
+        LOCAL_HART.with(|hart| hart.borrow().hartid)
     } else {
         tp as u64
     }

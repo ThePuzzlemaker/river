@@ -33,15 +33,14 @@ extern "C" {
 use core::{
     alloc::{GlobalAlloc, Layout},
     arch::asm,
-    cell::Cell,
     fmt, hint,
     panic::PanicInfo,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use asm::hartid;
 use fdt::Fdt;
-use hart_local::HartLocal;
 
 static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
@@ -77,18 +76,12 @@ pub extern "C" fn trap() {
 #[global_allocator]
 static HEAP_ALLOCATOR: OomAlloc = OomAlloc;
 
-hart_local! {
-    pub static HART_ID: Cell<u64> = Cell::new(0);
-}
-
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
 pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     unsafe { asm!("csrw stvec, {}", in(reg) trap) }
-
-    let hart_id = unsafe { hart_local::init() };
-    HART_ID.with(|x| x.set(hart_id));
+    print("[info] initialized paging\n");
 
     // // Allocate a 64-MiB heap.
     // let heap_base: VirtualMut<u8, Identity> = VirtualMut::from_usize(0x0010_0000);
@@ -115,7 +108,14 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         Err(_e) => panic!("error loading fdt"),
     };
 
-    print("Hello, world from kmain!\n");
+    fmt::write(
+        &mut Serial,
+        format_args!(
+            "==== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!\n",
+            hartid()
+        ),
+    )
+    .expect("i/o");
     // panic!("{:#?}", asm::get_pagetable());
 
     loop {

@@ -21,11 +21,13 @@ use crate::{
         DirectMapped, Kernel, PhysicalConst, PhysicalMut, VirtualConst, ACTUAL_PHYSICAL_OFFSET,
         PHYSICAL_OFFSET,
     },
+    asm::{hartid, tp},
+    hart_local,
     kalloc::phys::PMAlloc,
     paging::{PageTable, PageTableFlags, Satp},
-    symbol,
+    print, symbol,
     units::StorageUnits,
-    util::round_up_pow2,
+    util::{print_u64, print_u64_hex, round_up_pow2},
     SERIAL,
 };
 
@@ -37,7 +39,10 @@ use crate::{
 pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let fdt: Fdt<'static> = match Fdt::from_ptr(fdt_ptr) {
         Ok(fdt) => fdt,
-        Err(_e) => panic!("error loading fdt"),
+        Err(_e) => {
+            sbi::hart_state_management::hart_stop().unwrap();
+            unreachable!()
+        }
     };
 
     let stdout = fdt.chosen().stdout().unwrap();
@@ -47,6 +52,9 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         serial_port_reg_base.starting_address as *mut u8,
         Ordering::Relaxed,
     );
+    print("[info] initialized serial device at 0x");
+    print_u64_hex(SERIAL.load(Ordering::Relaxed) as u64);
+    print("\n");
 
     let kernel_start = symbol::kernel_start().into_usize();
     let kernel_end = symbol::kernel_end().into_usize();
@@ -90,6 +98,10 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // at the start for its bitree.
     // TODO: make this better in the future?
     PMAlloc::init(PhysicalMut::from_ptr(pma_start), size);
+    hart_local::init();
+    print("[info] initialized hart-local storage for hart ");
+    print_u64(hartid());
+    print("\n");
 
     let mut root_pgtbl = PageTable::new();
 
@@ -164,10 +176,16 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let gp: usize;
     asm!("lla {}, __global_pointer$", out(reg) gp);
 
+    let tp = tp();
+
+    // Fixup sp, gp, and tp to be in the right address space
     let new_sp = PhysicalMut::<u8, Kernel>::from_usize(tmp_stack_end)
         .into_virt()
         .into_usize();
     let new_gp = PhysicalMut::<u8, Kernel>::from_usize(gp)
+        .into_virt()
+        .into_usize();
+    let new_tp = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
         .into_virt()
         .into_usize();
 
@@ -199,6 +217,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         # set up sp and gp
         mv sp, {new_sp}
         mv gp, {new_gp}
+        mv tp, {new_tp}
 
         csrc sstatus, {mxr}
 
@@ -211,6 +230,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         satp = in(reg) raw_satp.as_usize(),
         new_sp = in(reg) new_sp,
         new_gp = in(reg) new_gp,
+        new_tp = in(reg) new_tp,
         stvec = in(reg) kmain_virt.into_usize(),
 
         // `kmain` args
