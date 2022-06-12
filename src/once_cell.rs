@@ -39,5 +39,4 @@ impl<T: 'static> OnceCell<T> {
     }
 }
 
-unsafe impl<T: Send + Sync> Send for OnceCell<T> {}
-unsafe impl<T: Send + Sync> Sync for OnceCell<T> {}
+unsafe impl<T: Sync> Sync for OnceCell<T> {}

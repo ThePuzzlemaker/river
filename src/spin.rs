@@ -31,6 +31,7 @@ use crate::asm::{self, hartid};
 /// These behaviours are not unsafe or unsound, but they may cause deadlocks,
 /// which are undesirable.
 // TODO: push_{off,on} similar to xv6
+// TODO: SpinRwLock?
 #[derive(Debug)]
 pub struct SpinMutex<T> {
     locked: AtomicBool,

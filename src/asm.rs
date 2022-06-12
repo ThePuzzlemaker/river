@@ -1,6 +1,10 @@
 use core::arch::asm;
 
-use crate::paging::RawSatp;
+use crate::{
+    addr::{self, DirectMapped, Mapping, VirtualMut},
+    paging::{self, RawSatp},
+    HART_ID,
+};
 
 // TODO: proper bitflags-type thing
 /// Supervisor Interrupt Enable
@@ -68,11 +72,36 @@ pub fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
 }
 
 #[inline]
-pub fn hartid() -> u64 {
+pub fn tp() -> u64 {
     let x: u64;
     // SAFETY: We are just reading some data to a known valid variable.
     unsafe { asm!("mv {}, tp", out(reg) x, options(nostack)) }
     x
+}
+
+/// Set the thread pointer. Returns the old thread pointer.
+///
+/// # Safety
+///
+/// This function is only safe if the thread pointer has not been set
+/// elsewhere and is being set to a valid address.
+#[inline]
+pub unsafe fn set_tp(v: VirtualMut<u8, DirectMapped>) -> u64 {
+    let tp = tp();
+    asm!("mv tp, {}", in(reg) v.into_usize());
+    tp
+}
+
+// todo: move this elsewhere
+pub fn hartid() -> u64 {
+    let tp = tp() as usize;
+    // Before TLS is enabled, tp contains the hartid.
+    // After it is, it contains the pointer to the thread-local storage.
+    if paging::enabled() && addr::DirectMapped::vaddr_space().contains(&tp) {
+        HART_ID.with(|x| x.get())
+    } else {
+        tp as u64
+    }
 }
 
 #[inline]

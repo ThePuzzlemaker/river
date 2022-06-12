@@ -40,6 +40,8 @@ extern "C" {
     static __tmp_stack_top: Symbol;
     static __text_start: Symbol;
     static __text_end: Symbol;
+    static __tdata_start: Symbol;
+    static __tdata_end: Symbol;
 }
 
 impl_symbols![
@@ -53,4 +55,6 @@ impl_symbols![
     tmp_stack_top; __tmp_stack_top,
     text_start; __text_start,
     text_end; __text_end,
+    tdata_start; __tdata_start,
+    tdata_end; __tdata_end
 ];

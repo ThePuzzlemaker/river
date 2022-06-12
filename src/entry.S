@@ -40,7 +40,7 @@ done_clear_bss:
     lla sp, __tmp_stack_top
 
     # Put the hart id into the thread pointer.
-    # We do not have TLS so the thread pointer is unused otherwise.
+    # We do not have TLS yet so the thread pointer is unused otherwise.
     # It's saved/restored on context switches to/from usermode too.
     mv tp, a0
 

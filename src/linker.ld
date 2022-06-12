@@ -37,6 +37,11 @@ SECTIONS {
         . = ALIGN(4K);
         PROVIDE(__data_start = .);
         *(.data .data.* .rodata .rodata.*);
+        . = ALIGN(4K);
+        PROVIDE(__tdata_start = .);
+        *(.hart_local);
+        . = ALIGN(4K);
+        PROVIDE(__tdata_end = .);
     }
 
     . = ALIGN(8);
@@ -68,6 +73,7 @@ SECTIONS {
         . = ALIGN(4K);
         PROVIDE(__tmp_stack_top = .);
     }
+
 
     . = ALIGN(4K);
     PROVIDE(KERNEL_END = .);
