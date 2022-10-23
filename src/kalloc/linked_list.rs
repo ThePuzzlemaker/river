@@ -44,11 +44,13 @@
 
 use core::{
     alloc::{AllocError, Allocator, Layout},
+    cmp,
     mem::{self, MaybeUninit},
     ptr::{self, addr_of_mut, NonNull},
 };
 
 use alloc::slice;
+use fdt::node;
 
 use crate::{
     addr::{Identity, VirtualMut},
@@ -83,12 +85,34 @@ pub struct FreeNode {
 }
 
 fn calculate_needed_size(node_base: *mut u8, layout: Layout) -> (usize, usize) {
-    let n_bytes_padding = node_base.align_offset(layout.align());
+    // TODO: is this correct?
+    println_hacky!(
+        "calc: layout.size={:?} layout.align={:?}",
+        layout.size(),
+        layout.align()
+    );
+    let mut n_bytes_padding = node_base.align_offset(layout.align());
+    println_hacky!("calc: n_bytes_padding={:?}", n_bytes_padding);
+    // make sure this node is at least big enough to hold a freed node
+    let min_layout_size = cmp::max(layout.size(), MIN_NODE_SIZE);
+    println_hacky!("calc: min_layout_size={:?}", min_layout_size);
+    // calculate the amount of padding added from the above calculation, so that
+    // we don't need to add this padding twice for the bytes of padding
+    let extra_padding = min_layout_size - layout.size();
+    println_hacky!("calc: extra_padding={:?}", extra_padding);
+    if n_bytes_padding == 0 {
+        n_bytes_padding = Layout::new::<usize>()
+            .align_to(layout.align())
+            .unwrap()
+            .align();
+    }
+    println_hacky!("calc: n_bytes_padding={:?}", n_bytes_padding);
     // N.B. We don't need to round up the `Layout`'s size since we make
     // no assumptions about the alignment of blocks following this one
     // (as those allocations will just insert their own padding as
     // necessary, anyway!)
-    let needed_size = layout.size() + n_bytes_padding;
+    let needed_size = layout.size() + cmp::max(n_bytes_padding, extra_padding);
+    println_hacky!("calc: needed_size={:?}", needed_size);
     (needed_size, n_bytes_padding)
 }
 
@@ -154,8 +178,14 @@ impl LinkedListAllocInner {
             let node_size = size_tag & !(1 << 63);
             let node_base = current_node.cast::<u8>().add(mem::size_of::<usize>());
             let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
+            println_hacky!(
+                "free node loop: node_size={:?} needed_size={:?} n_bytes_padding={:?}",
+                node_size,
+                needed_size,
+                n_bytes_padding
+            );
             // This node is not for us. Move on!
-            if needed_size < node_size {
+            if node_size < needed_size {
                 current_node = unsafe { &*current_node }.next;
                 continue;
             }
@@ -170,6 +200,10 @@ impl LinkedListAllocInner {
     }
 }
 
+// FreeNode::next and FreeNode::prev (the size tag is universal, and not counted
+// in node sizes)
+const MIN_NODE_SIZE: usize = 2 * mem::size_of::<usize>();
+
 unsafe impl Allocator for LinkedListAlloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         println_hacky!("linked list alloc: allocate: layout={:?}", layout);
@@ -180,22 +214,23 @@ unsafe impl Allocator for LinkedListAlloc {
             FoundNode::New {
                 ptr,
                 needed_size,
-                mut n_bytes_padding,
+                n_bytes_padding,
                 new_unmanaged_ptr,
             } => unsafe {
                 ptr.cast::<usize>().write(needed_size);
-                if n_bytes_padding == 0 {
-                    // This is kind of inefficient but I think it's the best we
-                    // can do.
+                // if n_bytes_padding == 0 {
+                //     // This is kind of inefficient but I think it's the best we
+                //     // can do.
 
-                    // TODO: look into this
+                //     // TODO: look into this
 
-                    // N.B. if layout.align() == mem::size_of::<usize>(), having
-                    // 0 bytes of padding is still well-aligned, even with the
-                    // padding-size tag
-                    // TODO: is this right?
-                    n_bytes_padding = layout.align().saturating_sub(mem::size_of::<usize>());
-                }
+                //     // N.B. if layout.align() == mem::size_of::<usize>(), having
+                //     // 0 bytes of padding is still well-aligned, even with the
+                //     // padding-size tag
+                //     // TODO: is this right?
+                //     n_bytes_padding = layout.align().saturating_sub(2 * mem::size_of::<usize>());
+                // }
+
                 ptr.cast::<u8>()
                     .add(n_bytes_padding)
                     .cast::<usize>()
@@ -211,6 +246,12 @@ unsafe impl Allocator for LinkedListAlloc {
                 n_bytes_padding,
                 ..
             } => unsafe {
+                println_hacky!(
+                    "old node: ptr={:#p} needed_size={:?} n_bytes_padding={:?}",
+                    ptr,
+                    needed_size,
+                    n_bytes_padding
+                );
                 let mut node = &mut *ptr;
                 node.size_tag = needed_size;
                 // N.B. null prev == node is at head of free-list
@@ -224,6 +265,10 @@ unsafe impl Allocator for LinkedListAlloc {
                 if !node.next.is_null() {
                     (*node.next).prev = node.prev;
                 }
+                ptr.cast::<u8>()
+                    .add(n_bytes_padding)
+                    .cast::<usize>()
+                    .write(n_bytes_padding);
                 ptr.cast::<u8>()
                     .add(mem::size_of::<usize>())
                     .add(n_bytes_padding)
@@ -241,12 +286,70 @@ unsafe impl Allocator for LinkedListAlloc {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        let mut alloc = self.inner.lock();
         // SAFETY: This pointer is safe to use as it refers to data within the
         // same linked list allocator node (specifically, the node's metadata).
-        let padding_size_ptr = ptr.as_ptr().cast::<usize>().wrapping_sub(1);
+        let padding_size_ptr = ptr.as_ptr().cast::<usize>().sub(1);
         let padding_size = unsafe { *padding_size_ptr };
         // SAFETY: Same as above.
-        let size_tag_ptr = ptr.as_ptr().wrapping_sub(padding_size).cast::<usize>();
+        let node_ptr = ptr
+            .as_ptr()
+            .sub(padding_size)
+            .sub(mem::size_of::<usize>())
+            .cast::<FreeNode>();
+        println_hacky!("kalloc dealloc: ptr={:#p} node_ptr={:#p}", ptr, node_ptr);
+
+        let node_size = unsafe { node_ptr.cast::<usize>().read() };
+        if cfg!(debug_assertions) && node_size & (1 << 63) != 0 {
+            panic!("kalloc::linked_list: double free at {:#p}", ptr);
+        }
+        debug_assert!(
+            layout.size() <= node_size,
+            "kalloc::linked_list: attempted to free a node with a layout larger than the node"
+        );
+
+        let mut prev = alloc.free_list;
+        // if the free list is null, then we need to start the list here
+        if prev.is_null() {
+            alloc.free_list = node_ptr;
+            unsafe {
+                addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
+                addr_of_mut!((*node_ptr).prev).write(ptr::null_mut());
+                addr_of_mut!((*node_ptr).next).write(ptr::null_mut());
+            }
+            return;
+        }
+        let mut next;
+        loop {
+            next = unsafe { &*prev }.next;
+            // if next is null, we need to add this node to the end of the list.
+            if next.is_null() {
+                unsafe {
+                    (*prev).next = node_ptr;
+                    addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
+                    addr_of_mut!((*node_ptr).prev).write(prev);
+                    addr_of_mut!((*node_ptr).next).write(ptr::null_mut());
+                }
+                // todo: coalesce
+                return;
+            }
+
+            // if next > node_ptr, then we've found the right spot (because of our
+            // address-ordering invariant), so we ned to splice the block into
+            // the list here.
+            if next > node_ptr {
+                unsafe {
+                    (*prev).next = node_ptr;
+                    (*next).prev = node_ptr;
+                    addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
+                    addr_of_mut!((*node_ptr).prev).write(prev);
+                    addr_of_mut!((*node_ptr).next).write(next)
+                }
+            }
+
+            // haven't found our spot yet, continue.
+            prev = next;
+        }
         todo!();
     }
 }

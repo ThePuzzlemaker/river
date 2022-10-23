@@ -159,9 +159,19 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 PageTableFlags::VAD | PageTableFlags::READ | PageTableFlags::WRITE,
             );
         }
-        let v1 = Box::leak(Box::new_in(0xdeadbeefc0ded00d_u64, &kalloc));
-        let v2 = Box::leak(Box::new_in(0xc0ffee00_u32, &kalloc));
-        println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
+        unsafe {
+            let v1 = Box::into_raw(Box::new_in(0xdeadbeefc0ded00d_u64, &kalloc));
+            let v2 = Box::into_raw(Box::new_in(0xc0ffee00_u32, &kalloc));
+            println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
+            drop(Box::from_raw_in(v1, &kalloc));
+            drop(Box::from_raw_in(v2, &kalloc));
+            let v3 = Box::into_raw(Box::new_in(0xf00dd00d_u32, &kalloc));
+            let v4 = Box::into_raw(Box::new_in(
+                0x102030405060708090a0b0c0d0e0f0ff_u128,
+                &kalloc,
+            ));
+        }
+        println_hacky!("");
     };
     // let slab = Slab::new(Layout::new::<u64>());
     // println_hacky!("slab = {:#p}", slab.as_ptr());
