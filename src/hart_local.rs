@@ -39,6 +39,8 @@ pub struct UnsafeSendSync<T: 'static>(pub T);
 unsafe impl<T: 'static> Send for UnsafeSendSync<T> {}
 unsafe impl<T: 'static> Sync for UnsafeSendSync<T> {}
 
+// TODO: Non-'static HartLocal
+#[derive(Debug)]
 pub struct HartLocal<T: 'static> {
     offset_init: Cell<bool>,
     offset: Cell<usize>,

@@ -43,4 +43,8 @@ macro_rules! impl_storage_units {
     }
 }
 
+pub const KIB: usize = 1024;
+pub const MIB: usize = KIB * KIB;
+pub const GIB: usize = KIB * KIB * KIB;
+
 impl_storage_units![u16, u32, u64, usize, i16, i32, i64, isize];

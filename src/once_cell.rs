@@ -2,6 +2,9 @@ use core::cell::UnsafeCell;
 
 use crate::spin::SpinMutex;
 
+// TODO: i literally have access to nightly so why am i writing my own
+// primitives think it might be cause core's OnceCell is !Sync? i already have a
+// lock here so i might as well just do a SpinMutex<OnceCell<T>>?
 #[derive(Debug)]
 pub struct OnceCell<T: 'static> {
     lock: SpinMutex<()>,

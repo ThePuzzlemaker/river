@@ -282,9 +282,13 @@ bitflags! {
         const WRITE = 1 << 2;
         const EXECUTE = 1 << 3;
         const USER = 1 << 4;
+        const GLOBAL = 1 << 5;
+        const ACCESSED = 1 << 6;
+        const DIRTY = 1 << 7;
         const RW = Self::READ.bits | Self::WRITE.bits;
         const RX = Self::READ.bits | Self::EXECUTE.bits;
         const RWX = Self::READ.bits | Self::WRITE.bits | Self::EXECUTE.bits;
+        const VAD = Self::ACCESSED.bits | Self::DIRTY.bits | Self::VALID.bits;
     }
 }
 

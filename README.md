@@ -11,7 +11,7 @@ I have not provided a `build-release.sh` script as this is nowhere close to anyt
 The [`.gdbinit`](.gdbinit) provided on this repository works very well for pre-paging debugging.
 It requires [gef](https://github.com/hugsy/gef) to be installed at `~/.gdbinit-gef.py`.
 
-Use the wrapper script [`run-debug.sh`][run-debug.sh], as it will launch QEMU and connect GDB to it.
+Use the wrapper script [`run-debug.sh`](run-debug.sh), as it will launch QEMU and connect GDB to it.
 
 Here's a quick rundown of some of my custom commands, only for debugging pre-paging code (after that, you can use typical commands--and even have the luxury of stack frames and panics):
 - `addrof <symbol>` gives the physical kernel address of the symbol provided

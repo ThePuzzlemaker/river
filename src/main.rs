@@ -6,7 +6,9 @@
     panic_info_message,
     maybe_uninit_slice,
     int_log,
-    int_roundings
+    int_roundings,
+    ptr_as_uninit,
+    once_cell
 )]
 #![no_std]
 #![no_main]
@@ -34,13 +36,27 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     arch::asm,
     fmt, hint,
+    mem::ManuallyDrop,
     panic::PanicInfo,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use addr::{Physical, Virtual};
+use alloc::boxed::Box;
 use asm::hartid;
 use fdt::Fdt;
+use paging::{root_page_table, PageTableFlags};
+
+use crate::{
+    kalloc::{
+        linked_list::{FreeNode, LinkedListAlloc, LinkedListAllocInner, KHEAP_VMEM_OFFSET},
+        phys::PMAlloc,
+    },
+    spin::SpinMutex,
+    units::StorageUnits,
+};
+// use kalloc::slab::Slab;
 
 static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
@@ -76,6 +92,14 @@ pub extern "C" fn trap() {
 #[global_allocator]
 static HEAP_ALLOCATOR: OomAlloc = OomAlloc;
 
+#[macro_export]
+macro_rules! println_hacky {
+    ($fmt:literal$(, $($tt:tt)*)?) => {{
+        ::core::fmt::write(&mut $crate::Serial, ::core::format_args!($fmt$(, $($tt)*)?)).expect("i/o");
+        $crate::print("\n");
+    }}
+}
+
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
@@ -98,8 +122,55 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     //             .cast()
     //             .into_const(),
     //         heap_base.add(offset).into_const(),
-    //         PageTableFlags::RW | PageTableFlags::VALID,
+    //         PageTableFlags::RW | PageTableFlags::VAD,
     //     );
+    // }
+
+    {
+        let mut pgtbl = root_page_table().lock();
+        for offset in 0..64 {
+            // This mapping is invalid, so the physical addr is irrelevant.
+            pgtbl.map_gib(
+                Physical::from_usize(0),
+                Virtual::from_usize(KHEAP_VMEM_OFFSET + offset.gib()),
+                PageTableFlags::empty(),
+            );
+        }
+    }
+    println_hacky!("mapped 64GiB of virtual heap");
+    unsafe {
+        let kalloc = LinkedListAlloc {
+            inner: SpinMutex::new(LinkedListAllocInner {
+                init: true,
+                mapped_size: 4.kib(),
+                unmanaged_ptr: KHEAP_VMEM_OFFSET as *mut u8,
+                free_list: ptr::null_mut(),
+            }),
+        };
+        let page = {
+            let mut pma = PMAlloc::get();
+            pma.allocate(0).expect("oom")
+        };
+        {
+            let mut pgtbl = root_page_table().lock();
+            pgtbl.map(
+                page.into_identity().into_const(),
+                Virtual::from_usize(KHEAP_VMEM_OFFSET),
+                PageTableFlags::VAD | PageTableFlags::READ | PageTableFlags::WRITE,
+            );
+        }
+        let v1 = Box::leak(Box::new_in(0xdeadbeefc0ded00d_u64, &kalloc));
+        let v2 = Box::leak(Box::new_in(0xc0ffee00_u32, &kalloc));
+        println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
+    };
+    // let slab = Slab::new(Layout::new::<u64>());
+    // println_hacky!("slab = {:#p}", slab.as_ptr());
+    // let val = unsafe { &*slab.as_ptr() };
+    // println_hacky!("val = {:?}", val);
+    // let mut loop_next = val.free_list;
+    // while let Some(next) = loop_next {
+    //     println_hacky!("ptr = {:#p}", next);
+    //     loop_next = unsafe { &*next.as_ptr() }.next;
     // }
 
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
@@ -111,7 +182,7 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     fmt::write(
         &mut Serial,
         format_args!(
-            "==== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!\n",
+            "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!\n",
             hartid()
         ),
     )

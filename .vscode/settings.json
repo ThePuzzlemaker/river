@@ -1,0 +1,7 @@
+{
+    "rust-analyzer.checkOnSave.extraArgs": [
+        "-Zbuild-std=core,alloc,compiler_builtins",
+        "-Zbuild-std-features=compiler-builtins-mem"
+    ],
+    "rust-analyzer.checkOnSave.allTargets": false,
+}

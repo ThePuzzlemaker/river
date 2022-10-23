@@ -6,10 +6,15 @@ use crate::{
     util,
 };
 
+// TODO: perhaps find a way to more efficiently fill the available physical
+// memory? could probably set pages out-of-range as filled, unfill the rest, and
+// have an `end` ptr as well as the existing `base` (or just check against
+// `size`)
+
 /// Find the best order for a given size chunk.
 #[inline(always)]
 pub const fn what_order(size: usize) -> u32 {
-    (size.next_multiple_of(4096).next_power_of_two() / 4096).log2()
+    (size.next_multiple_of(4096).next_power_of_two() / 4096).ilog2()
 }
 
 /// We currently only support up to 64GiB of physical memory.
@@ -205,7 +210,7 @@ unsafe impl Sync for PMAlloc {}
 
 #[inline(always)]
 const fn calc_max_order(size: usize) -> u32 {
-    (size / 4096).log2() as u32
+    (size / 4096).ilog2() as u32
 }
 
 #[inline(always)]
@@ -409,7 +414,7 @@ impl Bitree {
         if ix == usize::MAX || ix > self.n_bits {
             return None;
         }
-        Some(self.max_order - (ix + 1).log2())
+        Some(self.max_order - (ix + 1).ilog2())
     }
 
     /// Get the number of nodes in the order'th level of the tree, bottom-up

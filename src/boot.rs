@@ -113,7 +113,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         root_pgtbl.map(
             addr.into_identity(),
             addr.into_virt().into_identity(),
-            PageTableFlags::RW | PageTableFlags::VALID,
+            PageTableFlags::RW | PageTableFlags::VAD,
         )
     }
 
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         root_pgtbl.map(
             addr.into_identity(),
             addr.into_virt().into_identity(),
-            PageTableFlags::RW | PageTableFlags::VALID,
+            PageTableFlags::RW | PageTableFlags::VAD,
         )
     }
 
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         root_pgtbl.map(
             addr.into_identity(),
             addr.into_virt().into_identity(),
-            PageTableFlags::RW | PageTableFlags::VALID,
+            PageTableFlags::RW | PageTableFlags::VAD,
         )
     }
 
@@ -149,7 +149,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         root_pgtbl.map(
             addr.into_identity(),
             addr.into_virt().into_identity(),
-            PageTableFlags::READ | PageTableFlags::EXECUTE | PageTableFlags::VALID,
+            PageTableFlags::READ | PageTableFlags::EXECUTE | PageTableFlags::VAD,
         )
     }
 
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         root_pgtbl.map_gib(
             PhysicalConst::from_usize(addr * 1.gib()),
             VirtualConst::from_usize(ACTUAL_PHYSICAL_OFFSET + addr * 1.gib()),
-            PageTableFlags::RW | PageTableFlags::VALID,
+            PageTableFlags::RW | PageTableFlags::VAD,
         );
     }
 
