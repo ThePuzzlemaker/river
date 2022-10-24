@@ -8,7 +8,9 @@
     int_log,
     int_roundings,
     ptr_as_uninit,
-    once_cell
+    once_cell,
+    core_intrinsics,
+    slice_ptr_get
 )]
 #![no_std]
 #![no_main]
@@ -36,7 +38,6 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     arch::asm,
     fmt, hint,
-    mem::ManuallyDrop,
     panic::PanicInfo,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
@@ -48,14 +49,7 @@ use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 
-use crate::{
-    kalloc::{
-        linked_list::{FreeNode, LinkedListAlloc, LinkedListAllocInner, KHEAP_VMEM_OFFSET},
-        phys::PMAlloc,
-    },
-    spin::SpinMutex,
-    units::StorageUnits,
-};
+use crate::{kalloc::linked_list::LinkedListAlloc, units::StorageUnits};
 // use kalloc::slab::Slab;
 
 static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
@@ -90,7 +84,7 @@ pub extern "C" fn trap() {
 }
 
 #[global_allocator]
-static HEAP_ALLOCATOR: OomAlloc = OomAlloc;
+static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
 
 #[macro_export]
 macro_rules! println_hacky {
@@ -99,6 +93,10 @@ macro_rules! println_hacky {
         $crate::print("\n");
     }}
 }
+
+// It's unlikely the kernel itself is 64GiB in size, so we use this space.
+pub const KHEAP_VMEM_OFFSET: usize = 0xFFFFFFE000000000;
+pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -138,41 +136,40 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         }
     }
     println_hacky!("mapped 64GiB of virtual heap");
+    unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
+
+    // let page = {
+    //     let mut pma = PMAlloc::get();
+    //     pma.allocate(0).expect("oom")
+    // };
+    // {
+    //     let mut pgtbl = root_page_table().lock();
+    //     pgtbl.map(
+    //         page.into_identity().into_const(),
+    //         Virtual::from_usize(KHEAP_VMEM_OFFSET),
+    //         PageTableFlags::VAD | PageTableFlags::READ | PageTableFlags::WRITE,
+    //     );
+    // }
     unsafe {
-        let kalloc = LinkedListAlloc {
-            inner: SpinMutex::new(LinkedListAllocInner {
-                init: true,
-                mapped_size: 4.kib(),
-                unmanaged_ptr: KHEAP_VMEM_OFFSET as *mut u8,
-                free_list: ptr::null_mut(),
-            }),
-        };
-        let page = {
-            let mut pma = PMAlloc::get();
-            pma.allocate(0).expect("oom")
-        };
-        {
-            let mut pgtbl = root_page_table().lock();
-            pgtbl.map(
-                page.into_identity().into_const(),
-                Virtual::from_usize(KHEAP_VMEM_OFFSET),
-                PageTableFlags::VAD | PageTableFlags::READ | PageTableFlags::WRITE,
-            );
+        let mut v1 = Box::<[u64], _>::new_uninit_slice(4096);
+        for i in 0..4096 {
+            v1[i].as_mut_ptr().write(i as u64);
         }
-        unsafe {
-            let v1 = Box::into_raw(Box::new_in(0xdeadbeefc0ded00d_u64, &kalloc));
-            let v2 = Box::into_raw(Box::new_in(0xc0ffee00_u32, &kalloc));
-            println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
-            drop(Box::from_raw_in(v1, &kalloc));
-            drop(Box::from_raw_in(v2, &kalloc));
-            let v3 = Box::into_raw(Box::new_in(0xf00dd00d_u32, &kalloc));
-            let v4 = Box::into_raw(Box::new_in(
-                0x102030405060708090a0b0c0d0e0f0ff_u128,
-                &kalloc,
-            ));
-        }
-        println_hacky!("");
-    };
+        let v1 = v1.assume_init();
+        println_hacky!("{:?}", v1);
+        // let v1 = Box::into_raw(Box::new_in(0xdeadbeefc0ded00d_u64, &kalloc));
+        // let v2 = Box::into_raw(Box::new_in(0xc0ffee00_u32, &kalloc));
+        // println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
+        // drop(Box::from_raw_in(v1, &kalloc));
+        // drop(Box::from_raw_in(v2, &kalloc));
+        // let v3 = Box::into_raw(Box::new_in(0xf00dd00d_u32, &kalloc));
+        // let v4 = Box::into_raw(Box::new_in(
+        //     0x102030405060708090a0b0c0d0e0f0ff_u128,
+        //     &kalloc,
+        // ));
+        // println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
+    }
+
     // let slab = Slab::new(Layout::new::<u64>());
     // println_hacky!("slab = {:#p}", slab.as_ptr());
     // let val = unsafe { &*slab.as_ptr() };

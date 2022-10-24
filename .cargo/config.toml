@@ -1,6 +1,6 @@
 [build]
 target = "riscv64gc-unknown-none-elf"
-rustflags = ["-C", "code-model=medium"]
+rustflags = ["-C", "code-model=medium", "-C", "panic=abort"]
 
 # not sure if this ever worked.
 # [unstable]

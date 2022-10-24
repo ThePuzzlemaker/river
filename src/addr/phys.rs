@@ -11,6 +11,11 @@ pub struct Physical<T, Map: Mapping, Mut: Mutability<T>> {
 }
 
 impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
+    pub const NULL: Self = Self {
+        addr: 0,
+        _phantom: PhantomData,
+    };
+
     /// Create a [`Physical`] address from a [`usize`].
     ///
     /// # Panics

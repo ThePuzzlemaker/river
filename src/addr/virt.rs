@@ -41,6 +41,11 @@ pub struct Virtual<T, Map: Mapping, Mut: Mutability<T>> {
 }
 
 impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
+    pub const NULL: Self = Self {
+        addr: 0,
+        _phantom: PhantomData,
+    };
+
     /// Create a [`Virtual`] address from a [`usize`].
     ///
     /// # Panics
@@ -158,7 +163,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     }
 
     #[inline]
-    pub fn into_ptr_mut(self) -> *mut T {
+    pub const fn into_ptr_mut(self) -> *mut T {
         self.addr as *mut _
     }
 
