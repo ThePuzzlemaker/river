@@ -9,14 +9,15 @@ fn main() {
         // for my IDE. change this as needed.
         std::env::set_var("CROSS_COMPILE", "riscv64-elf");
     }
-    cc::Build::new()
-        .flag("-mcmodel=medany")
-        .flag("-mabi=lp64d")
-        .flag("-march=rv64gc")
-        .flag("-fno-stack-protector")
-        .flag("-ffreestanding")
-        .warnings(true)
-        .warnings_into_errors(true)
-        .file("src/entry.S")
-        .compile("riverentry");
+    // cc::Build::new()
+    //     .flag("-mcmodel=medany")
+    //     .flag("-mabi=lp64d")
+    //     .flag("-march=rv64gc")
+    //     .flag("-fno-stack-protector")
+    //     .flag("-ffreestanding")
+    //     .warnings(true)
+    //     .warnings_into_errors(true)
+    //     .file("src/entry.S")
+    //     .file("src/trap.S")
+    //     .compile("riverasm");
 }

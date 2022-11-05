@@ -9,23 +9,20 @@ use crate::{
 // TODO: proper bitflags-type thing
 /// Supervisor Interrupt Enable
 pub const SSTATUS_SIE: u64 = 1 << 1;
+pub const SSTATUS_SPP: u64 = 1 << 8;
 
 #[inline]
 pub fn read_sstatus() -> u64 {
     let mut x: u64;
     // SAFETY: We're just reading some data.
-    unsafe {
-        asm!("csrr {}, sstatus", out(reg) x, options(nostack));
-    }
+    unsafe { asm!("csrr {}, sstatus", out(reg) x, options(nostack)) }
     x
 }
 
 #[inline]
 pub fn write_sstatus(x: u64) {
     // SAFETY: Writes to CSRs are atomic.
-    unsafe {
-        asm!("csrw sstatus, {}", in(reg) x, options(nostack));
-    }
+    unsafe { asm!("csrw sstatus, {}", in(reg) x, options(nostack)) }
 }
 
 #[inline]
@@ -38,9 +35,7 @@ pub fn intr_enabled() -> bool {
 pub fn intr_off() -> bool {
     let r: u8;
     // SAFETY: Writes to CSRs are atomic.
-    unsafe {
-        asm!("csrrc {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack));
-    }
+    unsafe { asm!("csrrc {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack)) }
     r != 0
 }
 
@@ -49,9 +44,7 @@ pub fn intr_off() -> bool {
 pub fn intr_on() -> bool {
     let r: u8;
     // SAFETY: Writes to CSRs are atomic.
-    unsafe {
-        asm!("csrrs {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack));
-    }
+    unsafe { asm!("csrrs {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack)) }
     r != 0
 }
 
@@ -90,6 +83,74 @@ pub fn hartid() -> u64 {
 #[inline]
 pub fn get_satp() -> RawSatp {
     let satp: u64;
-    unsafe { asm!("csrr {}, satp", out(reg) satp) };
+    unsafe { asm!("csrr {}, satp", out(reg) satp, options(nostack)) }
     RawSatp::new_unchecked(satp)
 }
+
+#[inline]
+pub fn software_intr_on() -> bool {
+    let r: u8;
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrrs {}, sie, {}", out(reg) r, in(reg) SIE_SSIE, options(nostack)) }
+    r != 0
+}
+
+#[inline]
+pub fn software_intr_off() -> bool {
+    let r: u8;
+    // SAFETY: Writes to CSRs are atomic
+    unsafe { asm!("csrrc {}, sie, {}", out(reg) r, in(reg) SIE_SSIE, options(nostack)) }
+    r != 0
+}
+
+#[inline]
+pub fn external_intr_on() -> bool {
+    let r: u8;
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrrs {}, sie, {}", out(reg) r, in(reg) SIE_SEIE, options(nostack)) }
+    r != 0
+}
+
+#[inline]
+pub fn external_intr_off() -> bool {
+    let r: u8;
+    // SAFETY: Writes to CSRs are atomic
+    unsafe { asm!("csrrc {}, sie, {}", out(reg) r, in(reg) SIE_SEIE, options(nostack)) }
+    r != 0
+}
+
+const SIE_SSIE: usize = 1 << 1;
+const SIE_SEIE: usize = 1 << 9;
+
+#[inline]
+pub fn read_sepc() -> u64 {
+    let r: u64;
+    unsafe { asm!("csrr {}, sepc", out(reg) r, options(nostack)) }
+    r
+}
+
+#[inline]
+pub fn read_scause() -> u64 {
+    let r: u64;
+    unsafe { asm!("csrr {}, scause", out(reg) r, options(nostack)) }
+    r
+}
+
+#[inline]
+pub fn write_sepc(sepc: u64) {
+    unsafe { asm!("csrw sepc, {}", in(reg) sepc, options(nostack)) }
+}
+
+#[inline]
+pub fn read_stval() -> u64 {
+    let r: u64;
+    unsafe { asm!("csrr {}, stval", out(reg) r, options(nostack)) }
+    r
+}
+
+#[inline]
+pub fn write_stval(stval: u64) {
+    unsafe { asm!("csrw stval, {}", in(reg) stval, options(nostack)) }
+}
+
+pub const SCAUSE_INTR_BIT: u64 = 1 << 63;

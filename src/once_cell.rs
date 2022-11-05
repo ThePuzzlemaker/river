@@ -40,6 +40,11 @@ impl<T: 'static> OnceCell<T> {
             unsafe { data.as_ref().unwrap_unchecked() }
         }
     }
+
+    #[track_caller]
+    pub fn expect(&'static self, message: &str) -> &'static T {
+        self.get_or_init(|| panic!("OnceCell::expect: {}", message))
+    }
 }
 
 unsafe impl<T: Sync> Sync for OnceCell<T> {}

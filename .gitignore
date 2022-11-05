@@ -1,1 +1,3 @@
+*.dts
+*.dtb
 /target

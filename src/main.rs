@@ -24,8 +24,11 @@ pub mod hart_local;
 pub mod kalloc;
 pub mod once_cell;
 pub mod paging;
+pub mod plic;
 pub mod spin;
 pub mod symbol;
+pub mod trap;
+pub mod uart;
 pub mod units;
 pub mod util;
 
@@ -49,7 +52,15 @@ use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 
-use crate::{kalloc::linked_list::LinkedListAlloc, units::StorageUnits};
+use crate::{
+    addr::{DirectMapped, PhysicalMut, KERNEL_PHYS_OFFSET},
+    hart_local::LOCAL_HART,
+    kalloc::linked_list::LinkedListAlloc,
+    plic::PLIC,
+    trap::{Irqs, IRQS},
+    uart::UART,
+    units::StorageUnits,
+};
 // use kalloc::slab::Slab;
 
 static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
@@ -64,10 +75,10 @@ static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 pub fn print(s: &str) {
     let serial = get_serial();
     for b in s.as_bytes() {
-        while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
+        while (unsafe { serial.add(5).read_volatile() } & (1 << 5)) == 0 {
             hint::spin_loop();
         }
-        unsafe { ptr::write_volatile(serial, *b) };
+        unsafe { serial.write_volatile(*b) };
     }
 }
 
@@ -75,13 +86,13 @@ fn get_serial() -> *mut u8 {
     SERIAL.load(Ordering::Relaxed)
 }
 
-#[no_mangle]
-#[link_section = ".init.trapvec"]
-pub extern "C" fn trap() {
-    loop {
-        nop()
-    }
-}
+// #[no_mangle]
+// #[link_section = ".init.trapvec"]
+// pub extern "C" fn trap() {
+//     loop {
+//         nop()
+//     }
+// }
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
@@ -102,7 +113,6 @@ pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
 pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
-    unsafe { asm!("csrw stvec, {}", in(reg) trap) }
     print("[info] initialized paging\n");
 
     // // Allocate a 64-MiB heap.
@@ -138,53 +148,38 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     println_hacky!("mapped 64GiB of virtual heap");
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
 
-    // let page = {
-    //     let mut pma = PMAlloc::get();
-    //     pma.allocate(0).expect("oom")
-    // };
-    // {
-    //     let mut pgtbl = root_page_table().lock();
-    //     pgtbl.map(
-    //         page.into_identity().into_const(),
-    //         Virtual::from_usize(KHEAP_VMEM_OFFSET),
-    //         PageTableFlags::VAD | PageTableFlags::READ | PageTableFlags::WRITE,
-    //     );
-    // }
-    unsafe {
-        let mut v1 = Box::<[u64], _>::new_uninit_slice(4096);
-        for i in 0..4096 {
-            v1[i].as_mut_ptr().write(i as u64);
-        }
-        let v1 = v1.assume_init();
-        println_hacky!("{:?}", v1);
-        // let v1 = Box::into_raw(Box::new_in(0xdeadbeefc0ded00d_u64, &kalloc));
-        // let v2 = Box::into_raw(Box::new_in(0xc0ffee00_u32, &kalloc));
-        // println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
-        // drop(Box::from_raw_in(v1, &kalloc));
-        // drop(Box::from_raw_in(v2, &kalloc));
-        // let v3 = Box::into_raw(Box::new_in(0xf00dd00d_u32, &kalloc));
-        // let v4 = Box::into_raw(Box::new_in(
-        //     0x102030405060708090a0b0c0d0e0f0ff_u128,
-        //     &kalloc,
-        // ));
-        // println_hacky!("v1@{:#p}={:#x}, v2@{:#p}={:#x}", v1, *v1, v2, *v2);
-    }
-
-    // let slab = Slab::new(Layout::new::<u64>());
-    // println_hacky!("slab = {:#p}", slab.as_ptr());
-    // let val = unsafe { &*slab.as_ptr() };
-    // println_hacky!("val = {:?}", val);
-    // let mut loop_next = val.free_list;
-    // while let Some(next) = loop_next {
-    //     println_hacky!("ptr = {:#p}", next);
-    //     loop_next = unsafe { &*next.as_ptr() }.next;
-    // }
-
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
-    let _fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
+    let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
         Err(_e) => panic!("error loading fdt"),
     };
+    println_hacky!("fdt @ {:#p} -> {:#p}", fdt_ptr, unsafe {
+        fdt_ptr.add(fdt.total_size())
+    });
+
+    let plic = fdt
+        .find_compatible(&["riscv,plic0"])
+        .expect("Could not find a compatible PLIC");
+    let plic_base_phys = PhysicalMut::<u8, DirectMapped>::from_ptr(
+        plic.reg().unwrap().next().unwrap().starting_address as *mut _,
+    );
+    let plic_base = plic_base_phys.into_virt();
+    unsafe { PLIC.init(plic_base.into_ptr_mut()) }
+    let uart = fdt.chosen().stdout().unwrap();
+    let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
+    unsafe { PLIC.set_priority(uart_irq, 1) }
+    unsafe { PLIC.hart_senable(uart_irq) }
+    unsafe { PLIC.hart_set_spriority(0) }
+    unsafe { asm!("csrw stvec, {}", in(reg) trap::kernel_trapvec) }
+
+    unsafe { UART.lock().init(get_serial()) }
+    IRQS.get_or_init(|| Irqs { uart: uart_irq });
+
+    asm::software_intr_on();
+    asm::external_intr_on();
+
+    // Now that the PLIC is set up, it's fine to interrupt.
+    asm::intr_on();
 
     fmt::write(
         &mut Serial,
