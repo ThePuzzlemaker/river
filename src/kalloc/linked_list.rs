@@ -170,7 +170,7 @@ impl LinkedListAllocInner {
                 let new_node = self.unmanaged_ptr;
                 // println_hacky!("find_first_fit: new_node/unmanaged_ptr={:#p}", new_node);
 
-                let node_base = new_node.add(mem::size_of::<usize>());
+                let node_base = unsafe { new_node.add(mem::size_of::<usize>()) };
                 // println_hacky!("find_first_fit: new_node node_base={:#p}", node_base);
                 let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
                 // println_hacky!(
@@ -182,7 +182,7 @@ impl LinkedListAllocInner {
                     (self.base.into_usize() + self.mapped_size).saturating_sub(node_base as usize);
                 // println_hacky!("available_space={:#x}", available_space);
                 let grow_heap = available_space < needed_size;
-                let new_unmanaged_ptr = node_base.add(needed_size);
+                let new_unmanaged_ptr = unsafe { node_base.add(needed_size) };
                 // println_hacky!("find_first_fit: new_unmanaged_ptr={:#p}", new_unmanaged_ptr);
                 return FoundNode::New {
                     ptr: new_node.cast(),
@@ -203,7 +203,7 @@ impl LinkedListAllocInner {
             );
             // N.B. doesn't include this size tag
             let node_size = size_tag & !(1 << 63);
-            let node_base = current_node.cast::<u8>().add(mem::size_of::<usize>());
+            let node_base = unsafe { current_node.cast::<u8>().add(mem::size_of::<usize>()) };
             let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
             // println_hacky!(
             //     "free node loop: node_size={:?} needed_size={:?} n_bytes_padding={:?}",
@@ -243,7 +243,7 @@ unsafe impl GlobalAlloc for LinkedListAlloc {
 
     #[track_caller]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.deallocate(NonNull::new_unchecked(ptr), layout)
+        unsafe { self.deallocate(NonNull::new_unchecked(ptr), layout) }
     }
 }
 
@@ -372,14 +372,15 @@ unsafe impl Allocator for LinkedListAlloc {
         );
         // SAFETY: This pointer is safe to use as it refers to data within the
         // same linked list allocator node (specifically, the node's metadata).
-        let padding_size_ptr = ptr.as_ptr().cast::<usize>().sub(1);
+        let padding_size_ptr = unsafe { ptr.as_ptr().cast::<usize>().sub(1) };
         let padding_size = unsafe { *padding_size_ptr };
         // SAFETY: Same as above.
-        let node_ptr = ptr
-            .as_ptr()
-            .sub(padding_size)
-            .sub(mem::size_of::<usize>())
-            .cast::<FreeNode>();
+        let node_ptr = unsafe {
+            ptr.as_ptr()
+                .sub(padding_size)
+                .sub(mem::size_of::<usize>())
+                .cast::<FreeNode>()
+        };
         // println_hacky!("kalloc dealloc: ptr={:#p} node_ptr={:#p}", ptr, node_ptr);
 
         let node_size = unsafe { node_ptr.cast::<usize>().read() };

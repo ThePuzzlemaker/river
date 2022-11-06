@@ -50,16 +50,16 @@ impl Ns16650Inner {
         self.init = true;
 
         // Disable interrupts
-        self.write_ier(IERFlags::empty().bits);
+        unsafe { self.write_ier(IERFlags::empty().bits) };
 
         // Baud rate = 38.4K, msb=0 lsb=3
-        self.set_clock_divisor(0x00, 0x03);
+        unsafe { self.set_clock_divisor(0x00, 0x03) };
 
         // Reset and enable FIFOs.
-        self.write_fcr(FCRFlags::FIFO_ENABLE.bits | FCRFlags::RESET_ALL_FIFOS.bits);
+        unsafe { self.write_fcr(FCRFlags::FIFO_ENABLE.bits | FCRFlags::RESET_ALL_FIFOS.bits) };
 
         // Enable IRQs. (Don't enable RX yet, since I haven't implemented it :P)
-        self.write_ier(IERFlags::TX_IRQ_ENABLE.bits);
+        unsafe { self.write_ier(IERFlags::TX_IRQ_ENABLE.bits) };
     }
 
     pub unsafe fn update_serial_base(&mut self, serial_base: *mut u8) {
@@ -67,37 +67,37 @@ impl Ns16650Inner {
     }
 
     unsafe fn set_clock_divisor(&mut self, msb: u8, lsb: u8) {
-        let lcr = self.read_lcr();
-        self.write_lcr(lcr | LCRFlags::DIVISOR_LATCH_ENABLE.bits);
+        let lcr = unsafe { self.read_lcr() };
+        unsafe { self.write_lcr(lcr | LCRFlags::DIVISOR_LATCH_ENABLE.bits) };
 
-        self.serial_base.add(DIVISOR_LATCH_LSB).write_volatile(lsb);
-        self.serial_base.add(DIVISOR_LATCH_MSB).write_volatile(msb);
+        unsafe { self.serial_base.add(DIVISOR_LATCH_LSB).write_volatile(lsb) }
+        unsafe { self.serial_base.add(DIVISOR_LATCH_MSB).write_volatile(msb) }
 
-        self.write_lcr(lcr);
+        unsafe { self.write_lcr(lcr) }
     }
 
     unsafe fn read_lcr(&self) -> u8 {
-        self.serial_base.add(LCR).read_volatile()
+        unsafe { self.serial_base.add(LCR).read_volatile() }
     }
 
     unsafe fn write_lcr(&mut self, data: u8) {
-        self.serial_base.add(LCR).write_volatile(data);
+        unsafe { self.serial_base.add(LCR).write_volatile(data) }
     }
 
     unsafe fn write_ier(&mut self, data: u8) {
-        self.serial_base.add(IER).write_volatile(data);
+        unsafe { self.serial_base.add(IER).write_volatile(data) }
     }
 
     unsafe fn write_fcr(&mut self, data: u8) {
-        self.serial_base.add(FCR).write_volatile(data);
+        unsafe { self.serial_base.add(FCR).write_volatile(data) }
     }
 
     unsafe fn read_lsr(&mut self) -> u8 {
-        self.serial_base.add(LSR).read_volatile()
+        unsafe { self.serial_base.add(LSR).read_volatile() }
     }
 
     unsafe fn write_thr(&mut self, data: u8) {
-        self.serial_base.add(THR).write_volatile(data);
+        unsafe { self.serial_base.add(THR).write_volatile(data) }
     }
 
     pub fn putc_sync(&mut self, char: u8) {
@@ -109,7 +109,7 @@ impl Ns16650Inner {
     }
 
     unsafe fn read_rhr(&mut self) -> u8 {
-        self.serial_base.add(RHR).read_volatile()
+        unsafe { self.serial_base.add(RHR).read_volatile() }
     }
 
     pub fn getc_sync(&mut self) -> Option<u8> {

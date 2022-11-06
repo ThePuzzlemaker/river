@@ -84,7 +84,7 @@ impl PMAlloc {
         let bitree_n_pages = calc_bitree_pages(pma.max_order);
         pma.size = size;
         for page_idx in 0..bitree_n_pages {
-            pma.mark_used(base.cast().add(4096 * page_idx), 0);
+            unsafe { pma.mark_used(base.cast().add(4096 * page_idx), 0) };
         }
     }
 

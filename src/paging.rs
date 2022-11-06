@@ -63,7 +63,7 @@ impl PageTable {
     /// The `root` pointer must be obtained from [`Self::into_raw`].
     pub unsafe fn from_raw(root: VirtualMut<RawPageTable, DirectMapped>) -> Self {
         Self {
-            root: Box::from_raw_in(root.into_ptr_mut(), PagingAllocator),
+            root: unsafe { Box::from_raw_in(root.into_ptr_mut(), PagingAllocator) },
         }
     }
 
@@ -326,7 +326,7 @@ unsafe impl Allocator for PagingAllocator {
         let vaddr: VirtualMut<u8, DirectMapped> = Virtual::from_ptr(ptr.as_ptr());
         let paddr = vaddr.into_phys();
 
-        PMAlloc::get().deallocate(paddr, 0)
+        unsafe { PMAlloc::get().deallocate(paddr, 0) }
     }
 }
 

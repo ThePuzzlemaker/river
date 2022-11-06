@@ -14,6 +14,8 @@
 )]
 #![no_std]
 #![no_main]
+// TODO: maybe relax this a bit?
+#![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 

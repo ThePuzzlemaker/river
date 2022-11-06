@@ -119,7 +119,7 @@ impl<T: 'static> HartLocal<T> {
 pub unsafe fn init() {
     let size = tdata_end().into_usize() - tdata_start().into_usize();
 
-    let old_data = slice::from_raw_parts(tdata_start().as_ptr_mut(), size);
+    let old_data = unsafe { slice::from_raw_parts(tdata_start().as_ptr_mut(), size) };
     let new_ptr = {
         let mut pma = PMAlloc::get();
         pma.allocate(phys::what_order(size))
@@ -127,9 +127,9 @@ pub unsafe fn init() {
     .expect("hart_local::init: failed to allocate hart-local data")
     .into_virt();
 
-    slice::from_raw_parts_mut(new_ptr.into_ptr_mut(), size).copy_from_slice(old_data);
+    unsafe { slice::from_raw_parts_mut(new_ptr.into_ptr_mut(), size).copy_from_slice(old_data) };
 
-    let hartid = asm::set_tp(new_ptr);
+    let hartid = unsafe { asm::set_tp(new_ptr) };
     LOCAL_HART.with(|hart| hart.borrow_mut().hartid = hartid);
 }
 

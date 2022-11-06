@@ -125,7 +125,7 @@ impl Mapping for DirectMapped {
         let poff = physical_offset();
         let paddr = paddr.into_usize();
         let vaddr = paddr + poff;
-        Virtual::from_usize_unchecked(vaddr)
+        unsafe { Virtual::from_usize_unchecked(vaddr) }
     }
 
     fn virt2phys<T, M: Mutability<T>>(vaddr: Virtual<T, Self, M>) -> Option<Physical<T, Self, M>> {
@@ -142,7 +142,7 @@ impl Mapping for DirectMapped {
         let poff = physical_offset();
         let vaddr = vaddr.into_usize();
         let paddr = vaddr - poff;
-        Physical::from_usize_unchecked(paddr)
+        unsafe { Physical::from_usize_unchecked(paddr) }
     }
 }
 
@@ -171,7 +171,7 @@ impl Mapping for Kernel {
     ) -> Virtual<T, Self, M> {
         let paddr = paddr.into_usize();
         let vaddr = paddr + KERNEL_OFFSET - KERNEL_PHYS_OFFSET;
-        Virtual::from_usize_unchecked(vaddr)
+        unsafe { Virtual::from_usize_unchecked(vaddr) }
     }
 
     fn virt2phys<T, M: Mutability<T>>(vaddr: Virtual<T, Self, M>) -> Option<Physical<T, Self, M>> {
@@ -188,7 +188,7 @@ impl Mapping for Kernel {
     ) -> Physical<T, Self, M> {
         let vaddr = vaddr.into_usize();
         let paddr = vaddr - KERNEL_OFFSET + KERNEL_PHYS_OFFSET;
-        Physical::from_usize_unchecked(paddr)
+        unsafe { Physical::from_usize_unchecked(paddr) }
     }
 }
 
@@ -217,12 +217,12 @@ impl Mapping for Identity {
     unsafe fn virt2phys_unchecked<T, M: Mutability<T>>(
         vaddr: Virtual<T, Self, M>,
     ) -> Physical<T, Self, M> {
-        Self::virt2phys(vaddr).unwrap_unchecked()
+        unsafe { Self::virt2phys(vaddr).unwrap_unchecked() }
     }
 
     unsafe fn phys2virt_unchecked<T, M: Mutability<T>>(
         paddr: Physical<T, Self, M>,
     ) -> Virtual<T, Self, M> {
-        Self::phys2virt(paddr).unwrap_unchecked()
+        unsafe { Self::phys2virt(paddr).unwrap_unchecked() }
     }
 }

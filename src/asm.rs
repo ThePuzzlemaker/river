@@ -65,7 +65,7 @@ pub fn tp() -> u64 {
 #[inline]
 pub unsafe fn set_tp(v: VirtualMut<u8, DirectMapped>) -> u64 {
     let tp = tp();
-    asm!("mv tp, {}", in(reg) v.into_usize());
+    unsafe { asm!("mv tp, {}", in(reg) v.into_usize()) };
     tp
 }
 

@@ -100,8 +100,9 @@ fn early_trap_handler() -> ! {
 /// Don't call it unless, well, you're the kernel *just* after boot.
 #[no_mangle]
 pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
-    asm!("csrw stvec, {}", in(reg) early_trap_handler as usize);
-    let fdt: Fdt<'static> = match Fdt::from_ptr(fdt_ptr) {
+    // Make sure traps don't cause a bunch of exceptions, by just loop { nop }-ing them.
+    unsafe { asm!("csrw stvec, {}", in(reg) early_trap_handler as usize) };
+    let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
         Err(_e) => {
             sbi::hart_state_management::hart_stop().unwrap();
@@ -115,7 +116,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
 
     {
         let mut uart = UART.lock();
-        uart.init(uart_reg.starting_address as *mut u8);
+        unsafe { uart.init(uart_reg.starting_address as *mut u8) };
         uart.print_str_sync("[info] initialized serial device at 0x");
         uart.early_print_u64_hex(uart_reg.starting_address as u64);
         uart.print_str_sync("\n");
@@ -162,8 +163,8 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // how the memory is laid out and assumes it can clobber a bunch of pages
     // at the start for its bitree.
     // TODO: make this better in the future?
-    PMAlloc::init(PhysicalMut::from_ptr(pma_start), size);
-    hart_local::init();
+    unsafe { PMAlloc::init(PhysicalMut::from_ptr(pma_start), size) }
+    unsafe { hart_local::init() }
     {
         let mut uart = UART.lock();
         uart.print_str_sync("[info] initialized hart-local storage for hart ");
@@ -242,7 +243,9 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     PHYSICAL_OFFSET.store(ACTUAL_PHYSICAL_OFFSET, Ordering::Relaxed);
 
     let gp: usize;
-    asm!("lla {}, __global_pointer$", out(reg) gp);
+    unsafe {
+        asm!("lla {}, __global_pointer$", out(reg) gp);
+    }
 
     let tp = tp();
 
@@ -273,10 +276,11 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let serial_vaddr = serial_paddr.into_virt();
 
     // Update the UART base w/ its direct-mapped virtual addr
-    UART.lock().update_serial_base(serial_vaddr.into_ptr_mut());
+    unsafe { UART.lock().update_serial_base(serial_vaddr.into_ptr_mut()) };
 
-    asm!(
-        "
+    unsafe {
+        asm!(
+            "
         csrw stvec, {stvec}
 
         # set up sp and gp
@@ -291,15 +295,16 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         sfence.vma
         unimp # trap & go to main
         ",
-        mxr = in(reg) 1 << 19,
-        satp = in(reg) raw_satp.as_usize(),
-        new_sp = in(reg) new_sp,
-        new_gp = in(reg) new_gp,
-        new_tp = in(reg) new_tp,
-        stvec = in(reg) kmain_virt.into_usize(),
+            mxr = in(reg) 1 << 19,
+            satp = in(reg) raw_satp.as_usize(),
+            new_sp = in(reg) new_sp,
+            new_gp = in(reg) new_gp,
+            new_tp = in(reg) new_tp,
+            stvec = in(reg) kmain_virt.into_usize(),
 
-        // `kmain` args
-        in("a0") fdt_ptr,
-        options(noreturn, nostack)
-    )
+            // `kmain` args
+            in("a0") fdt_ptr,
+            options(noreturn, nostack)
+        )
+    }
 }
