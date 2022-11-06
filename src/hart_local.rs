@@ -51,6 +51,7 @@ unsafe impl<T: 'static> Send for HartLocal<T> {}
 unsafe impl<T: 'static> Sync for HartLocal<T> {}
 
 impl<T: 'static> HartLocal<T> {
+    #[doc(hidden)]
     pub const fn new(f: fn() -> T, base_func: unsafe fn() -> usize) -> Self {
         Self {
             offset_init: Cell::new(false),
