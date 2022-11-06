@@ -1,5 +1,6 @@
 use core::{
-    cell::{Cell, RefCell},
+    cell::Cell,
+    marker::PhantomData,
     mem::{self, MaybeUninit},
     slice,
 };
@@ -130,7 +131,7 @@ pub unsafe fn init() {
     unsafe { slice::from_raw_parts_mut(new_ptr.into_ptr_mut(), size).copy_from_slice(old_data) };
 
     let hartid = unsafe { asm::set_tp(new_ptr) };
-    LOCAL_HART.with(|hart| hart.borrow_mut().hartid = hartid);
+    LOCAL_HART.with(|hart| hart.hartid.set(hartid));
 }
 
 pub fn enabled() -> bool {
@@ -140,38 +141,46 @@ pub fn enabled() -> bool {
 }
 
 hart_local! {
-    pub static LOCAL_HART: RefCell<HartCtx> = RefCell::new(HartCtx::default())
+    pub static LOCAL_HART: HartCtx = HartCtx::default()
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct HartCtx {
     /// Number of .push_off()s done without a .pop_off()
-    pub n_introff: usize,
-    /// Were interrupts enabled before doing .push_off?
-    pub intena: bool,
+    pub n_introff: Cell<usize>,
+    /// Were interrupts enabled before doing .push_off()?
+    pub intena: Cell<bool>,
     /// The hart ID
-    pub hartid: u64,
+    pub hartid: Cell<u64>,
+    /// In trap handler?
+    pub trap: Cell<bool>,
+    /// Ensure HartCtx is !Send + !Sync
+    _phantom: PhantomData<*const ()>,
 }
 
 impl HartCtx {
-    pub fn push_off(&mut self) {
-        // If we're the first one to push_off, disable interrupts
-        // and mark down intena.
-        if self.n_introff == 0 {
-            self.intena = intr_off();
+    pub fn push_off(&self) {
+        if !self.trap.get() {
+            // If we're the first one to push_off, disable interrupts
+            // and mark down intena.
+            if self.n_introff.get() == 0 {
+                self.intena.set(intr_off());
+            }
+            // Increment the count
+            self.n_introff.set(self.n_introff.get() + 1);
         }
-        // Increment the count
-        self.n_introff += 1;
     }
 
-    pub fn pop_off(&mut self) {
-        // Decrement the count
-        self.n_introff -= 1;
+    pub fn pop_off(&self) {
+        if !self.trap.get() {
+            // Decrement the count
+            self.n_introff.set(self.n_introff.get() - 1);
 
-        // If we were the last one to pop_off, and interrupts
-        // were previously enabled, re-enable them.
-        if self.n_introff == 0 && self.intena {
-            intr_on();
+            // If we were the last one to pop_off, and interrupts
+            // were previously enabled, re-enable them.
+            if self.n_introff.get() == 0 && self.intena.get() {
+                intr_on();
+            }
         }
     }
 }

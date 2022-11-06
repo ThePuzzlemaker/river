@@ -60,9 +60,8 @@ impl<T> SpinMutex<T> {
         // as it's enabled very early (before paging, even).
         let hartid = if hart_local::enabled() {
             LOCAL_HART.with(|hart| {
-                let mut hart = hart.borrow_mut();
                 hart.push_off();
-                hart.hartid
+                hart.hartid.get()
             })
         } else {
             hartid()
@@ -137,7 +136,7 @@ impl<'a, T> Drop for SpinMutexGuard<'a, T> {
         // Interrupts will always be disabled before TLS is enabled,
         // as it's enabled very early (before paging, even).
         if hart_local::enabled() {
-            LOCAL_HART.with(|hart| hart.borrow_mut().pop_off())
+            LOCAL_HART.with(|hart| hart.pop_off())
         }
     }
 }

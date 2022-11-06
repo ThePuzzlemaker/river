@@ -1,8 +1,20 @@
-use core::{fmt, hint, ptr};
+use core::{
+    fmt, hint, ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 use bitflags::bitflags;
 
 use crate::spin::{SpinMutex, SpinMutexGuard};
+
+#[macro_export]
+macro_rules! println {
+    ($fmt:literal$(, $($tt:tt)*)?) => {{
+        let mut uart = $crate::uart::UART.lock();
+        ::core::fmt::write(&mut *uart, ::core::format_args!($fmt$(, $($tt)*)?)).expect("UART write");
+        uart.print_str_sync("\n");
+    }}
+}
 
 pub struct Ns16650 {
     inner: SpinMutex<Ns16650Inner>,
@@ -24,6 +36,8 @@ const THR: usize = 0b000;
 const RHR: usize = 0b000;
 const DIVISOR_LATCH_LSB: usize = 0b000;
 const DIVISOR_LATCH_MSB: usize = 0b001;
+
+pub static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
 impl Ns16650 {
     // TODO: make this better
@@ -47,6 +61,7 @@ impl Ns16650Inner {
             "Ns16650::init: tried to initialize an already initialized UART device"
         );
         self.serial_base = serial_base;
+        SERIAL.store(serial_base, Ordering::Relaxed);
         self.init = true;
 
         // Disable interrupts
@@ -64,6 +79,7 @@ impl Ns16650Inner {
 
     pub unsafe fn update_serial_base(&mut self, serial_base: *mut u8) {
         self.serial_base = serial_base;
+        SERIAL.store(serial_base, Ordering::Relaxed);
     }
 
     unsafe fn set_clock_divisor(&mut self, msb: u8, lsb: u8) {
@@ -164,15 +180,6 @@ pub fn handle_interrupt() {
     // for now, we do nothing, since we don't have a user mode and this interrupt is useful only for user mode :P
 }
 
-#[macro_export]
-macro_rules! println {
-    ($fmt:literal$(, $($tt:tt)*)?) => {{
-        let mut uart = $crate::uart::UART.lock();
-        ::core::fmt::write(&mut *uart, ::core::format_args!($fmt$(, $($tt)*)?)).expect("UART write");
-        uart.print_str_sync("\n");
-    }}
-}
-
 impl fmt::Write for Ns16650Inner {
     #[inline]
     fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -181,6 +188,32 @@ impl fmt::Write for Ns16650Inner {
             "Ns16650Inner::write_str: UART was not initialized (this should not happen?)"
         );
         self.print_str_sync(s);
+        Ok(())
+    }
+}
+
+pub fn print_backup(s: &str) {
+    let serial = SERIAL.load(Ordering::Relaxed);
+    for b in s.as_bytes() {
+        while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
+            hint::spin_loop();
+        }
+        unsafe { ptr::write_volatile(serial, *b) }
+    }
+}
+
+#[macro_export]
+macro_rules! println_backup {
+    ($fmt:literal$(, $($tt:tt)*)?) => {{
+        ::core::fmt::write(&mut $crate::uart::FmtBackup, ::core::format_args!($fmt$(, $($tt)*)?)).expect("i/o");
+        $crate::uart::print_backup("\n");
+    }}
+}
+
+pub struct FmtBackup;
+impl fmt::Write for FmtBackup {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        print_backup(s);
         Ok(())
     }
 }

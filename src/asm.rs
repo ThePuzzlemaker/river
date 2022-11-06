@@ -65,7 +65,7 @@ pub fn tp() -> u64 {
 #[inline]
 pub unsafe fn set_tp(v: VirtualMut<u8, DirectMapped>) -> u64 {
     let tp = tp();
-    unsafe { asm!("mv tp, {}", in(reg) v.into_usize()) };
+    unsafe { asm!("mv tp, {}", in(reg) v.into_usize(), options(nostack)) };
     tp
 }
 
@@ -74,7 +74,7 @@ pub fn hartid() -> u64 {
     let tp = tp() as usize;
     // Before TLS is enabled, tp contains the hartid.
     if hart_local::enabled() {
-        LOCAL_HART.with(|hart| hart.borrow().hartid)
+        LOCAL_HART.with(|hart| hart.hartid.get())
     } else {
         tp as u64
     }
@@ -119,7 +119,31 @@ pub fn external_intr_off() -> bool {
     r != 0
 }
 
+#[inline]
+pub fn timer_intr_on() -> bool {
+    let r: u8;
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrrs {}, sie, {}", out(reg) r, in(reg) SIE_STIE, options(nostack)) }
+    r != 0
+}
+
+#[inline]
+pub fn timer_intr_off() -> bool {
+    let r: u8;
+    // SAFETY: Writes to CSRs are atomic
+    unsafe { asm!("csrrc {}, sie, {}", out(reg) r, in(reg) SIE_STIE, options(nostack)) }
+    r != 0
+}
+
+#[inline]
+pub fn timer_intr_clear() {
+    // SAFETY: Writes to CSRs are atomic
+    unsafe { asm!("csrrc {}, sie, {}", out(reg) _, in(reg) SIP_STIP, options(nostack)) }
+}
+
 const SIE_SSIE: usize = 1 << 1;
+const SIE_STIE: usize = 1 << 5;
+const SIP_STIP: usize = 1 << 5;
 const SIE_SEIE: usize = 1 << 9;
 
 #[inline]
@@ -154,3 +178,10 @@ pub fn write_stval(stval: u64) {
 }
 
 pub const SCAUSE_INTR_BIT: u64 = 1 << 63;
+
+#[inline]
+pub fn read_time() -> u64 {
+    let r: u64;
+    unsafe { asm!("csrr {}, time", out(reg) r, options(nostack)) }
+    r
+}

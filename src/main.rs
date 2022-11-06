@@ -49,30 +49,15 @@ use addr::{Physical, Virtual};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
+use uart::UART;
 
 use crate::{
     addr::{DirectMapped, PhysicalMut},
     kalloc::linked_list::LinkedListAlloc,
     plic::PLIC,
     trap::{Irqs, IRQS},
-    uart::UART,
     units::StorageUnits,
 };
-// use kalloc::slab::Slab;
-
-// use uart_16550::MmioSerialPort;
-
-// pub fn serial() -> MmioSerialPort {
-//     unsafe { MmioSerialPort::new(SERIAL_PORT_BASE_ADDRESS) }
-// }
-
-// #[no_mangle]
-// #[link_section = ".init.trapvec"]
-// pub extern "C" fn trap() {
-//     loop {
-//         nop()
-//     }
-// }
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
@@ -147,6 +132,7 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     IRQS.get_or_init(|| Irqs { uart: uart_irq });
 
     asm::software_intr_on();
+    asm::timer_intr_on();
     asm::external_intr_on();
 
     // Now that the PLIC is set up, it's fine to interrupt.
@@ -157,6 +143,12 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         hartid()
     );
     // panic!("{:#?}", asm::get_pagetable());
+
+    let timebase_freq = fdt.cpus().next().unwrap().timebase_frequency() as u64;
+
+    let time = asm::read_time();
+    println!("setting timer");
+    sbi::timer::set_timer(time + 5 * timebase_freq).unwrap();
 
     loop {
         nop()

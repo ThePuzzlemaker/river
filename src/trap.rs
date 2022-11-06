@@ -1,10 +1,11 @@
 use core::arch::global_asm;
 
 use crate::{
-    asm::{self, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
+    asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
+    hart_local::LOCAL_HART,
     once_cell::OnceCell,
     plic::PLIC,
-    uart,
+    println, uart,
 };
 
 pub struct Irqs {
@@ -15,6 +16,17 @@ pub static IRQS: OnceCell<Irqs> = OnceCell::new();
 
 #[no_mangle]
 pub unsafe extern "C" fn kernel_trap() {
+    assert!(!intr_enabled(), "kernel_trap: interrupts enabled");
+    // N.B. LOCAL_HART is not SpinMutex-guarded, so interrupts will not be
+    // enabled during this line. And we catch if they were above.
+    //
+    // This value helps to make sure that `push_off` and `pop_off` don't
+    // accidentally re-enable interrupts during our handler by way of a
+    // `SpinMutexGuard` drop. (I originally tried to just set intena, but it was
+    // still enough of a race condition that it caused bursts of the same
+    // interrupt--not sure entirely why, this is a bit hacky but I suppose it
+    // works)
+    LOCAL_HART.with(|hart| hart.trap.set(true));
     let sepc = asm::read_sepc();
     let sstatus = asm::read_sstatus();
     let scause = asm::read_scause();
@@ -22,9 +34,9 @@ pub unsafe extern "C" fn kernel_trap() {
     debug_assert_ne!(
         sstatus & SSTATUS_SPP,
         0,
-        "kernel_trap: did not trap from S-mode"
+        "kernel_trap: did not trap from S-mode, sstatus={}",
+        sstatus
     );
-    debug_assert!(!intr_enabled(), "kernel_trap: interrupts enabled");
 
     // Not an interrupt.
     if scause & SCAUSE_INTR_BIT == 0 {
@@ -37,8 +49,8 @@ pub unsafe extern "C" fn kernel_trap() {
         )
     }
 
-    let device = device_interrupt(scause);
-    if device == 0 {
+    let kind = device_interrupt(scause);
+    if kind == InterruptKind::Unknown {
         panic!(
             "kernel trap from unknown device, sepc={:#x} stval={:#x} scause={:#x}",
             sepc,
@@ -49,9 +61,12 @@ pub unsafe extern "C" fn kernel_trap() {
 
     asm::write_sepc(sepc);
     asm::write_sstatus(sstatus);
+    // Make sure we inform the HartCtx that it's fine to re-enable interrupts
+    // now.
+    LOCAL_HART.with(|hart| hart.trap.set(false));
 }
 
-fn device_interrupt(scause: u64) -> u64 {
+fn device_interrupt(scause: u64) -> InterruptKind {
     // top bit => supervisor interrupt via PLIC
     // cause == 9 => external interrut
     if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 9 {
@@ -64,10 +79,27 @@ fn device_interrupt(scause: u64) -> u64 {
             panic!("device_interrupt: unexpected IRQ {}", irq);
         }
 
-        1
+        if irq != 0 {
+            unsafe { PLIC.hart_sunclaim(irq) };
+        }
+
+        InterruptKind::External
+    } else if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 5 {
+        println!("clock interrupt!");
+        asm::timer_intr_clear();
+
+        InterruptKind::Timer
     } else {
-        0
+        InterruptKind::Unknown
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InterruptKind {
+    Software,
+    Timer,
+    External,
+    Unknown,
 }
 
 extern "C" {
@@ -133,7 +165,7 @@ kernel_trapvec:
     ld ra,    0(sp)
     ld sp,    8(sp)
     ld gp,   16(sp)
-    # not tp (contains hart-local data), in case we moved CPUs
+    # not tp (contains hart-local data ptr), in case we moved CPUs
     ld t0,   32(sp)
     ld t1,   40(sp)
     ld t2,   48(sp)
