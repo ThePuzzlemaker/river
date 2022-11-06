@@ -54,7 +54,6 @@ use crate::{
     addr::{Identity, Virtual, VirtualMut},
     kalloc::phys::{self, PMAlloc},
     paging::{root_page_table, PageTableFlags},
-    println_hacky,
     spin::SpinMutex,
     units::StorageUnits,
 };

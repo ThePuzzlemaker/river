@@ -1,11 +1,8 @@
-use core::{hint, mem, ptr};
+use core::{fmt, hint, ptr};
 
 use bitflags::bitflags;
 
-use crate::{
-    hart_local::LOCAL_HART,
-    spin::{SpinMutex, SpinMutexGuard},
-};
+use crate::spin::{SpinMutex, SpinMutexGuard};
 
 pub struct Ns16650 {
     inner: SpinMutex<Ns16650Inner>,
@@ -24,6 +21,7 @@ const IER: usize = 0b001;
 const FCR: usize = 0b010;
 const LSR: usize = 0b101;
 const THR: usize = 0b000;
+const RHR: usize = 0b000;
 const DIVISOR_LATCH_LSB: usize = 0b000;
 const DIVISOR_LATCH_MSB: usize = 0b001;
 
@@ -36,6 +34,10 @@ impl Ns16650 {
 
 // TODO: make this not Ns16650Inner
 impl Ns16650Inner {
+    pub fn is_initialized(&self) -> bool {
+        self.init
+    }
+
     /// # Safety
     ///
     /// This function MUST be called ONLY ONCE.
@@ -58,6 +60,10 @@ impl Ns16650Inner {
 
         // Enable IRQs. (Don't enable RX yet, since I haven't implemented it :P)
         self.write_ier(IERFlags::TX_IRQ_ENABLE.bits);
+    }
+
+    pub unsafe fn update_serial_base(&mut self, serial_base: *mut u8) {
+        self.serial_base = serial_base;
     }
 
     unsafe fn set_clock_divisor(&mut self, msb: u8, lsb: u8) {
@@ -94,19 +100,30 @@ impl Ns16650Inner {
         self.serial_base.add(THR).write_volatile(data);
     }
 
-    unsafe fn putc_sync(&mut self, char: u8) {
-        // this is probably not *strictly* necessary, since we hold a spinlock
-        // anyway, but can't be too safe :P
-        // may remove in the future based on perf considerations
-        LOCAL_HART.with(|ctx| ctx.borrow_mut().push_off());
-
+    pub fn putc_sync(&mut self, char: u8) {
         // Spin until LSR gives the okay to put a bytes into THR
-        while self.read_lsr() & LSRFlags::TX_HOLDING_IDLE.bits == 0 {
+        while unsafe { self.read_lsr() } & LSRFlags::TX_HOLDING_IDLE.bits == 0 {
             hint::spin_loop();
         }
-        self.write_thr(char);
+        unsafe { self.write_thr(char) }
+    }
 
-        LOCAL_HART.with(|ctx| ctx.borrow_mut().pop_off());
+    unsafe fn read_rhr(&mut self) -> u8 {
+        self.serial_base.add(RHR).read_volatile()
+    }
+
+    pub fn getc_sync(&mut self) -> Option<u8> {
+        if unsafe { self.read_lsr() } & LSRFlags::RX_DATA_READY.bits != 0 {
+            Some(unsafe { self.read_rhr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn print_str_sync(&mut self, s: &str) {
+        for b in s.as_bytes() {
+            self.putc_sync(*b)
+        }
     }
 }
 
@@ -138,10 +155,32 @@ bitflags! {
         const RESET_ALL_FIFOS = Self::RX_FIFO_RESET.bits | Self::TX_FIFO_RESET.bits;
     }
     struct LSRFlags: u8 {
+        const RX_DATA_READY = 1 << 0;
         const TX_HOLDING_IDLE = 1 << 5;
     }
 }
 
 pub fn handle_interrupt() {
     // for now, we do nothing, since we don't have a user mode and this interrupt is useful only for user mode :P
+}
+
+#[macro_export]
+macro_rules! println {
+    ($fmt:literal$(, $($tt:tt)*)?) => {{
+        let mut uart = $crate::uart::UART.lock();
+        ::core::fmt::write(&mut *uart, ::core::format_args!($fmt$(, $($tt)*)?)).expect("UART write");
+        uart.print_str_sync("\n");
+    }}
+}
+
+impl fmt::Write for Ns16650Inner {
+    #[inline]
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        debug_assert!(
+            self.is_initialized(),
+            "Ns16650Inner::write_str: UART was not initialized (this should not happen?)"
+        );
+        self.print_str_sync(s);
+        Ok(())
+    }
 }

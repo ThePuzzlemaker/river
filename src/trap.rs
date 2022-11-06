@@ -4,7 +4,6 @@ use crate::{
     asm::{self, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
     once_cell::OnceCell,
     plic::PLIC,
-    spin::SpinMutex,
     uart,
 };
 

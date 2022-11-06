@@ -11,7 +11,7 @@
 
 use core::{
     arch::{asm, global_asm},
-    sync::atomic::{self, Ordering},
+    sync::atomic::Ordering,
 };
 
 use fdt::Fdt;
@@ -25,10 +25,10 @@ use crate::{
     hart_local,
     kalloc::phys::PMAlloc,
     paging::{PageTable, PageTableFlags, Satp},
-    print, symbol,
+    symbol,
+    uart::UART,
     units::StorageUnits,
-    util::{print_u64, print_u64_hex, round_up_pow2},
-    SERIAL,
+    util::round_up_pow2,
 };
 
 global_asm!("
@@ -88,12 +88,19 @@ done_clear_bss:
 .popsection
 ");
 
+fn early_trap_handler() -> ! {
+    loop {
+        crate::nop()
+    }
+}
+
 /// # Safety
 ///
 /// Here be dragons. This is the kernel entry point.
 /// Don't call it unless, well, you're the kernel *just* after boot.
 #[no_mangle]
 pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
+    asm!("csrw stvec, {}", in(reg) early_trap_handler as usize);
     let fdt: Fdt<'static> = match Fdt::from_ptr(fdt_ptr) {
         Ok(fdt) => fdt,
         Err(_e) => {
@@ -103,15 +110,16 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     };
 
     let stdout = fdt.chosen().stdout().unwrap();
-    let serial_port_reg_base = stdout.reg().unwrap().next().unwrap();
+    let uart_reg = stdout.reg().unwrap().next().unwrap();
     assert!(stdout.compatible().unwrap().all().any(|x| x == "ns16550a"));
-    SERIAL.store(
-        serial_port_reg_base.starting_address as *mut u8,
-        Ordering::Relaxed,
-    );
-    print("[info] initialized serial device at 0x");
-    print_u64_hex(SERIAL.load(Ordering::Relaxed) as u64);
-    print("\n");
+
+    {
+        let mut uart = UART.lock();
+        uart.init(uart_reg.starting_address as *mut u8);
+        uart.print_str_sync("[info] initialized serial device at 0x");
+        uart.early_print_u64_hex(uart_reg.starting_address as u64);
+        uart.print_str_sync("\n");
+    }
 
     let kernel_start = symbol::kernel_start().into_usize();
     let kernel_end = symbol::kernel_end().into_usize();
@@ -156,9 +164,12 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // TODO: make this better in the future?
     PMAlloc::init(PhysicalMut::from_ptr(pma_start), size);
     hart_local::init();
-    print("[info] initialized hart-local storage for hart ");
-    print_u64(hartid());
-    print("\n");
+    {
+        let mut uart = UART.lock();
+        uart.print_str_sync("[info] initialized hart-local storage for hart ");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("\n");
+    }
 
     let mut root_pgtbl = PageTable::new();
 
@@ -258,14 +269,11 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // fix up the serial port address so if anything panics at the start of
     // kmain, it will actually be able to print.
     let serial_paddr: PhysicalMut<u8, DirectMapped> =
-        PhysicalConst::from_ptr(serial_port_reg_base.starting_address).into_mut();
+        PhysicalConst::from_ptr(uart_reg.starting_address).into_mut();
     let serial_vaddr = serial_paddr.into_virt();
 
-    // If my understanding of atomics is right, this *should* prevent
-    // any possibility of the serial address still being invalid before kmain.
-    // My understanding of atomics is probably wrong, though.
-    atomic::fence(Ordering::Acquire);
-    SERIAL.store(serial_vaddr.into_ptr_mut(), Ordering::Release);
+    // Update the UART base w/ its direct-mapped virtual addr
+    UART.lock().update_serial_base(serial_vaddr.into_ptr_mut());
 
     asm!(
         "

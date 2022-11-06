@@ -40,21 +40,16 @@ extern "C" {
 use core::{
     alloc::{GlobalAlloc, Layout},
     arch::asm,
-    fmt, hint,
     panic::PanicInfo,
-    ptr,
-    sync::atomic::{AtomicPtr, Ordering},
 };
 
 use addr::{Physical, Virtual};
-use alloc::boxed::Box;
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 
 use crate::{
-    addr::{DirectMapped, PhysicalMut, KERNEL_PHYS_OFFSET},
-    hart_local::LOCAL_HART,
+    addr::{DirectMapped, PhysicalMut},
     kalloc::linked_list::LinkedListAlloc,
     plic::PLIC,
     trap::{Irqs, IRQS},
@@ -63,28 +58,11 @@ use crate::{
 };
 // use kalloc::slab::Slab;
 
-static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
-
 // use uart_16550::MmioSerialPort;
 
 // pub fn serial() -> MmioSerialPort {
 //     unsafe { MmioSerialPort::new(SERIAL_PORT_BASE_ADDRESS) }
 // }
-
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn print(s: &str) {
-    let serial = get_serial();
-    for b in s.as_bytes() {
-        while (unsafe { serial.add(5).read_volatile() } & (1 << 5)) == 0 {
-            hint::spin_loop();
-        }
-        unsafe { serial.write_volatile(*b) };
-    }
-}
-
-fn get_serial() -> *mut u8 {
-    SERIAL.load(Ordering::Relaxed)
-}
 
 // #[no_mangle]
 // #[link_section = ".init.trapvec"]
@@ -97,14 +75,6 @@ fn get_serial() -> *mut u8 {
 #[global_allocator]
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
 
-#[macro_export]
-macro_rules! println_hacky {
-    ($fmt:literal$(, $($tt:tt)*)?) => {{
-        ::core::fmt::write(&mut $crate::Serial, ::core::format_args!($fmt$(, $($tt)*)?)).expect("i/o");
-        $crate::print("\n");
-    }}
-}
-
 // It's unlikely the kernel itself is 64GiB in size, so we use this space.
 pub const KHEAP_VMEM_OFFSET: usize = 0xFFFFFFE000000000;
 pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
@@ -113,7 +83,7 @@ pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
 pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
-    print("[info] initialized paging\n");
+    println!("[info] initialized paging");
 
     // // Allocate a 64-MiB heap.
     // let heap_base: VirtualMut<u8, Identity> = VirtualMut::from_usize(0x0010_0000);
@@ -145,7 +115,7 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             );
         }
     }
-    println_hacky!("mapped 64GiB of virtual heap");
+    println!("mapped 64GiB of virtual heap");
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
 
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
@@ -153,7 +123,7 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         Ok(fdt) => fdt,
         Err(_e) => panic!("error loading fdt"),
     };
-    println_hacky!("fdt @ {:#p} -> {:#p}", fdt_ptr, unsafe {
+    println!("fdt @ {:#p} -> {:#p}", fdt_ptr, unsafe {
         fdt_ptr.add(fdt.total_size())
     });
 
@@ -172,7 +142,6 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     unsafe { PLIC.hart_set_spriority(0) }
     unsafe { asm!("csrw stvec, {}", in(reg) trap::kernel_trapvec) }
 
-    unsafe { UART.lock().init(get_serial()) }
     IRQS.get_or_init(|| Irqs { uart: uart_irq });
 
     asm::software_intr_on();
@@ -181,14 +150,10 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    fmt::write(
-        &mut Serial,
-        format_args!(
-            "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!\n",
-            hartid()
-        ),
-    )
-    .expect("i/o");
+    println!(
+        "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!",
+        hartid()
+    );
     // panic!("{:#?}", asm::get_pagetable());
 
     loop {
@@ -201,37 +166,34 @@ pub fn nop() {
     unsafe { asm!("nop") }
 }
 
-pub struct Serial;
-impl fmt::Write for Serial {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        print(s);
-        Ok(())
-    }
-}
-
 #[panic_handler]
 pub fn panic_handler(panic_info: &PanicInfo) -> ! {
     if paging::enabled() {
         // Paging is set up, we can use dynamic dispatch.
         if let Some(msg) = panic_info.message() {
-            fmt::write(&mut Serial, format_args!("panic occurred: {}\n", msg)).expect("write");
+            println!("panic occurred: {}", msg);
             if let Some(location) = panic_info.location() {
-                fmt::write(
-                    &mut Serial,
-                    format_args!(
-                        "  at {}:{}:{}\n",
-                        location.file(),
-                        location.line(),
-                        location.column()
-                    ),
-                )
-                .expect("write");
+                println!(
+                    "  at {}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
             }
         } else {
-            print("panic occurred (reason unknown).\n");
+            println!("panic occurred (reason unknown).\n");
+            if let Some(location) = panic_info.location() {
+                println!(
+                    "  at {}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
+            }
         }
     } else {
-        print("panic occurred (reason unavailable).\n");
+        UART.lock()
+            .print_str_sync("panic occurred (reason unavailable).\n");
     }
     loop {
         nop()
