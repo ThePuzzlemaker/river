@@ -5,7 +5,10 @@ use core::{
 
 use bitflags::bitflags;
 
-use crate::spin::{SpinMutex, SpinMutexGuard};
+use crate::{
+    paging,
+    spin::{SpinMutex, SpinMutexGuard},
+};
 
 #[macro_export]
 macro_rules! println {
@@ -22,6 +25,7 @@ pub struct Ns16650 {
 
 pub struct Ns16650Inner {
     serial_base: *mut u8,
+    serial_base_backup: *mut u8,
     init: bool,
     tx_buffer: [u8; 1024],
     tx_buffer_r: usize,
@@ -37,10 +41,12 @@ const RHR: usize = 0b000;
 const DIVISOR_LATCH_LSB: usize = 0b000;
 const DIVISOR_LATCH_MSB: usize = 0b001;
 
+pub static SERIAL_BACKUP: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 pub static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
 impl Ns16650 {
     // TODO: make this better
+    #[inline]
     pub fn lock(&self) -> SpinMutexGuard<'_, Ns16650Inner> {
         self.inner.lock()
     }
@@ -48,8 +54,18 @@ impl Ns16650 {
 
 // TODO: make this not Ns16650Inner
 impl Ns16650Inner {
+    #[inline]
     pub fn is_initialized(&self) -> bool {
         self.init
+    }
+
+    #[inline]
+    fn serial_base(&self) -> *mut u8 {
+        if paging::enabled() {
+            self.serial_base
+        } else {
+            self.serial_base_backup
+        }
     }
 
     /// # Safety
@@ -62,6 +78,8 @@ impl Ns16650Inner {
         );
         self.serial_base = serial_base;
         SERIAL.store(serial_base, Ordering::Relaxed);
+        self.serial_base_backup = self.serial_base;
+        SERIAL_BACKUP.store(self.serial_base, Ordering::Relaxed);
         self.init = true;
 
         // Disable interrupts
@@ -86,34 +104,42 @@ impl Ns16650Inner {
         let lcr = unsafe { self.read_lcr() };
         unsafe { self.write_lcr(lcr | LCRFlags::DIVISOR_LATCH_ENABLE.bits) };
 
-        unsafe { self.serial_base.add(DIVISOR_LATCH_LSB).write_volatile(lsb) }
-        unsafe { self.serial_base.add(DIVISOR_LATCH_MSB).write_volatile(msb) }
+        unsafe {
+            self.serial_base()
+                .add(DIVISOR_LATCH_LSB)
+                .write_volatile(lsb)
+        }
+        unsafe {
+            self.serial_base()
+                .add(DIVISOR_LATCH_MSB)
+                .write_volatile(msb)
+        }
 
         unsafe { self.write_lcr(lcr) }
     }
 
     unsafe fn read_lcr(&self) -> u8 {
-        unsafe { self.serial_base.add(LCR).read_volatile() }
+        unsafe { self.serial_base().add(LCR).read_volatile() }
     }
 
     unsafe fn write_lcr(&mut self, data: u8) {
-        unsafe { self.serial_base.add(LCR).write_volatile(data) }
+        unsafe { self.serial_base().add(LCR).write_volatile(data) }
     }
 
     unsafe fn write_ier(&mut self, data: u8) {
-        unsafe { self.serial_base.add(IER).write_volatile(data) }
+        unsafe { self.serial_base().add(IER).write_volatile(data) }
     }
 
     unsafe fn write_fcr(&mut self, data: u8) {
-        unsafe { self.serial_base.add(FCR).write_volatile(data) }
+        unsafe { self.serial_base().add(FCR).write_volatile(data) }
     }
 
     unsafe fn read_lsr(&mut self) -> u8 {
-        unsafe { self.serial_base.add(LSR).read_volatile() }
+        unsafe { self.serial_base().add(LSR).read_volatile() }
     }
 
     unsafe fn write_thr(&mut self, data: u8) {
-        unsafe { self.serial_base.add(THR).write_volatile(data) }
+        unsafe { self.serial_base().add(THR).write_volatile(data) }
     }
 
     pub fn putc_sync(&mut self, char: u8) {
@@ -125,7 +151,7 @@ impl Ns16650Inner {
     }
 
     unsafe fn read_rhr(&mut self) -> u8 {
-        unsafe { self.serial_base.add(RHR).read_volatile() }
+        unsafe { self.serial_base().add(RHR).read_volatile() }
     }
 
     pub fn getc_sync(&mut self) -> Option<u8> {
@@ -149,6 +175,7 @@ unsafe impl Send for Ns16650 {}
 pub static UART: Ns16650 = Ns16650 {
     inner: SpinMutex::new(Ns16650Inner {
         serial_base: ptr::null_mut(),
+        serial_base_backup: ptr::null_mut(),
         init: false,
         tx_buffer: [0; 1024],
         tx_buffer_r: 0,
@@ -193,7 +220,11 @@ impl fmt::Write for Ns16650Inner {
 }
 
 pub fn print_backup(s: &str) {
-    let serial = SERIAL.load(Ordering::Relaxed);
+    let serial = if paging::enabled() {
+        SERIAL.load(Ordering::Relaxed)
+    } else {
+        SERIAL_BACKUP.load(Ordering::Relaxed)
+    };
     for b in s.as_bytes() {
         while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
             hint::spin_loop();

@@ -2,6 +2,7 @@ use core::{fmt, mem};
 
 use crate::{
     addr::{DirectMapped, Physical, PhysicalMut},
+    paging,
     spin::{SpinMutex, SpinMutexGuard},
     util,
 };
@@ -280,14 +281,14 @@ impl Iterator for BitreeDataWrapper {
         if self.pos >= self.len {
             return None;
         }
-        // SAFETY: This is valid due to the invariants of the Bitree we were created of
-        let res = unsafe {
-            self.base
-                .add(self.pos * mem::size_of::<usize>())
-                .into_virt()
-                .into_ptr()
-                .read()
+        let phys = self.base.add(self.pos * mem::size_of::<usize>());
+        let virt = if paging::enabled() {
+            phys.into_virt().into_identity()
+        } else {
+            phys.into_identity().into_virt()
         };
+        // SAFETY: This is valid due to the invariants of the Bitree we were created of
+        let res = unsafe { virt.into_ptr().read() };
 
         self.pos += 1;
 
@@ -306,14 +307,14 @@ impl Bitree {
         );
         let word = ix / 64;
         let bit = ix % 64;
-        // SAFETY: This is valid due to our invariants.
-        let word_val = unsafe {
-            self.base
-                .add(word * mem::size_of::<usize>())
-                .into_virt()
-                .into_ptr()
-                .read()
+        let phys = self.base.add(word * mem::size_of::<usize>());
+        let virt = if paging::enabled() {
+            phys.into_virt().into_identity()
+        } else {
+            phys.into_identity().into_virt()
         };
+        // SAFETY: This is valid due to our invariants.
+        let word_val = unsafe { virt.into_ptr().read() };
         word_val & (1 << bit) != 0
     }
 
@@ -327,14 +328,14 @@ impl Bitree {
         );
         let word = ix / 64;
         let bit = ix % 64;
-        // SAFETY: This is valid due to our invariants.
-        let word_ref = unsafe {
-            &mut *self
-                .base
-                .add(word * mem::size_of::<usize>())
-                .into_virt()
-                .into_ptr_mut()
+        let phys = self.base.add(word * mem::size_of::<usize>());
+        let virt = if paging::enabled() {
+            phys.into_virt().into_identity()
+        } else {
+            phys.into_identity().into_virt()
         };
+        // SAFETY: This is valid due to our invariants.
+        let word_ref = unsafe { &mut *virt.into_ptr_mut() };
         let flag = (val as usize) << bit;
         let old = *word_ref;
         // clear bit

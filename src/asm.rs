@@ -63,9 +63,9 @@ pub fn tp() -> u64 {
 /// This function is only safe if the thread pointer has not been set
 /// elsewhere and is being set to a valid address.
 #[inline]
-pub unsafe fn set_tp(v: VirtualMut<u8, DirectMapped>) -> u64 {
+pub unsafe fn set_tp(v: usize) -> u64 {
     let tp = tp();
-    unsafe { asm!("mv tp, {}", in(reg) v.into_usize(), options(nostack)) };
+    unsafe { asm!("mv tp, {}", in(reg) v, options(nostack)) };
     tp
 }
 

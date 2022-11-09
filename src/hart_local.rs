@@ -121,16 +121,20 @@ pub unsafe fn init() {
     let size = tdata_end().into_usize() - tdata_start().into_usize();
 
     let old_data = unsafe { slice::from_raw_parts(tdata_start().as_ptr_mut(), size) };
-    let new_ptr = {
+    let new_ptr_phys = {
         let mut pma = PMAlloc::get();
         pma.allocate(phys::what_order(size))
     }
-    .expect("hart_local::init: failed to allocate hart-local data")
-    .into_virt();
+    .expect("hart_local::init: failed to allocate hart-local data");
+    let new_ptr = if paging::enabled() {
+        new_ptr_phys.into_virt().into_identity()
+    } else {
+        new_ptr_phys.into_identity().into_virt()
+    };
 
     unsafe { slice::from_raw_parts_mut(new_ptr.into_ptr_mut(), size).copy_from_slice(old_data) };
 
-    let hartid = unsafe { asm::set_tp(new_ptr) };
+    let hartid = unsafe { asm::set_tp(new_ptr.into_usize()) };
     LOCAL_HART.with(|hart| hart.hartid.set(hartid));
 }
 

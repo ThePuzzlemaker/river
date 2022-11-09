@@ -18,76 +18,21 @@ use fdt::Fdt;
 
 use crate::{
     addr::{
-        DirectMapped, Kernel, PhysicalConst, PhysicalMut, VirtualConst, ACTUAL_PHYSICAL_OFFSET,
-        PHYSICAL_OFFSET,
+        DirectMapped, Kernel, PhysicalConst, PhysicalMut, VirtualConst, VirtualMut,
+        ACTUAL_PHYSICAL_OFFSET, PHYSICAL_OFFSET,
     },
     asm::{hartid, tp},
-    hart_local,
+    hart_local::{self, LOCAL_HART},
     kalloc::phys::PMAlloc,
-    paging::{PageTable, PageTableFlags, Satp},
+    paging::{PageTable, PageTableFlags, RawSatp, Satp},
     symbol,
     uart::UART,
     units::StorageUnits,
     util::round_up_pow2,
 };
 
-global_asm!("
-/*
-    SPDX-License-Identifier: MPL-2.0
-    SPDX-FileCopyrightText: 2021 The vanadinite developers, 2022 ThePuzzlemaker
-    
-    This Source Code Form is subject to the terms of the Mozilla Public License,
-    v. 2.0. If a copy of the MPL was not distributed with this file, You can
-    obtain one at https://mozilla.org/MPL/2.0/.
-
-    This file contains a large portion of code taken from vanadinite:
-    https://github.com/repnop/vanadinite/blob/274659cc79955733147c5d391d0ee01993a2b945/src/kernel/vanadinite/src/boot/entry.rs
-    and is thus licensed individually to the rest of the project as MPL-2.0.
-*/
-.pushsection .init
-
-.option norvc
-
-.type start, @function
-.global start
-start:
-    # Disable S-mode interrupts
-    csrw sie, zero
-    csrci sstatus, 2
-
-.option push
-.option norelax
-    lla gp, __global_pointer$
-.option pop
-
-    lla t0, __bss_start
-    lla t1, __bss_end
-
-    # Clear the .bss section
-clear_bss:
-    beq t0, t1, done_clear_bss
-    sd zero, (t0)
-    addi t0, t0, 8
-    j clear_bss
-    
-done_clear_bss:
-    lla sp, __tmp_stack_top
-
-    # Put the hart id into the thread pointer.
-    # We do not have TLS yet so the thread pointer is unused otherwise.
-    # It's saved/restored on context switches to/from usermode too.
-    mv tp, a0
-
-    # We don't care about having the hart id in a0 anymore, so let's move the
-    # FDT pointer as well and just give the kernel entry point just one
-    # argument.
-    mv a0, a1
-
-    tail early_boot
-
-.popsection
-");
-
+#[no_mangle]
+#[link_section = ".init.early_trapvec"]
 fn early_trap_handler() -> ! {
     loop {
         crate::nop()
@@ -117,6 +62,15 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     {
         let mut uart = UART.lock();
         unsafe { uart.init(uart_reg.starting_address as *mut u8) };
+        uart.print_str_sync("[");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("] ");
+        uart.print_str_sync("[info] booting hart ");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("...\n");
+        uart.print_str_sync("[");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("] ");
         uart.print_str_sync("[info] initialized serial device at 0x");
         uart.early_print_u64_hex(uart_reg.starting_address as u64);
         uart.print_str_sync("\n");
@@ -167,6 +121,9 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     unsafe { hart_local::init() }
     {
         let mut uart = UART.lock();
+        uart.print_str_sync("[");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("] ");
         uart.print_str_sync("[info] initialized hart-local storage for hart ");
         uart.early_print_u64(hartid());
         uart.print_str_sync("\n");
@@ -304,6 +261,168 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             stvec = in(reg) kmain_virt.into_usize(),
 
             // `kmain` args
+            in("a0") fdt_ptr,
+            options(noreturn, nostack)
+        )
+    }
+}
+
+#[repr(C)]
+pub struct HartBootData {
+    /* 00 */ pub raw_satp: RawSatp,
+    /* 08 */ pub sp_phys: PhysicalMut<u8, DirectMapped>,
+    /* 18 */ pub fdt_ptr_virt: VirtualConst<u8, DirectMapped>,
+}
+
+global_asm!(
+    "
+.pushsection .init
+
+.option norvc
+
+.type start, @function
+.global start
+start:
+    // Disable S-mode interrupts
+    csrw sie, zero
+    csrci sstatus, 2
+
+.option push
+.option norelax
+    lla gp, __global_pointer$
+.option pop
+
+    lla t0, __bss_start
+    lla t1, __bss_end
+
+    // Clear the .bss section
+clear_bss:
+    beq t0, t1, done_clear_bss
+    sd zero, (t0)
+    addi t0, t0, 8
+    j clear_bss
+    
+done_clear_bss:
+    lla sp, __tmp_stack_top
+
+    // Put the hart id into the thread pointer.
+    // We do not have TLS yet so the thread pointer is unused otherwise.
+    // It's saved/restored on context switches to/from usermode too.
+    mv tp, a0
+
+    // We don't care about having the hart id in a0 anymore, so let's move the
+    // FDT pointer as well and just give the kernel entry point just one
+    // argument.
+    mv a0, a1
+
+    tail early_boot
+
+.popsection
+.pushsection .init.hart,\"ax\",@progbits
+.option norvc
+.type start_hart, @function
+.global start_hart
+start_hart:
+    csrw sie, zero
+    csrci sstatus, 2
+
+.option push
+.option norelax
+    lla gp, __global_pointer$
+.option pop
+    // Offset of `sp_phys` in `BootHartData` -- make sure we're operating on a
+    // stack we can actually use :P
+    ld sp, 8(a1)
+    mv tp, a0
+    mv a0, a1
+
+    tail early_boot_hart
+
+.popsection
+    ",
+);
+
+extern "C" {
+    pub fn start_hart(hart_id: u64, data: u64);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMapped>) -> ! {
+    // Make sure traps don't cause a bunch of exceptions, by just loop { nop }-ing them.
+    unsafe { asm!("csrw stvec, {}", in(reg) early_trap_handler as usize) };
+
+    {
+        let mut uart = UART.lock();
+        uart.print_str_sync("[");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("] ");
+        uart.print_str_sync("[info] booting hart ");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("...\n");
+    }
+
+    unsafe { hart_local::init() }
+    {
+        let mut uart = UART.lock();
+        uart.print_str_sync("[");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("] ");
+        uart.print_str_sync("[info] initialized hart-local storage for hart ");
+        uart.early_print_u64(hartid());
+        uart.print_str_sync("\n");
+    }
+
+    let gp: usize;
+    unsafe {
+        asm!("lla {}, __global_pointer$", out(reg) gp);
+    }
+
+    let tp = tp();
+
+    // Fixup sp, gp, and tp to be in the right address space
+    let new_sp = unsafe { (*data.into_identity().into_virt().into_ptr()).sp_phys }
+        .into_virt()
+        .into_usize();
+    let new_gp = PhysicalMut::<u8, Kernel>::from_usize(gp)
+        .into_virt()
+        .into_usize();
+    let new_tp = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
+        .into_virt()
+        .into_usize();
+
+    let kmain_hart = crate::kmain_hart as *const u8;
+
+    let kmain_hart_virt: VirtualConst<_, Kernel> = PhysicalConst::from_ptr(kmain_hart).into_virt();
+
+    let fdt_ptr = unsafe { (*data.into_identity().into_virt().into_ptr()).fdt_ptr_virt }.into_ptr();
+
+    let raw_satp = unsafe { (*data.into_identity().into_virt().into_ptr()).raw_satp };
+
+    unsafe {
+        asm!(
+            "
+        csrw stvec, {stvec}
+
+        # set up sp and gp
+        mv sp, {new_sp}
+        mv gp, {new_gp}
+        mv tp, {new_tp}
+
+        csrc sstatus, {mxr}
+
+        # load new `satp`
+        csrw satp, {satp}
+        sfence.vma
+        unimp # trap & go to main
+        ",
+            mxr = in(reg) 1 << 19,
+            satp = in(reg) raw_satp.as_usize(),
+            new_sp = in(reg) new_sp,
+            new_gp = in(reg) new_gp,
+            new_tp = in(reg) new_tp,
+            stvec = in(reg) kmain_hart_virt.into_usize(),
+
+            // `kmain_hart` args
             in("a0") fdt_ptr,
             options(noreturn, nostack)
         )

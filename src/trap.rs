@@ -41,8 +41,9 @@ pub unsafe extern "C" fn kernel_trap() {
     // Not an interrupt.
     if scause & SCAUSE_INTR_BIT == 0 {
         panic!(
-            "kernel exception: {}, sepc={:#x} stval={:#x} scause={:#x}",
+            "kernel exception: {}, hart={} sepc={:#x} stval={:#x} scause={:#x}",
             describe_exception(scause),
+            hartid(),
             sepc,
             asm::read_stval(),
             scause
@@ -85,7 +86,7 @@ fn device_interrupt(scause: u64) -> InterruptKind {
 
         InterruptKind::External
     } else if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 5 {
-        println!("clock interrupt!");
+        println!("clock interrupt on hart {}", asm::hartid());
         asm::timer_intr_clear();
 
         InterruptKind::Timer

@@ -10,11 +10,11 @@ use bitflags::bitflags;
 
 use crate::{
     addr::{
-        DirectMapped, Identity, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual, VirtualConst,
-        VirtualMut,
+        DirectMapped, Identity, PgOff, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual,
+        VirtualConst, VirtualMut, Vpn,
     },
     asm::{self, get_satp},
-    kalloc::phys::PMAlloc,
+    kalloc::phys::{self, PMAlloc},
     once_cell::OnceCell,
     spin::SpinMutex,
     units::StorageUnits,
@@ -74,6 +74,37 @@ impl PageTable {
     fn new_table() -> Box<RawPageTable, PagingAllocator> {
         // SAFETY: The page is zeroed and thus is well-defined and valid.
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) }
+    }
+
+    #[track_caller]
+    pub fn walk(&self, ptr: VirtualConst<u8, Identity>) -> PhysicalConst<u8, Identity> {
+        let addr = ptr.into_usize();
+        let page = addr.next_multiple_of(4096) - 4096;
+        let offset = addr - page;
+
+        let mut table = &*self.root;
+
+        for vpn in ptr.vpns().into_iter().rev() {
+            let entry = &table.ptes[vpn.into_usize()].decode();
+
+            match entry.kind() {
+                PTEKind::Leaf => {
+                    let ppn = entry.ppn;
+                    let phys_page = PhysicalConst::from_components(
+                        ppn,
+                        Some(PgOff::from_usize_truncate(offset)),
+                    );
+                    return phys_page;
+                }
+                PTEKind::Branch(paddr) => table = unsafe { &*(paddr.into_virt().into_ptr()) },
+                PTEKind::Invalid => panic!(
+                    "PageTable::walk: attempted to walk an unmapped vaddr: vaddr={:#p}, flags={:?}",
+                    ptr, entry.flags
+                ),
+            }
+        }
+
+        todo!()
     }
 
     #[track_caller]

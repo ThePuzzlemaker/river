@@ -23,11 +23,18 @@ SECTIONS {
         . = ALIGN(4K);
         PROVIDE(__text_start = .);
         PROVIDE(KERNEL_START = .);
+        . = ALIGN(4);
         *(.init);
+        . = ALIGN(4);
+        *(.init.hart);
         . = ALIGN(4);
         *(.init.kmain);
         . = ALIGN(4);
         *(.init.trapvec);
+        . = ALIGN(4);
+        *(.init.early_trapvec);
+        . = ALIGN(4);
+        *(.init.kmain_hart);
         *(.text .text.*);
         . = ALIGN(4K);
         PROVIDE(__text_end = .);

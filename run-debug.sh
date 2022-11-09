@@ -8,7 +8,7 @@ qemu-system-riscv64 -M virt -m 256M \
     -bios opensbi/build/platform/generic/firmware/fw_jump.bin \
     -kernel target/riscv64gc-unknown-none-elf/debug/river \
     -serial stdio \
-    -d int -s -S &
+    -d int -s -S -smp cores=2 &
 
 riscv64-elf-gdb target/riscv64gc-unknown-none-elf/debug/river
 
