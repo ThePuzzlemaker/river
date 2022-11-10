@@ -7,7 +7,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Clone for Physical<T, Map, Mut> {
     fn clone(&self) -> Self {
         Self {
             addr: self.addr,
-            _phantom: self._phantom,
+            phantom: self.phantom,
         }
     }
 }
@@ -47,7 +47,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Clone for Virtual<T, Map, Mut> {
     fn clone(&self) -> Self {
         Self {
             addr: self.addr,
-            _phantom: self._phantom,
+            phantom: self.phantom,
         }
     }
 }

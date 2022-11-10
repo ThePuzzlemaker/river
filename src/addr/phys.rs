@@ -7,13 +7,13 @@ use super::{Identity, Mapping, Mutability, PgOff, Virtual};
 #[repr(transparent)]
 pub struct Physical<T, Map: Mapping, Mut: Mutability<T>> {
     pub(super) addr: usize,
-    pub(super) _phantom: PhantomData<(Map, Mut, Mut::RawPointer)>,
+    pub(super) phantom: PhantomData<(Map, Mut, Mut::RawPointer)>,
 }
 
 impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     pub const NULL: Self = Self {
         addr: 0,
-        _phantom: PhantomData,
+        phantom: PhantomData,
     };
 
     /// Create a [`Physical`] address from a [`usize`].
@@ -25,7 +25,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     #[track_caller]
     pub fn from_usize(addr: usize) -> Self {
         match Self::try_from_usize(addr) {
-            Some(paddr) => paddr,
+            Some(phys_addr) => phys_addr,
             None => panic!(
                 "Physical::from_usize: not in address space: addr={:#p}, map={:?}, mut={:?}",
                 addr as *mut u8,
@@ -83,7 +83,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     pub unsafe fn from_usize_unchecked(addr: usize) -> Self {
         Self {
             addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -96,7 +96,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     pub const fn null() -> Self {
         Self {
             addr: 0,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -112,12 +112,19 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     {
         Physical {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
+    /// Increment an address `by` bytes.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the resulting address is outside of the
+    /// [`Mapping`]'s range.
     #[allow(clippy::should_implement_trait)]
     #[track_caller]
+    #[must_use]
     pub fn add(self, by: usize) -> Self {
         match self.checked_add(by) {
             Some(paddr) => paddr,
@@ -131,6 +138,12 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         Self::try_from_usize(paddr)
     }
 
+    /// Convert this address into a physical address using its [`Mapping`].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the address is outside of the [`Mapping`]'s
+    /// range.
     #[track_caller]
     pub fn into_virt(self) -> Virtual<T, Map, Mut> {
         match self.try_into_virt() {
@@ -164,6 +177,13 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         PgOff::from_usize_truncate(self.addr)
     }
 
+    /// Create an address from a physical page number and, optionally, an offset
+    /// into the page.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the address is outside of the [`Mapping`]'s
+    /// range.
     #[track_caller]
     pub fn from_components(ppn: Ppn, pgoff: Option<PgOff>) -> Self {
         match Self::try_from_components(ppn, pgoff) {
@@ -182,7 +202,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     pub fn into_identity(self) -> Physical<T, Identity, Mut> {
         Physical {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -190,7 +210,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     pub fn into_mut(self) -> Physical<T, Map, super::Mut> {
         Physical {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -198,7 +218,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     pub fn into_const(self) -> Physical<T, Map, super::Const> {
         Physical {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 }
@@ -222,6 +242,6 @@ impl Ppn {
     }
 
     pub fn into_usize(self) -> usize {
-        self.0 as usize
+        self.0
     }
 }

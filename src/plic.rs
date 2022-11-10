@@ -6,7 +6,9 @@ pub struct Plic {
     inner: SpinMutex<PlicInner>,
 }
 
+// SAFETY: The `PlicInner` is protected by a `SpinMutex`
 unsafe impl Send for Plic {}
+// SAFETY: See above.
 unsafe impl Sync for Plic {}
 
 struct PlicInner {
@@ -15,6 +17,12 @@ struct PlicInner {
 }
 
 impl Plic {
+    /// Initialize the PLIC.
+    ///
+    /// # Safety
+    ///
+    /// The `plic_base` pointer must be valid and must be of the required size
+    /// of a PLIC
     pub unsafe fn init(&self, plic_base: *mut u8) {
         debug_assert_eq!(
             plic_base as usize % 4096,
@@ -30,20 +38,29 @@ impl Plic {
         inner.init = true;
     }
 
-    pub unsafe fn hart_set_spriority(&self, spriority: u32) {
+    /// Set the priority of an interrupt for the current hart.
+    pub fn hart_set_spriority(&self, spriority: u32) {
         let hart = asm::hartid();
         let inner = self.inner.lock();
+        // SAFETY: By our invariants, this is safe.
         let spriority_addr = unsafe {
             inner
                 .plic_base
                 .add(0x0020_1000 + 0x2000 * hart as usize)
                 .cast::<u32>()
         };
+        // SAFETY: By our invariants, this is safe.
         unsafe { spriority_addr.write_volatile(spriority) }
     }
 
-    pub unsafe fn hart_senable(&self, interrupt_id: u32) {
-        debug_assert!(
+    /// Enable an interrupt for the current hart.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `interrupt_id` is invalid (i.e., greater
+    /// than 1023).
+    pub fn hart_senable(&self, interrupt_id: u32) {
+        assert!(
             interrupt_id <= 1023,
             "Plic::hart_senable: cannot enable an interrupt with an ID greater than 1023"
         );
@@ -51,18 +68,27 @@ impl Plic {
         let offset = interrupt_id / 32;
         let bit_idx = interrupt_id % 32;
         let inner = self.inner.lock();
+        // SAFETY: By our invariants, this is safe.
         let addr = unsafe {
             inner
                 .plic_base
                 .add(0x2080 + 0x100 * hart as usize + 4 * offset as usize)
                 .cast::<u32>()
         };
+        // SAFETY: By our invariants, this is safe.
         let val = unsafe { addr.read_volatile() };
+        // SAFETY: By our invariants, this is safe.
         unsafe { addr.write_volatile(val | (1 << bit_idx)) };
     }
 
-    pub unsafe fn hart_sdisable(&self, interrupt_id: u32) {
-        debug_assert!(
+    /// Disable an interrupt for the current hart.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `interrupt_id` is invalid (i.e., greater
+    /// than 1023).
+    pub fn hart_sdisable(&self, interrupt_id: u32) {
+        assert!(
             interrupt_id <= 1023,
             "Plic::hart_sdisable: cannot disable an interrupt with an ID greater than 1023"
         );
@@ -70,48 +96,70 @@ impl Plic {
         let offset = interrupt_id / 32;
         let bit_idx = interrupt_id % 32;
         let inner = self.inner.lock();
+        // SAFETY: By our invariants, this is safe.
         let addr = unsafe {
             inner
                 .plic_base
                 .add(0x2080 + 0x100 * hart as usize + offset as usize)
                 .cast::<u32>()
         };
+        // SAFETY: By our invariants, this is safe.
         let val = unsafe { addr.read_volatile() };
+        // SAFETY: By our invariants, this is safe.
         unsafe { addr.write_volatile(val & !(1 << bit_idx)) };
     }
 
-    pub unsafe fn set_priority(&self, interrupt_id: u32, priority: u32) {
-        debug_assert!(interrupt_id <= 1023, "Plic::set_priority: cannot set the priority of an interrupt with an ID greater than 1023");
+    /// Set the priority of an interrupt for the current hart
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `interrupt_id` is invalid (i.e., greater
+    /// than 1023).
+    pub fn set_priority(&self, interrupt_id: u32, priority: u32) {
+        assert!(interrupt_id <= 1023, "Plic::set_priority: cannot set the priority of an interrupt with an ID greater than 1023");
         let inner = self.inner.lock();
+        // SAFETY: By our invariants, this is safe.
         let addr = unsafe { inner.plic_base.add(4 * interrupt_id as usize).cast::<u32>() };
+        // SAFETY: By our invariants, this is safe.
         unsafe { addr.write_volatile(priority) }
     }
 
-    pub unsafe fn hart_sclaim(&self) -> u32 {
+    /// Claim an interrupt for the current hart.
+    pub fn hart_sclaim(&self) -> u32 {
         let inner = self.inner.lock();
         let hart = asm::hartid();
+        // SAFETY: By our invariants, this is safe.
         let addr = unsafe {
             inner
                 .plic_base
                 .add(0x0020_1004 + 0x2000 * hart as usize)
                 .cast::<u32>()
         };
+        // SAFETY: By our invariants, this is safe.
         unsafe { addr.read_volatile() }
     }
 
-    pub unsafe fn hart_sunclaim(&self, interrupt_id: u32) {
-        debug_assert!(
+    /// Unclaim an interrupt for the current hart.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the `interrupt_id` is invalid (i.e., greater
+    /// than 1023).
+    pub fn hart_sunclaim(&self, interrupt_id: u32) {
+        assert!(
             interrupt_id <= 1023,
             "Plic::hart_sunclaim: cannot unclaim an interrupt with an ID greater than 1023"
         );
         let hart = asm::hartid();
         let inner = self.inner.lock();
+        // SAFETY: By our invariants, this is valid.
         let addr = unsafe {
             inner
                 .plic_base
                 .add(0x0020_1004 + 0x2000 * hart as usize)
                 .cast::<u32>()
         };
+        // SAFETY: By our invariants, this is valid.
         unsafe { addr.write_volatile(interrupt_id) }
     }
 }

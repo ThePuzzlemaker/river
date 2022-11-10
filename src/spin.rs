@@ -24,7 +24,7 @@ use crate::{
 /// drop(guard2);
 /// ```
 ///
-/// Due to how the SpinLock is implemented, this may cause deadlocks by
+/// Due to how the `SpinLock` is implemented, this may cause deadlocks by
 /// accidentally allowing interrupts to occur. For this reason, **always**
 /// block-scope your locks so that they are dropped in the correct order.
 ///
@@ -41,7 +41,12 @@ pub struct SpinMutex<T> {
     held_by: Cell<Option<u64>>,
 }
 
+// SAFETY: `SpinMutex`es only provide mutually exclusive access to their data,
+// and their locking state is atomic and thus does not provide simultaneous
+// mutable access due to race conditions. (TODO: properly verify atomics--I
+// *think* they're right...(?) (famous last words))
 unsafe impl<T: Sync + Send> Send for SpinMutex<T> {}
+// SAFETY: See above.
 unsafe impl<T: Sync + Send> Sync for SpinMutex<T> {}
 
 impl<T> SpinMutex<T> {
@@ -53,6 +58,11 @@ impl<T> SpinMutex<T> {
         }
     }
 
+    /// Lock the `SpinMutex`, potentially spinning if it is not available.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if it detects a deadlock.
     #[track_caller]
     pub fn lock(&'_ self) -> SpinMutexGuard<'_, T> {
         // Disable interrupts to prevent deadlocks.
@@ -66,9 +76,10 @@ impl<T> SpinMutex<T> {
         } else {
             hartid()
         };
-        if self.held_by.get() == Some(hartid) {
-            panic!("SpinMutex::lock: deadlock detected");
-        }
+        assert!(
+            self.held_by.get() != Some(hartid),
+            "SpinMutex::lock: deadlock detected"
+        );
 
         // Try to set the locked flag to `true` if it was `false`.
         // We loop if it could not be done, or if the previous value was
@@ -136,7 +147,7 @@ impl<'a, T> Drop for SpinMutexGuard<'a, T> {
         // Interrupts will always be disabled before TLS is enabled,
         // as it's enabled very early (before paging, even).
         if hart_local::enabled() {
-            LOCAL_HART.with(|hart| hart.pop_off())
+            LOCAL_HART.with(hart_local::HartCtx::pop_off);
         }
     }
 }

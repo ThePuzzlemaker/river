@@ -1,7 +1,6 @@
 use core::arch::asm;
 
 use crate::{
-    addr::{DirectMapped, VirtualMut},
     hart_local::{self, LOCAL_HART},
     paging::RawSatp,
 };
@@ -65,11 +64,17 @@ pub fn tp() -> u64 {
 #[inline]
 pub unsafe fn set_tp(v: usize) -> u64 {
     let tp = tp();
+    // SAFETY: Our caller guarantees this is safe.
     unsafe { asm!("mv tp, {}", in(reg) v, options(nostack)) };
     tp
 }
 
 // todo: move this elsewhere
+/// Get the hart ID of the current hart.
+///
+/// # Panics
+///
+/// This function will panic if interrupts are enabled when called.
 #[track_caller]
 pub fn hartid() -> u64 {
     let tp = tp() as usize;
@@ -85,6 +90,7 @@ pub fn hartid() -> u64 {
 #[inline]
 pub fn get_satp() -> RawSatp {
     let satp: u64;
+    // SAFETY: Reads from CSRs are atomic.
     unsafe { asm!("csrr {}, satp", out(reg) satp, options(nostack)) }
     RawSatp::new_unchecked(satp)
 }
@@ -151,6 +157,7 @@ const SIE_SEIE: usize = 1 << 9;
 #[inline]
 pub fn read_sepc() -> u64 {
     let r: u64;
+    // SAFETY: Reads from CSRs are atomic.
     unsafe { asm!("csrr {}, sepc", out(reg) r, options(nostack)) }
     r
 }
@@ -158,24 +165,28 @@ pub fn read_sepc() -> u64 {
 #[inline]
 pub fn read_scause() -> u64 {
     let r: u64;
+    // SAFETY: Reads from CSRs are atomic.
     unsafe { asm!("csrr {}, scause", out(reg) r, options(nostack)) }
     r
 }
 
 #[inline]
 pub fn write_sepc(sepc: u64) {
+    // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrw sepc, {}", in(reg) sepc, options(nostack)) }
 }
 
 #[inline]
 pub fn read_stval() -> u64 {
     let r: u64;
+    // SAFETY: Reads from CSRs are atomic.
     unsafe { asm!("csrr {}, stval", out(reg) r, options(nostack)) }
     r
 }
 
 #[inline]
 pub fn write_stval(stval: u64) {
+    // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrw stval, {}", in(reg) stval, options(nostack)) }
 }
 
@@ -184,6 +195,13 @@ pub const SCAUSE_INTR_BIT: u64 = 1 << 63;
 #[inline]
 pub fn read_time() -> u64 {
     let r: u64;
+    // SAFETY: Reads from CSRs are atomic.
     unsafe { asm!("csrr {}, time", out(reg) r, options(nostack)) }
     r
+}
+
+#[inline(always)]
+pub fn nop() {
+    // SAFETY: Executing a NOP is always safe.
+    unsafe { asm!("nop") }
 }

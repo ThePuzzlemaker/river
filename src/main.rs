@@ -15,7 +15,16 @@
 #![no_std]
 #![no_main]
 // TODO: maybe relax this a bit?
-#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_op_in_unsafe_fn, clippy::semicolon_if_nothing_returned)]
+#![warn(clippy::undocumented_unsafe_blocks, clippy::pedantic)]
+#![allow(
+    clippy::inline_always,
+    clippy::must_use_candidate,
+    clippy::cast_possible_truncation,
+    clippy::module_name_repetitions,
+    clippy::cast_ptr_alignment,
+    clippy::cast_lossless
+)]
 
 extern crate alloc;
 
@@ -41,23 +50,17 @@ extern "C" {
     pub fn start() -> !;
 }
 
-use core::{
-    alloc::{GlobalAlloc, Layout},
-    arch::asm,
-    panic::PanicInfo,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use core::{alloc::Layout, arch::asm, panic::PanicInfo};
 
 use addr::{Physical, Virtual};
-use alloc::{boxed::Box, format};
+use alloc::boxed::Box;
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
-use spin::SpinMutex;
 use uart::UART;
 
 use crate::{
-    addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst, VirtualMut},
+    addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst},
     asm::get_satp,
     boot::HartBootData,
     hart_local::LOCAL_HART,
@@ -71,13 +74,13 @@ use crate::{
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
 
 // It's unlikely the kernel itself is 64GiB in size, so we use this space.
-pub const KHEAP_VMEM_OFFSET: usize = 0xFFFFFFE000000000;
+pub const KHEAP_VMEM_OFFSET: usize = 0xFFFF_FFE0_0000_0000;
 pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
-pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
+extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     println!("[info] initialized paging");
 
     // // Allocate a 64-MiB heap.
@@ -111,16 +114,19 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         }
     }
     println!("mapped 64GiB of virtual heap");
+    // SAFETY: We guarantee that this virtual address is well-aligned and unaliased.
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
 
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
-        Err(_e) => panic!("error loading fdt"),
+        Err(e) => panic!("error loading fdt: {}", e),
     };
-    println!("fdt @ {:#p} -> {:#p}", fdt_ptr, unsafe {
-        fdt_ptr.add(fdt.total_size())
-    });
+    println!(
+        "fdt @ {:#p} -> {:#x}",
+        fdt_ptr,
+        fdt_ptr as usize + fdt.total_size()
+    );
 
     let plic = fdt
         .find_compatible(&["riscv,plic0"])
@@ -129,12 +135,14 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         plic.reg().unwrap().next().unwrap().starting_address as *mut _,
     );
     let plic_base = plic_base_phys.into_virt();
+    // SAFETY: Our caller guarantees that the PLIC's address in the FDT is valid.
     unsafe { PLIC.init(plic_base.into_ptr_mut()) }
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
-    unsafe { PLIC.set_priority(uart_irq, 1) }
-    unsafe { PLIC.hart_senable(uart_irq) }
-    unsafe { PLIC.hart_set_spriority(0) }
+    PLIC.set_priority(uart_irq, 1);
+    PLIC.hart_senable(uart_irq);
+    PLIC.hart_set_spriority(0);
+    // SAFETY: Writes to CSRs are atomic and the trap vector address is valid.
     unsafe { asm!("csrw stvec, {}", in(reg) trap::kernel_trapvec) }
 
     IRQS.get_or_init(|| Irqs { uart: uart_irq });
@@ -184,8 +192,8 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 .into_phys()
                 .into_usize();
 
-            sbi::hsm::hart_start(id, start_hart_addr as usize, boot_data_phys)
-                .expect("Could not start hart")
+            sbi::hsm::hart_start(id, start_hart_addr, boot_data_phys)
+                .expect("Could not start hart");
         }
         hart.pop_off();
 
@@ -201,27 +209,28 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     });
 
     loop {
-        nop()
+        asm::nop();
     }
 }
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain_hart"]
-pub extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
+extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     println!("[{0}] [info] hart {0} starting", hartid());
 
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
-        Err(_e) => panic!("error loading fdt"),
+        Err(e) => panic!("error loading fdt: {e}"),
     };
 
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
-    unsafe { PLIC.set_priority(uart_irq, 1) }
-    unsafe { PLIC.hart_senable(uart_irq) }
-    unsafe { PLIC.hart_set_spriority(0) }
+    PLIC.set_priority(uart_irq, 1);
+    PLIC.hart_senable(uart_irq);
+    PLIC.hart_set_spriority(0);
+    // SAFETY: Writes to CSRs are atomic, and the address provided is valid.
     unsafe { asm!("csrw stvec, {}", in(reg) trap::kernel_trapvec) }
 
     asm::software_intr_on();
@@ -232,13 +241,8 @@ pub extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     asm::intr_on();
 
     loop {
-        nop()
+        asm::nop();
     }
-}
-
-#[inline(always)]
-pub fn nop() {
-    unsafe { asm!("nop") }
 }
 
 #[panic_handler]
@@ -271,22 +275,11 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
             .print_str_sync("panic occurred (reason unavailable).\n");
     }
     loop {
-        nop()
+        asm::nop();
     }
 }
 
 #[alloc_error_handler]
-pub fn alloc_error_handler(_: Layout) -> ! {
+fn alloc_error_handler(_: Layout) -> ! {
     panic!("out of memory")
-}
-
-struct OomAlloc;
-unsafe impl GlobalAlloc for OomAlloc {
-    unsafe fn alloc(&self, _: Layout) -> *mut u8 {
-        panic!("OomAlloc::allocate")
-    }
-
-    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {
-        panic!("OomAlloc::deallocate")
-    }
 }

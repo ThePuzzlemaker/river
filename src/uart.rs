@@ -107,12 +107,12 @@ impl Ns16650Inner {
         unsafe {
             self.serial_base()
                 .add(DIVISOR_LATCH_LSB)
-                .write_volatile(lsb)
+                .write_volatile(lsb);
         }
         unsafe {
             self.serial_base()
                 .add(DIVISOR_LATCH_MSB)
-                .write_volatile(msb)
+                .write_volatile(msb);
         }
 
         unsafe { self.write_lcr(lcr) }
@@ -164,7 +164,7 @@ impl Ns16650Inner {
 
     pub fn print_str_sync(&mut self, s: &str) {
         for b in s.as_bytes() {
-            self.putc_sync(*b)
+            self.putc_sync(*b);
         }
     }
 }

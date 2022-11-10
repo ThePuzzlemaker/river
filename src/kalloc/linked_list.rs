@@ -63,12 +63,12 @@ pub struct LinkedListAlloc {
     inner: SpinMutex<LinkedListAllocInner>,
 }
 
+// SAFETY: The `LinkedListAllocatorInner` inside is protected by a `SpinMutex`.
 unsafe impl Send for LinkedListAlloc {}
+// SAFETY: See above.
 unsafe impl Sync for LinkedListAlloc {}
 
 impl LinkedListAlloc {
-    // There can be more than one LinkedListAlloc, so we specify the base here.
-    // TODO: should we just... not?
     pub const fn new() -> Self {
         Self {
             inner: SpinMutex::new(LinkedListAllocInner {
@@ -81,6 +81,13 @@ impl LinkedListAlloc {
         }
     }
 
+    // TODO: make sure there's a limiting address.
+
+    /// Initialize the [`LinkedListAlloc`].
+    ///
+    /// # Safety
+    ///
+    /// The pointer provided must be page-aligned and must not be aliased.  
     pub unsafe fn init(&self, base: VirtualMut<u8, Identity>) {
         let mut alloc = self.inner.lock();
         alloc.base = base;
@@ -236,13 +243,14 @@ unsafe impl GlobalAlloc for LinkedListAlloc {
     #[track_caller]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.allocate(layout)
-            .map(|x| x.as_mut_ptr())
+            .map(NonNull::as_mut_ptr)
             .ok()
             .unwrap_or_else(ptr::null_mut)
     }
 
     #[track_caller]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: Our caller guarantees this is safe.
         unsafe { self.deallocate(NonNull::new_unchecked(ptr), layout) }
     }
 }
@@ -265,7 +273,7 @@ unsafe impl Allocator for LinkedListAlloc {
                 n_bytes_padding,
                 new_unmanaged_ptr,
                 grow_heap,
-            } => unsafe {
+            } => {
                 if intrinsics::unlikely(grow_heap) {
                     let order = phys::what_order(needed_size);
                     let page = {
@@ -295,7 +303,7 @@ unsafe impl Allocator for LinkedListAlloc {
                     }
                 }
 
-                ptr.cast::<usize>().write(needed_size);
+                unsafe { ptr.cast::<usize>().write(needed_size) };
                 // if n_bytes_padding == 0 {
                 //     // This is kind of inefficient but I think it's the best we
                 //     // can do.
@@ -309,48 +317,56 @@ unsafe impl Allocator for LinkedListAlloc {
                 //     n_bytes_padding = layout.align().saturating_sub(2 * mem::size_of::<usize>());
                 // }
 
-                ptr.cast::<u8>()
-                    .add(n_bytes_padding)
-                    .cast::<usize>()
-                    .write(n_bytes_padding);
+                unsafe {
+                    ptr.cast::<u8>()
+                        .add(n_bytes_padding)
+                        .cast::<usize>()
+                        .write(n_bytes_padding)
+                };
                 alloc.unmanaged_ptr = new_unmanaged_ptr;
-                ptr.cast::<u8>()
-                    .add(mem::size_of::<usize>())
-                    .add(n_bytes_padding)
-            },
+                unsafe {
+                    ptr.cast::<u8>()
+                        .add(mem::size_of::<usize>())
+                        .add(n_bytes_padding)
+                }
+            }
             FoundNode::Old {
                 ptr,
                 needed_size,
                 n_bytes_padding,
                 ..
-            } => unsafe {
+            } => {
                 // println_hacky!(
                 //     "old node: ptr={:#p} needed_size={:?} n_bytes_padding={:?}",
                 //     ptr,
                 //     needed_size,
                 //     n_bytes_padding
                 // );
-                let mut node = &mut *ptr;
+                let mut node = unsafe { &mut *ptr };
                 node.size_tag = needed_size;
                 // N.B. null prev == node is at head of free-list
                 if node.prev.is_null() {
                     alloc.free_list = node.next;
                 } else {
-                    (*node.prev).next = node.next;
+                    unsafe { (*node.prev).next = node.next };
                 }
                 // Don't need to do anything here if this is at the tail of the
                 // free-list.
                 if !node.next.is_null() {
-                    (*node.next).prev = node.prev;
+                    unsafe { (*node.next).prev = node.prev };
                 }
-                ptr.cast::<u8>()
-                    .add(n_bytes_padding)
-                    .cast::<usize>()
-                    .write(n_bytes_padding);
-                ptr.cast::<u8>()
-                    .add(mem::size_of::<usize>())
-                    .add(n_bytes_padding)
-            },
+                unsafe {
+                    ptr.cast::<u8>()
+                        .add(n_bytes_padding)
+                        .cast::<usize>()
+                        .write(n_bytes_padding)
+                };
+                unsafe {
+                    ptr.cast::<u8>()
+                        .add(mem::size_of::<usize>())
+                        .add(n_bytes_padding)
+                }
+            }
         };
 
         debug_assert_eq!(
@@ -430,7 +446,7 @@ unsafe impl Allocator for LinkedListAlloc {
                     (*next).prev = node_ptr;
                     addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
                     addr_of_mut!((*node_ptr).prev).write(prev);
-                    addr_of_mut!((*node_ptr).next).write(next)
+                    addr_of_mut!((*node_ptr).next).write(next);
                 }
             }
 

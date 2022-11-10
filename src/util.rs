@@ -1,9 +1,6 @@
 //! Utilities for pre-paging println! debugging
 
-use core::{
-    mem::{self, MaybeUninit},
-    ptr, slice, str,
-};
+use core::{mem::MaybeUninit, ptr, slice, str};
 
 use crate::uart::Ns16650Inner;
 
@@ -16,6 +13,7 @@ static DEC_DIGITS_LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
       8081828384858687888990919293949596979899";
 
 impl Ns16650Inner {
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     pub fn early_print_u64(&mut self, mut n: u64) {
         // 2^128 is about 3*10^38, so 39 gives an extra byte of space
         let mut buf = [MaybeUninit::<u8>::uninit(); 39];
@@ -31,9 +29,6 @@ impl Ns16650Inner {
         // non-negative, this means that `curr > 0` so `buf_ptr[curr..curr + 1]`
         // is safe to access.
         unsafe {
-            // need at least 16 bits for the 4-characters-at-a-time to work.
-            assert!(mem::size_of::<u64>() >= 2);
-
             // eagerly decode 4 characters at a time
             while n >= 10000 {
                 let rem = (n % 10000) as isize;

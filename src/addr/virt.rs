@@ -37,13 +37,13 @@ use super::{Identity, Mapping, Mutability, PgOff, Physical};
 #[repr(transparent)]
 pub struct Virtual<T, Map: Mapping, Mut: Mutability<T>> {
     pub(super) addr: usize,
-    pub(super) _phantom: PhantomData<(Map, Mut, Mut::RawPointer)>,
+    pub(super) phantom: PhantomData<(Map, Mut, Mut::RawPointer)>,
 }
 
 impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     pub const NULL: Self = Self {
         addr: 0,
-        _phantom: PhantomData,
+        phantom: PhantomData,
     };
 
     /// Create a [`Virtual`] address from a [`usize`].
@@ -55,7 +55,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     #[track_caller]
     pub fn from_usize(addr: usize) -> Self {
         match Self::try_from_usize(addr) {
-            Some(vaddr) => vaddr,
+            Some(virt_addr) => virt_addr,
             None => panic!(
                 "Virtual::from_usize: not in address space: addr={:#p}, map={:?}, mut={:?}",
                 addr as *mut u8,
@@ -113,7 +113,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     pub unsafe fn from_usize_unchecked(addr: usize) -> Self {
         Self {
             addr: canonicalize(addr),
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -135,6 +135,13 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         ]
     }
 
+    /// Create an address from virtual page numbers, and optionally, an offset
+    /// into the page.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the resulting address is outside of the
+    /// [`Mapping`]'s range.
     #[track_caller]
     pub fn from_components(vpns: [Vpn; 3], pgoff: Option<PgOff>) -> Self {
         match Self::try_from_components(vpns, pgoff) {
@@ -144,12 +151,12 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     }
 
     pub fn try_from_components(vpns: [Vpn; 3], pgoff: Option<PgOff>) -> Option<Self> {
-        let [vpn0, vpn1, vpn2] = vpns;
-        let vpn2 = vpn2.into_usize() << (9 * 2);
-        let vpn1 = vpn1.into_usize() << 9;
-        let vpn0 = vpn0.into_usize();
+        let [vpn_0, vpn_1, vpn_2] = vpns;
+        let vpn_2 = vpn_2.into_usize() << (9 * 2);
+        let vpn_1 = vpn_1.into_usize() << 9;
+        let vpn_0 = vpn_0.into_usize();
         let pgoff = pgoff.unwrap_or_default().into_usize();
-        Self::try_from_usize(vpn2 | vpn1 | vpn0 | pgoff)
+        Self::try_from_usize(vpn_2 | vpn_1 | vpn_0 | pgoff)
     }
 
     #[inline]
@@ -179,7 +186,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     {
         Virtual {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -187,10 +194,16 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     pub fn into_identity(self) -> Virtual<T, Identity, Mut> {
         Virtual {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
+    /// Convert a virtual address into a physical address using its [`Mapping`].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the address is outside of the [`Mapping`]'s
+    /// range.
     #[track_caller]
     pub fn into_phys(self) -> Physical<T, Map, Mut> {
         match self.try_into_phys() {
@@ -212,7 +225,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     pub fn into_const(self) -> Virtual<T, Map, super::Const> {
         Virtual {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
@@ -220,12 +233,19 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     pub fn into_mut(self) -> Virtual<T, Map, super::Mut> {
         Virtual {
             addr: self.addr,
-            _phantom: PhantomData,
+            phantom: PhantomData,
         }
     }
 
+    /// Increment an address `by` bytes.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the resulting address is outside of the
+    /// [`Mapping`]'s range.
     #[allow(clippy::should_implement_trait)]
     #[track_caller]
+    #[must_use]
     pub fn add(self, by: usize) -> Self {
         match self.checked_add(by) {
             Some(vaddr) => vaddr,
@@ -252,7 +272,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> fmt::Pointer for Virtual<T, Map, Mut> 
 pub struct Vpn(u16);
 
 /// A 9-bit mask.
-const VPN_MASK: usize = 0b111111111;
+const VPN_MASK: usize = 0b1_1111_1111;
 
 impl Vpn {
     pub fn from_usize_truncate(vpn: usize) -> Self {

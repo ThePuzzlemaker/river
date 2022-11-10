@@ -18,11 +18,11 @@ use fdt::Fdt;
 
 use crate::{
     addr::{
-        DirectMapped, Kernel, PhysicalConst, PhysicalMut, VirtualConst, VirtualMut,
-        ACTUAL_PHYSICAL_OFFSET, PHYSICAL_OFFSET,
+        DirectMapped, Kernel, PhysicalConst, PhysicalMut, VirtualConst, ACTUAL_PHYSICAL_OFFSET,
+        PHYSICAL_OFFSET,
     },
-    asm::{hartid, tp},
-    hart_local::{self, LOCAL_HART},
+    asm::{self, hartid, tp},
+    hart_local,
     kalloc::phys::PMAlloc,
     paging::{PageTable, PageTableFlags, RawSatp, Satp},
     symbol,
@@ -35,18 +35,17 @@ use crate::{
 #[link_section = ".init.early_trapvec"]
 fn early_trap_handler() -> ! {
     loop {
-        crate::nop()
+        asm::nop();
     }
 }
 
-/// # Safety
-///
-/// Here be dragons. This is the kernel entry point.
-/// Don't call it unless, well, you're the kernel *just* after boot.
 #[no_mangle]
-pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
+#[allow(clippy::too_many_lines)]
+unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // Make sure traps don't cause a bunch of exceptions, by just loop { nop }-ing them.
+    // SAFETY: Writes to CSRs are atomic and the trap handler address is valid.
     unsafe { asm!("csrw stvec, {}", in(reg) early_trap_handler as usize) };
+    // SAFETY: OpenSBI guarantees the FDT pointer is valid.
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
         Err(_e) => {
@@ -61,6 +60,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
 
     {
         let mut uart = UART.lock();
+        // SAFETY: Our caller guarantees that this address is valid.
         unsafe { uart.init(uart_reg.starting_address as *mut u8) };
         uart.print_str_sync("[");
         uart.early_print_u64(hartid());
@@ -140,7 +140,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             addr.into_identity(),
             addr.into_virt().into_identity(),
             PageTableFlags::RW | PageTableFlags::VAD,
-        )
+        );
     }
 
     let data_start = symbol::data_start().into_usize();
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             addr.into_identity(),
             addr.into_virt().into_identity(),
             PageTableFlags::RW | PageTableFlags::VAD,
-        )
+        );
     }
 
     let tmp_stack_start = symbol::tmp_stack_bottom().into_usize();
@@ -165,7 +165,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             addr.into_identity(),
             addr.into_virt().into_identity(),
             PageTableFlags::RW | PageTableFlags::VAD,
-        )
+        );
     }
 
     let text_start = symbol::text_start().into_usize();
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             addr.into_identity(),
             addr.into_virt().into_identity(),
             PageTableFlags::READ | PageTableFlags::EXECUTE | PageTableFlags::VAD,
-        )
+        );
     }
 
     for addr in 0..64 {
@@ -201,6 +201,7 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     PHYSICAL_OFFSET.store(ACTUAL_PHYSICAL_OFFSET, Ordering::Relaxed);
 
     let gp: usize;
+    // SAFETY: The value being written into GP is valid.
     unsafe {
         asm!("lla {}, __global_pointer$", out(reg) gp);
     }
@@ -208,13 +209,13 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let tp = tp();
 
     // Fixup sp, gp, and tp to be in the right address space
-    let new_sp = PhysicalMut::<u8, Kernel>::from_usize(tmp_stack_end)
+    let new_stack_ptr = PhysicalMut::<u8, Kernel>::from_usize(tmp_stack_end)
         .into_virt()
         .into_usize();
-    let new_gp = PhysicalMut::<u8, Kernel>::from_usize(gp)
+    let new_global_ptr = PhysicalMut::<u8, Kernel>::from_usize(gp)
         .into_virt()
         .into_usize();
-    let new_tp = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
+    let new_thread_ptr = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
         .into_virt()
         .into_usize();
 
@@ -229,12 +230,19 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // Now that we've gotten the panics out of the way, we need to make sure we
     // fix up the serial port address so if anything panics at the start of
     // kmain, it will actually be able to print.
-    let serial_paddr: PhysicalMut<u8, DirectMapped> =
+    let serial_phys_addr: PhysicalMut<u8, DirectMapped> =
         PhysicalConst::from_ptr(uart_reg.starting_address).into_mut();
-    let serial_vaddr = serial_paddr.into_virt();
+    let serial_virt_addr = serial_phys_addr.into_virt();
 
-    // Update the UART base w/ its direct-mapped virtual addr
-    unsafe { UART.lock().update_serial_base(serial_vaddr.into_ptr_mut()) };
+    // Update the UART base w/ its direct-mapped virtual addr.
+    //
+    // SAFETY: This address is valid given that paging is enabled, and the UART
+    // code has a countermeasure for any printing before paging is enabled on
+    // the current hart.
+    unsafe {
+        UART.lock()
+            .update_serial_base(serial_virt_addr.into_ptr_mut());
+    };
 
     unsafe {
         asm!(
@@ -255,9 +263,9 @@ pub unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         ",
             mxr = in(reg) 1 << 19,
             satp = in(reg) raw_satp.as_usize(),
-            new_sp = in(reg) new_sp,
-            new_gp = in(reg) new_gp,
-            new_tp = in(reg) new_tp,
+            new_sp = in(reg) new_stack_ptr,
+            new_gp = in(reg) new_global_ptr,
+            new_tp = in(reg) new_thread_ptr,
             stvec = in(reg) kmain_virt.into_usize(),
 
             // `kmain` args
@@ -347,8 +355,9 @@ extern "C" {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMapped>) -> ! {
+unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMapped>) -> ! {
     // Make sure traps don't cause a bunch of exceptions, by just loop { nop }-ing them.
+    // SAFETY: Writes to CSRs are atomic and the trap handler address is valid.
     unsafe { asm!("csrw stvec, {}", in(reg) early_trap_handler as usize) };
 
     {
@@ -373,6 +382,7 @@ pub unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectM
     }
 
     let gp: usize;
+    // SAFETY: The value being written into GP is valid.
     unsafe {
         asm!("lla {}, __global_pointer$", out(reg) gp);
     }
@@ -380,13 +390,18 @@ pub unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectM
     let tp = tp();
 
     // Fixup sp, gp, and tp to be in the right address space
-    let new_sp = unsafe { (*data.into_identity().into_virt().into_ptr()).sp_phys }
+    //
+    // TODO: stop doing this whole rigmaroll and make this better (add an
+    // `into_ptr` to phymem ops)
+    //
+    // SAFETY: Our caller guarantees this is safe.
+    let new_stack_ptr = unsafe { (*data.into_identity().into_virt().into_ptr()).sp_phys }
         .into_virt()
         .into_usize();
-    let new_gp = PhysicalMut::<u8, Kernel>::from_usize(gp)
+    let new_global_ptr = PhysicalMut::<u8, Kernel>::from_usize(gp)
         .into_virt()
         .into_usize();
-    let new_tp = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
+    let new_thread_ptr = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
         .into_virt()
         .into_usize();
 
@@ -394,8 +409,10 @@ pub unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectM
 
     let kmain_hart_virt: VirtualConst<_, Kernel> = PhysicalConst::from_ptr(kmain_hart).into_virt();
 
+    // SAFETY: Our caller guarantees this is safe.
     let fdt_ptr = unsafe { (*data.into_identity().into_virt().into_ptr()).fdt_ptr_virt }.into_ptr();
 
+    // SAFETY: Our caller guarantees this is safe.
     let raw_satp = unsafe { (*data.into_identity().into_virt().into_ptr()).raw_satp };
 
     unsafe {
@@ -417,9 +434,9 @@ pub unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectM
         ",
             mxr = in(reg) 1 << 19,
             satp = in(reg) raw_satp.as_usize(),
-            new_sp = in(reg) new_sp,
-            new_gp = in(reg) new_gp,
-            new_tp = in(reg) new_tp,
+            new_sp = in(reg) new_stack_ptr,
+            new_gp = in(reg) new_global_ptr,
+            new_tp = in(reg) new_thread_ptr,
             stvec = in(reg) kmain_hart_virt.into_usize(),
 
             // `kmain_hart` args

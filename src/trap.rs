@@ -15,7 +15,7 @@ pub struct Irqs {
 pub static IRQS: OnceCell<Irqs> = OnceCell::new();
 
 #[no_mangle]
-pub unsafe extern "C" fn kernel_trap() {
+unsafe extern "C" fn kernel_trap() {
     assert!(!intr_enabled(), "kernel_trap: interrupts enabled");
     // N.B. LOCAL_HART is not SpinMutex-guarded, so interrupts will not be
     // enabled during this line. And we catch if they were above.
@@ -39,26 +39,24 @@ pub unsafe extern "C" fn kernel_trap() {
     );
 
     // Not an interrupt.
-    if scause & SCAUSE_INTR_BIT == 0 {
-        panic!(
-            "kernel exception: {}, hart={} sepc={:#x} stval={:#x} scause={:#x}",
-            describe_exception(scause),
-            hartid(),
-            sepc,
-            asm::read_stval(),
-            scause
-        )
-    }
+    assert!(
+        scause & SCAUSE_INTR_BIT != 0,
+        "kernel exception: {}, hart={} sepc={:#x} stval={:#x} scause={:#x}",
+        describe_exception(scause),
+        hartid(),
+        sepc,
+        asm::read_stval(),
+        scause
+    );
 
     let kind = device_interrupt(scause);
-    if kind == InterruptKind::Unknown {
-        panic!(
-            "kernel trap from unknown device, sepc={:#x} stval={:#x} scause={:#x}",
-            sepc,
-            asm::read_stval(),
-            scause
-        )
-    }
+    assert!(
+        kind != InterruptKind::Unknown,
+        "kernel trap from unknown device, sepc={:#x} stval={:#x} scause={:#x}",
+        sepc,
+        asm::read_stval(),
+        scause
+    );
 
     asm::write_sepc(sepc);
     asm::write_sstatus(sstatus);
@@ -72,7 +70,7 @@ fn device_interrupt(scause: u64) -> InterruptKind {
     // cause == 9 => external interrut
     if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 9 {
         // claim this interrupt
-        let irq = unsafe { PLIC.hart_sclaim() };
+        let irq = PLIC.hart_sclaim();
 
         if irq == IRQS.expect("IRQS").uart {
             uart::handle_interrupt();
@@ -81,7 +79,7 @@ fn device_interrupt(scause: u64) -> InterruptKind {
         }
 
         if irq != 0 {
-            unsafe { PLIC.hart_sunclaim(irq) };
+            PLIC.hart_sunclaim(irq);
         }
 
         InterruptKind::External
@@ -224,16 +222,16 @@ pub fn describe_exception(id: u64) -> &'static str {
 }
 
 #[link_section = ".init.user_trap"]
-pub unsafe extern "C" fn user_trap() {
+unsafe extern "C" fn user_trap() {
     // Make sure we interrupt into kernel_trapvec, now that we're in S-mode.
-    unsafe { core::arch::asm!("csrw stvec, {}", sym kernel_trapvec) }
+    // SAFETY: Writes to CSRs are atomic and the address we provide is valid.
+    unsafe { core::arch::asm!("csrw stvec, {}", in(reg) kernel_trapvec) }
 
-    if asm::read_sstatus() & SSTATUS_SPP != 0 {
-        panic!(
-            "user_trap: Did not trap from U-mode, sstatus={}",
-            asm::read_sstatus()
-        );
-    }
+    assert!(
+        asm::read_sstatus() & SSTATUS_SPP == 0,
+        "user_trap: Did not trap from U-mode, sstatus={}",
+        asm::read_sstatus()
+    );
 
     todo!();
 }

@@ -85,13 +85,14 @@ impl PMAlloc {
         let bitree_n_pages = calc_bitree_pages(pma.max_order);
         pma.size = size;
         for page_idx in 0..bitree_n_pages {
+            // SAFETY: Our caller guarantees that that this area is safe to modify.
             unsafe { pma.mark_used(base.cast().add(4096 * page_idx), 0) };
         }
     }
 
     /// # Panics
     ///
-    /// This function will panic if the global PMAlloc has not been initialized.
+    /// This function will panic if the global `PMAlloc` has not been initialized.
     /// See [`PMAlloc::init`].
     #[track_caller]
     pub fn get() -> SpinMutexGuard<'static, PMAlloc> {
@@ -108,9 +109,13 @@ impl PMAlloc {
     ///
     /// # Safety
     ///
-    /// This function is wildly unsafe.
-    /// Use with caution.
-    /// Proper safety documentation coming soon™
+    /// This function is wildly unsafe. Use with caution. Proper safety
+    /// documentation coming soon™
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the page is outside the range of this
+    /// allocator.
     pub unsafe fn mark_used(&mut self, chunk: PhysicalMut<u8, DirectMapped>, order: u32) {
         let alloc_off = (chunk.into_usize() - self.base.into_usize()) / (4096 * (1 << order));
         let ix = self.bitree.ix_of(alloc_off, order).unwrap();
@@ -132,12 +137,16 @@ impl PMAlloc {
     }
 
     /// Allocate a (2^order * 4096)-large chunk.
+    ///
+    /// # Panics
+    ///
+    /// TODO: I have no clue why this can panic.
     pub fn allocate(&mut self, order: u32) -> Option<PhysicalMut<u8, DirectMapped>> {
         if order > TOTAL_MAX_ORDER {
             return None;
         }
 
-        let ix_base = self.bitree.ix_of_first(order)?;
+        let ix_base = self.bitree.ix_of_first(order);
         let n_nodes = self.bitree.num_nodes(order);
         for ix in ix_base..ix_base + n_nodes {
             // Set the bit. Continue if it was already set.
@@ -160,16 +169,23 @@ impl PMAlloc {
     ///
     /// # Safety
     ///
-    /// - The pointer provided must have been allocated by [`PMAlloc::allocate`].
-    /// - The order provided must be the same as the one used to allocate this chunk.
+    /// - The pointer provided must have been allocated by
+    ///   [`PMAlloc::allocate`].
+    /// - The order provided must be the same as the one used to allocate this
+    ///   chunk.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the provided order was larger than this
+    /// allocator can handle.
     #[track_caller]
     pub unsafe fn deallocate(&mut self, chunk: PhysicalMut<u8, DirectMapped>, order: u32) {
-        if order > TOTAL_MAX_ORDER {
-            panic!(
-                "PMAlloc::deallocate: order was too large: chunk={:?}, order={:?}",
-                chunk, order
-            )
-        }
+        assert!(
+            order <= TOTAL_MAX_ORDER,
+            "PMAlloc::deallocate: order was too large: chunk={:?}, order={:?}",
+            chunk,
+            order
+        );
 
         let alloc_off = (chunk.into_usize() - self.base.into_usize()) / (4096 * (1 << order));
         let ix = self
@@ -178,12 +194,12 @@ impl PMAlloc {
             .expect("PMAlloc::deallocate: could not find ix of chunk");
 
         // Deallocate this node
-        if !self.bitree.set(ix, false) {
-            panic!(
-                "PMAlloc::deallocate: double free: chunk={:?}, order={:?}",
-                chunk, order
-            )
-        }
+        assert!(
+            self.bitree.set(ix, false),
+            "PMAlloc::deallocate: double free: chunk={:?}, order={:?}",
+            chunk,
+            order
+        );
 
         let mut loop_sibling = self.bitree.sibling(ix);
         while let Some(sibling) = loop_sibling {
@@ -197,7 +213,7 @@ impl PMAlloc {
                 // Unset the parent.
                 self.bitree.set(parent, false);
                 // Continue the loop with the parent's sibling.
-                loop_sibling = self.bitree.sibling(parent)
+                loop_sibling = self.bitree.sibling(parent);
             } else {
                 // We're at the root node, so we can't coalesce.
                 return;
@@ -206,12 +222,13 @@ impl PMAlloc {
     }
 }
 
+// TODO: Do a PMAllocInner because this technically isn't safe.
 unsafe impl Send for PMAlloc {}
 unsafe impl Sync for PMAlloc {}
 
 #[inline(always)]
 const fn calc_max_order(size: usize) -> u32 {
-    (size / 4096).ilog2() as u32
+    (size / 4096).ilog2()
 }
 
 #[inline(always)]
@@ -274,6 +291,7 @@ impl fmt::Debug for BitreeDataWrapper {
     }
 }
 
+#[allow(clippy::copy_iterator)]
 impl Iterator for BitreeDataWrapper {
     type Item = AlwaysBinary;
 
@@ -336,7 +354,7 @@ impl Bitree {
         };
         // SAFETY: This is valid due to our invariants.
         let word_ref = unsafe { &mut *virt.into_ptr_mut() };
-        let flag = (val as usize) << bit;
+        let flag = usize::from(val) << bit;
         let old = *word_ref;
         // clear bit
         *word_ref &= !(1 << bit);
@@ -385,9 +403,9 @@ impl Bitree {
         Some(ix)
     }
 
-    /// Get the index of the alloc_off'th node in the order'th level of the tree, bottom-up
+    /// Get the index of the `alloc_off`'th node in the order'th level of the tree, bottom-up
     pub fn ix_of(&self, alloc_off: usize, order: u32) -> Option<usize> {
-        let ix_base = self.ix_of_first(order)?;
+        let ix_base = self.ix_of_first(order);
         // add in the offset
         let ix = ix_base + alloc_off;
         if ix > self.n_bits {
@@ -397,14 +415,14 @@ impl Bitree {
     }
 
     /// Get the index of the first node in the order'th level of the tree, bottom-up
-    pub fn ix_of_first(&self, order: u32) -> Option<usize> {
-        Some((1 << (self.max_order - order)) - 1)
+    pub fn ix_of_first(&self, order: u32) -> usize {
+        (1 << (self.max_order - order)) - 1
     }
 
-    /// Get the alloc_off of the ix'th node
+    /// Get the `alloc_off` of the ix'th node
     pub fn alloc_off_of(&self, ix: usize) -> Option<usize> {
         let order = self.order_of(ix)?;
-        let ix_base = self.ix_of_first(order)?;
+        let ix_base = self.ix_of_first(order);
         // subtract the base from the ix
         Some(ix - ix_base)
     }

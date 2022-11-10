@@ -66,7 +66,7 @@ mod _private {
 pub struct PgOff(u16);
 
 /// A 12-bit mask.
-const PGOFF_MASK: usize = 0b111111111111;
+const PGOFF_MASK: usize = 0b1111_1111_1111;
 
 impl PgOff {
     pub fn from_usize_truncate(pgoff: usize) -> Self {

@@ -11,10 +11,10 @@ use bitflags::bitflags;
 use crate::{
     addr::{
         DirectMapped, Identity, PgOff, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual,
-        VirtualConst, VirtualMut, Vpn,
+        VirtualConst, VirtualMut,
     },
     asm::{self, get_satp},
-    kalloc::phys::{self, PMAlloc},
+    kalloc::phys::PMAlloc,
     once_cell::OnceCell,
     spin::SpinMutex,
     units::StorageUnits,
@@ -22,17 +22,21 @@ use crate::{
 
 static ROOT_PAGE_TABLE: OnceCell<SpinMutex<PageTable>> = OnceCell::new();
 
-/// Do not call before paging is enabled.
+/// Get the root page table.
+///
+/// # Panics
+///
+/// This function will panic if paging is not enabled.
 #[track_caller]
 pub fn root_page_table() -> &'static SpinMutex<PageTable> {
     assert!(enabled(), "paging::root_page_table: paging must be enabled");
     ROOT_PAGE_TABLE.get_or_init(|| {
         let satp = get_satp().decode();
         let ppn = satp.ppn;
-        let paddr: PhysicalMut<_, DirectMapped> = PhysicalMut::from_components(ppn, None);
-        let vaddr = paddr.into_virt();
+        let phys_addr: PhysicalMut<_, DirectMapped> = PhysicalMut::from_components(ppn, None);
+        let virt_addr = phys_addr.into_virt();
         // SAFETY: The pointer is valid and we have an exclusive reference to it.
-        let pgtbl = unsafe { PageTable::from_raw(vaddr) };
+        let pgtbl = unsafe { PageTable::from_raw(virt_addr) };
         SpinMutex::new(pgtbl)
     })
 }
@@ -63,12 +67,13 @@ impl PageTable {
     /// The `root` pointer must be obtained from [`Self::into_raw`].
     pub unsafe fn from_raw(root: VirtualMut<RawPageTable, DirectMapped>) -> Self {
         Self {
+            // SAFETY: Our caller guarantees this is safe.
             root: unsafe { Box::from_raw_in(root.into_ptr_mut(), PagingAllocator) },
         }
     }
 
     pub fn as_physical(&mut self) -> PhysicalMut<RawPageTable, DirectMapped> {
-        Virtual::from_ptr(&mut *self.root as *mut _).into_phys()
+        Virtual::from_ptr(core::ptr::addr_of_mut!(*self.root)).into_phys()
     }
 
     fn new_table() -> Box<RawPageTable, PagingAllocator> {
@@ -76,15 +81,23 @@ impl PageTable {
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) }
     }
 
+    /// Walk a virtual address (which does not have to be page-aligned) and find
+    /// the physical address it maps to (which is offset from the page by the
+    /// same amount as the virtual address).
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if it is called with an unmapped virtual
+    /// address.
     #[track_caller]
-    pub fn walk(&self, ptr: VirtualConst<u8, Identity>) -> PhysicalConst<u8, Identity> {
-        let addr = ptr.into_usize();
+    pub fn walk(&self, virt_addr: VirtualConst<u8, Identity>) -> PhysicalConst<u8, Identity> {
+        let addr = virt_addr.into_usize();
         let page = addr.next_multiple_of(4096) - 4096;
         let offset = addr - page;
 
         let mut table = &*self.root;
 
-        for vpn in ptr.vpns().into_iter().rev() {
+        for vpn in virt_addr.vpns().into_iter().rev() {
             let entry = &table.ptes[vpn.into_usize()].decode();
 
             match entry.kind() {
@@ -96,17 +109,25 @@ impl PageTable {
                     );
                     return phys_page;
                 }
-                PTEKind::Branch(paddr) => table = unsafe { &*(paddr.into_virt().into_ptr()) },
+                PTEKind::Branch(phys_addr) => {
+                    // SAFETY: By our invariants, this is safe.
+                    table = unsafe { &*(phys_addr.into_virt().into_ptr()) }
+                }
                 PTEKind::Invalid => panic!(
                     "PageTable::walk: attempted to walk an unmapped vaddr: vaddr={:#p}, flags={:?}",
-                    ptr, entry.flags
+                    virt_addr, entry.flags
                 ),
             }
         }
 
-        todo!()
+        unreachable!();
     }
 
+    /// Map a gibibyte (GiB)-sized page in this page table.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if either the physical or virtual addresses are unaligned.
     #[track_caller]
     pub fn map_gib(
         &mut self,
@@ -117,15 +138,12 @@ impl PageTable {
         assert_eq!(
             from.into_usize() % 1.gib(),
             0,
-            "PageTable::map_gib: tried to map from an unaligned physical address: from={:#p}, to={:#p}, flags={:?}", from, to, flags
+            "PageTable::map_gib: tried to map from an unaligned physical address: from={from:#p}, to={to:#p}, flags={flags:?}"
         );
         assert_eq!(
             to.into_usize() % 1.gib(),
             0,
-            "PageTable::map_gib: tried to map to an unaligned virtual address: from={:#p}, to={:#p}, flags={:?}",
-            from,
-            to,
-            flags
+            "PageTable::map_gib: tried to map to an unaligned virtual address: from={from:#p}, to={to:#p}, flags={flags:?}",
         );
 
         let table = &mut *self.root;
@@ -138,6 +156,11 @@ impl PageTable {
         });
     }
 
+    /// Map a page in this page table.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if either the physical or virtual addresses are unaligned.
     #[track_caller]
     pub fn map(
         &mut self,
@@ -147,14 +170,11 @@ impl PageTable {
     ) {
         assert!(
             from.is_page_aligned(),
-            "PageTable::map: tried to map from an unaligned physical address: from={:#p}, to={:#p}, flags={:?}", from, to, flags
+            "PageTable::map: tried to map from an unaligned physical address: from={from:#p}, to={to:#p}, flags={flags:?}", 
         );
         assert!(
             to.is_page_aligned(),
-            "PageTable::map: tried to map to an unaligned virtual address: from={:#p}, to={:#p}, flags={:?}",
-            from,
-            to,
-            flags
+            "PageTable::map: tried to map to an unaligned virtual address: from={from:#p}, to={to:#p}, flags={flags:?}",
         );
 
         let mut table = &mut *self.root;
@@ -163,9 +183,7 @@ impl PageTable {
             let entry = &mut table.ptes[vpn.into_usize()];
 
             if lvl == 0 {
-                if entry.decode().flags & PageTableFlags::VALID != PageTableFlags::empty() {
-                    panic!("PageTable::map: attempted to map an already-mapped vaddr: from={:#p}, to={:#p}, flags={:?}, existing flags={:?}", from, to, flags, entry.decode().flags);
-                }
+                assert!(entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(), "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags);
 
                 entry.update_in_place(|mut pte| {
                     pte.flags = flags;
@@ -179,6 +197,7 @@ impl PageTable {
             match entry.decode().kind() {
                 PTEKind::Leaf => unreachable!(),
                 PTEKind::Branch(paddr) => {
+                    // SAFETY: By our invariants, this is safe.
                     table = unsafe { &mut *(paddr.into_virt().into_ptr_mut()) }
                 }
                 PTEKind::Invalid => {
@@ -208,11 +227,11 @@ pub struct RawPageTable {
 #[repr(transparent)]
 pub struct RawPageTableEntry(u64);
 
-fn subtable_ref(ppn: Ppn) -> &'static RawPageTable {
-    let paddr: PhysicalMut<_, DirectMapped> = Physical::from_components(ppn, None);
-    let vaddr = paddr.into_virt();
+unsafe fn subtable_ref(ppn: Ppn) -> &'static RawPageTable {
+    let phys_addr: PhysicalMut<_, DirectMapped> = Physical::from_components(ppn, None);
+    let virt_addr = phys_addr.into_virt();
     // TODO: make this actually properly safe
-    unsafe { &*vaddr.into_ptr() }
+    unsafe { &*virt_addr.into_ptr() }
 }
 
 #[derive(Copy, Clone)]
@@ -225,7 +244,7 @@ impl fmt::Debug for KindFormatter {
             PTEKind::Branch(_) => f
                 .debug_struct("PTEKind::Branch")
                 .field("phys_addr", &self.0.ppn)
-                .field("subtable", &subtable_ref(self.0.ppn))
+                .field("subtable", &unsafe { subtable_ref(self.0.ppn) })
                 .finish(),
             PTEKind::Invalid => f.debug_tuple("PTEKind::Invalid").finish(),
         }
@@ -251,12 +270,13 @@ impl RawPageTableEntry {
         }
     }
 
+    #[must_use]
     pub fn update(self, f: impl FnOnce(PageTableEntry) -> PageTableEntry) -> RawPageTableEntry {
         f(self.decode()).encode()
     }
 
     pub fn update_in_place(&mut self, f: impl FnOnce(PageTableEntry) -> PageTableEntry) {
-        f(self.decode()).encode_to(self)
+        f(self.decode()).encode_to(self);
     }
 }
 
@@ -325,6 +345,10 @@ bitflags! {
 
 pub struct PagingAllocator;
 
+// SAFETY:
+// - This allocator always provides valid addresses and never double-allocates.
+// - This allocator cannot be cloned.
+// - Addresses allocated with this allocator can be freed by it.
 unsafe impl Allocator for PagingAllocator {
     #[track_caller]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -354,10 +378,11 @@ unsafe impl Allocator for PagingAllocator {
             "PagingAllocator::allocate the paging allocator must allocate 4KiB blocks"
         );
 
-        let vaddr: VirtualMut<u8, DirectMapped> = Virtual::from_ptr(ptr.as_ptr());
-        let paddr = vaddr.into_phys();
+        let virt_addr: VirtualMut<u8, DirectMapped> = Virtual::from_ptr(ptr.as_ptr());
+        let phys_addr = virt_addr.into_phys();
 
-        unsafe { PMAlloc::get().deallocate(paddr, 0) }
+        // SAFETY: Our caller guarantees this is safe.
+        unsafe { PMAlloc::get().deallocate(phys_addr, 0) }
     }
 }
 

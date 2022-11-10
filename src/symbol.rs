@@ -5,7 +5,7 @@ pub struct Symbol(u8);
 impl Symbol {
     #[inline(always)]
     pub fn as_ptr(&self) -> *const u8 {
-        self as *const Symbol as *const u8
+        (self as *const Symbol).cast::<u8>()
     }
 
     #[inline(always)]

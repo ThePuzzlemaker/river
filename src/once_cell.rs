@@ -28,8 +28,8 @@ impl<T: 'static> OnceCell<T> {
         if let Some(data) = unsafe { &*self.data.get() }.as_ref() {
             data
         } else {
-            // SAFETY: We have exclusive access to mutate the inner data.
             {
+                // SAFETY: We have exclusive access to mutate the inner data.
                 let data = unsafe { &mut *self.data.get() };
                 *data = Some(f());
             }
@@ -41,10 +41,19 @@ impl<T: 'static> OnceCell<T> {
         }
     }
 
+    /// This function will attempt to get the inner data of the `OnceCell`, or
+    /// will panic with the given `message`.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the data within this cell is not
+    /// initialized.
     #[track_caller]
     pub fn expect(&'static self, message: &str) -> &'static T {
         self.get_or_init(|| panic!("OnceCell::expect: {}", message))
     }
 }
 
+// SAFETY: The data within the `OnceCell` is only mutated once, and is mutated
+// under a lock.
 unsafe impl<T: Sync> Sync for OnceCell<T> {}

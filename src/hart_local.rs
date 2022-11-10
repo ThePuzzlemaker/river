@@ -33,11 +33,18 @@ macro_rules! hart_local {
     }
 }
 
+/// Implement Send+Sync on a non-Send+Sync value.
+///
+/// # Safety
+///
+/// DO NOT USE THIS TYPE. This is only used for macro purposes.
 #[doc(hidden)]
 #[repr(transparent)]
 pub struct UnsafeSendSync<T: 'static>(pub T);
 
+// SAFETY: The user of this type guarantees that this is safe.
 unsafe impl<T: 'static> Send for UnsafeSendSync<T> {}
+// SAFETY: The user of this type guarantees that this is safe.
 unsafe impl<T: 'static> Sync for UnsafeSendSync<T> {}
 
 #[derive(Debug)]
@@ -62,6 +69,12 @@ impl<T: 'static> HartLocal<T> {
         }
     }
 
+    /// Run a function in the context of the hart-local data. This also ensures
+    /// that the code within does not get interrupted.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if used before hart-local data is initialized.
     #[track_caller]
     pub fn with<R: 'static>(&'static self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
         // N.B. We **never** give out pointers to our internal data, so we
@@ -73,14 +86,14 @@ impl<T: 'static> HartLocal<T> {
         if !self.offset_init.get() {
             let fnptr = self.base_func.take().unwrap();
             // Make sure the fn pointer actually points somewhere
-            let fnptr = if !paging::enabled() {
+            let fnptr = if paging::enabled() {
+                fnptr
+            } else {
                 let fnptr = fnptr as usize;
                 let fnptr: VirtualConst<u8, Kernel> = VirtualConst::from_usize(fnptr);
                 unsafe {
                     mem::transmute::<usize, unsafe fn() -> usize>(fnptr.into_phys().into_usize())
                 }
-            } else {
-                fnptr
             };
             let base = unsafe { fnptr() };
             self.offset.set(base - symbol::tdata_start().into_usize());
@@ -89,11 +102,10 @@ impl<T: 'static> HartLocal<T> {
 
         let tp = asm::tp();
         // The true data will never be below the kernel.
-        if tp < KERNEL_PHYS_OFFSET as u64 {
-            panic!(
-                "HartLocal::with: attempted to use hart-local data before they were initialized"
-            );
-        }
+        assert!(
+            tp >= KERNEL_PHYS_OFFSET as u64,
+            "HartLocal::with: attempted to use hart-local data before they were initialized"
+        );
         // SAFETY: By our creation, we are guaranteed that our offset is valid and unique.
         // Additionally, the thread-local data is guaranteed to be 'static.
         let val: &'static mut MaybeUninit<T> =
@@ -101,12 +113,12 @@ impl<T: 'static> HartLocal<T> {
         if self.init_func.get().is_some() {
             let init_func = self.init_func.take().unwrap();
             // Make sure the fn pointer actually points somewhere
-            let init_func = if !paging::enabled() {
+            let init_func = if paging::enabled() {
+                init_func
+            } else {
                 let init_func = init_func as usize;
                 let init_func: VirtualConst<u8, Kernel> = VirtualConst::from_usize(init_func);
                 unsafe { mem::transmute::<usize, fn() -> T>(init_func.into_phys().into_usize()) }
-            } else {
-                init_func
             };
             val.write(init_func());
         }
@@ -129,6 +141,7 @@ impl<T: 'static> HartLocal<T> {
 pub unsafe fn init() {
     let size = tdata_end().into_usize() - tdata_start().into_usize();
 
+    // SAFETY: The linker guarantees this area is valid.
     let old_data = unsafe { slice::from_raw_parts(tdata_start().as_ptr_mut(), size) };
     let new_ptr_phys = {
         let mut pma = PMAlloc::get();
@@ -141,8 +154,10 @@ pub unsafe fn init() {
         new_ptr_phys.into_identity().into_virt()
     };
 
+    // SAFETY: Our allocation is of requisite size for this data, and is valid.
     unsafe { slice::from_raw_parts_mut(new_ptr.into_ptr_mut(), size).copy_from_slice(old_data) };
 
+    // SAFETY: The thread pointer we set is valid.
     let hartid = unsafe { asm::set_tp(new_ptr.into_usize()) };
     LOCAL_HART.with(|hart| hart.hartid.set(hartid));
 }

@@ -111,38 +111,44 @@ impl Mapping for DirectMapped {
         0.gib()..64.gib()
     }
 
-    fn phys2virt<T, M: Mutability<T>>(paddr: Physical<T, Self, M>) -> Option<Virtual<T, Self, M>> {
+    fn phys2virt<T, M: Mutability<T>>(
+        phys_addr: Physical<T, Self, M>,
+    ) -> Option<Virtual<T, Self, M>> {
         let poff = physical_offset();
-        let paddr = paddr.into_usize();
-        let vaddr = paddr.checked_add(poff)?;
-        Virtual::try_from_usize(vaddr)
+        let phys_addr = phys_addr.into_usize();
+        let virt_addr = phys_addr.checked_add(poff)?;
+        Virtual::try_from_usize(virt_addr)
     }
 
     #[inline]
     unsafe fn phys2virt_unchecked<T, M: Mutability<T>>(
-        paddr: Physical<T, Self, M>,
+        phys_addr: Physical<T, Self, M>,
     ) -> Virtual<T, Self, M> {
         let poff = physical_offset();
-        let paddr = paddr.into_usize();
-        let vaddr = paddr + poff;
-        unsafe { Virtual::from_usize_unchecked(vaddr) }
+        let phys_addr = phys_addr.into_usize();
+        let virt_addr = phys_addr + poff;
+        // SAFETY: Our caller guarantees this is safe.
+        unsafe { Virtual::from_usize_unchecked(virt_addr) }
     }
 
-    fn virt2phys<T, M: Mutability<T>>(vaddr: Virtual<T, Self, M>) -> Option<Physical<T, Self, M>> {
+    fn virt2phys<T, M: Mutability<T>>(
+        virt_addr: Virtual<T, Self, M>,
+    ) -> Option<Physical<T, Self, M>> {
         let poff = physical_offset();
-        let vaddr = vaddr.into_usize();
-        let paddr = vaddr.checked_sub(poff)?;
-        Physical::try_from_usize(paddr)
+        let virt_addr = virt_addr.into_usize();
+        let phys_addr = virt_addr.checked_sub(poff)?;
+        Physical::try_from_usize(phys_addr)
     }
 
     #[inline]
     unsafe fn virt2phys_unchecked<T, M: Mutability<T>>(
-        vaddr: Virtual<T, Self, M>,
+        virt_addr: Virtual<T, Self, M>,
     ) -> Physical<T, Self, M> {
         let poff = physical_offset();
-        let vaddr = vaddr.into_usize();
-        let paddr = vaddr - poff;
-        unsafe { Physical::from_usize_unchecked(paddr) }
+        let virt_addr = virt_addr.into_usize();
+        let phys_addr = virt_addr - poff;
+        // SAFETY: Our caller guarantees this is safe.
+        unsafe { Physical::from_usize_unchecked(phys_addr) }
     }
 }
 
@@ -157,38 +163,44 @@ impl Mapping for Kernel {
         KERNEL_PHYS_OFFSET..(KERNEL_PHYS_OFFSET + kernel_size)
     }
 
-    fn phys2virt<T, M: Mutability<T>>(paddr: Physical<T, Self, M>) -> Option<Virtual<T, Self, M>> {
-        let paddr = paddr.into_usize();
-        let vaddr = paddr
+    fn phys2virt<T, M: Mutability<T>>(
+        phys_addr: Physical<T, Self, M>,
+    ) -> Option<Virtual<T, Self, M>> {
+        let phys_addr = phys_addr.into_usize();
+        let virt_addr = phys_addr
             .checked_add(KERNEL_OFFSET)?
             .checked_sub(KERNEL_PHYS_OFFSET)?;
-        Virtual::try_from_usize(vaddr)
+        Virtual::try_from_usize(virt_addr)
     }
 
     #[inline]
     unsafe fn phys2virt_unchecked<T, M: Mutability<T>>(
-        paddr: Physical<T, Self, M>,
+        phys_addr: Physical<T, Self, M>,
     ) -> Virtual<T, Self, M> {
-        let paddr = paddr.into_usize();
-        let vaddr = paddr + KERNEL_OFFSET - KERNEL_PHYS_OFFSET;
-        unsafe { Virtual::from_usize_unchecked(vaddr) }
+        let phys_addr = phys_addr.into_usize();
+        let virt_addr = phys_addr + KERNEL_OFFSET - KERNEL_PHYS_OFFSET;
+        // SAFETY: Our caller guarantees this is safe.
+        unsafe { Virtual::from_usize_unchecked(virt_addr) }
     }
 
-    fn virt2phys<T, M: Mutability<T>>(vaddr: Virtual<T, Self, M>) -> Option<Physical<T, Self, M>> {
-        let vaddr = vaddr.into_usize();
-        let paddr = vaddr
+    fn virt2phys<T, M: Mutability<T>>(
+        virt_addr: Virtual<T, Self, M>,
+    ) -> Option<Physical<T, Self, M>> {
+        let virt_addr = virt_addr.into_usize();
+        let phys_addr = virt_addr
             .checked_sub(KERNEL_OFFSET)?
             .checked_add(KERNEL_PHYS_OFFSET)?;
-        Physical::try_from_usize(paddr)
+        Physical::try_from_usize(phys_addr)
     }
 
     #[inline]
     unsafe fn virt2phys_unchecked<T, M: Mutability<T>>(
-        vaddr: Virtual<T, Self, M>,
+        virt_addr: Virtual<T, Self, M>,
     ) -> Physical<T, Self, M> {
-        let vaddr = vaddr.into_usize();
-        let paddr = vaddr - KERNEL_OFFSET + KERNEL_PHYS_OFFSET;
-        unsafe { Physical::from_usize_unchecked(paddr) }
+        let virt_addr = virt_addr.into_usize();
+        let phys_addr = virt_addr - KERNEL_OFFSET + KERNEL_PHYS_OFFSET;
+        // SAFETY: Our caller guarantees this is safe.
+        unsafe { Physical::from_usize_unchecked(phys_addr) }
     }
 }
 
@@ -217,12 +229,14 @@ impl Mapping for Identity {
     unsafe fn virt2phys_unchecked<T, M: Mutability<T>>(
         vaddr: Virtual<T, Self, M>,
     ) -> Physical<T, Self, M> {
+        // SAFETY: This is always safe for identity-mapped addresses.
         unsafe { Self::virt2phys(vaddr).unwrap_unchecked() }
     }
 
     unsafe fn phys2virt_unchecked<T, M: Mutability<T>>(
         paddr: Physical<T, Self, M>,
     ) -> Virtual<T, Self, M> {
+        // SAFETY: This is always safe for identity-mapped addresses.
         unsafe { Self::phys2virt(paddr).unwrap_unchecked() }
     }
 }
