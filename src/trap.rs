@@ -222,3 +222,18 @@ pub fn describe_exception(id: u64) -> &'static str {
         24..=31 | 48..=63 => "unknown",
     }
 }
+
+#[link_section = ".init.user_trap"]
+pub unsafe extern "C" fn user_trap() {
+    // Make sure we interrupt into kernel_trapvec, now that we're in S-mode.
+    unsafe { core::arch::asm!("csrw stvec, {}", sym kernel_trapvec) }
+
+    if asm::read_sstatus() & SSTATUS_SPP != 0 {
+        panic!(
+            "user_trap: Did not trap from U-mode, sstatus={}",
+            asm::read_sstatus()
+        );
+    }
+
+    todo!();
+}

@@ -63,7 +63,12 @@ impl<T: 'static> HartLocal<T> {
     }
 
     #[track_caller]
-    pub fn with<R: 'static>(&'static self, f: impl FnOnce(&T) -> R) -> R {
+    pub fn with<R: 'static>(&'static self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
+        // N.B. We **never** give out pointers to our internal data, so we
+        // instead avoid a race condition by turning off interrupts temporarily.
+        // (Note that we don't want infinite recursion, so we must turn off/on
+        // interrupts manually).
+        let intena = intr_off();
         // Ensure the offset is valid.
         if !self.offset_init.get() {
             let fnptr = self.base_func.take().unwrap();
@@ -107,7 +112,11 @@ impl<T: 'static> HartLocal<T> {
         }
         // SAFETY: We have just initialized this, or it was previously.
         let inner = unsafe { val.assume_init_ref() };
-        f(inner)
+        let res = f(inner);
+        if intena {
+            intr_on();
+        }
+        res
     }
 }
 

@@ -70,10 +70,12 @@ pub unsafe fn set_tp(v: usize) -> u64 {
 }
 
 // todo: move this elsewhere
+#[track_caller]
 pub fn hartid() -> u64 {
     let tp = tp() as usize;
     // Before TLS is enabled, tp contains the hartid.
     if hart_local::enabled() {
+        assert!(!intr_enabled(), "hartid: interrupts were enabled");
         LOCAL_HART.with(|hart| hart.hartid.get())
     } else {
         tp as u64

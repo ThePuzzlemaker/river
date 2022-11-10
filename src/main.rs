@@ -27,8 +27,10 @@ pub mod kalloc;
 pub mod once_cell;
 pub mod paging;
 pub mod plic;
+pub mod proc;
 pub mod spin;
 pub mod symbol;
+pub mod trampoline;
 pub mod trap;
 pub mod uart;
 pub mod units;
@@ -58,6 +60,7 @@ use crate::{
     addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst, VirtualMut},
     asm::get_satp,
     boot::HartBootData,
+    hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     plic::PLIC,
     trap::{Irqs, IRQS},
@@ -143,53 +146,59 @@ pub extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    println!(
-        "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!",
-        hartid()
-    );
-    // panic!("{:#?}", asm::get_pagetable());
+    LOCAL_HART.with(|hart| {
+        hart.push_off();
+        println!(
+            "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!",
+            hart.hartid.get()
+        );
+        // panic!("{:#?}", asm::get_pagetable());
 
-    let hart = hartid();
-    for hart in fdt.cpus().filter(|cpu| cpu.ids().first() != hart as usize) {
-        let id = hart.ids().first();
-        println!("found FDT node for hart {id}");
-        // Allocate a 4 MiB stack
-        let sp_phys = {
-            let mut pma = PMAlloc::get();
-            pma.allocate(kalloc::phys::what_order(4.mib()))
-                .expect("Could not allocate stack for hart")
-        };
+        for hart in fdt
+            .cpus()
+            .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
+        {
+            let id = hart.ids().first();
+            println!("found FDT node for hart {id}");
+            // Allocate a 4 MiB stack
+            let sp_phys = {
+                let mut pma = PMAlloc::get();
+                pma.allocate(kalloc::phys::what_order(4.mib()))
+                    .expect("Could not allocate stack for hart")
+            };
 
-        let boot_data = Box::into_raw(Box::new(HartBootData {
-            // We're both in the kernel--this hart will use the same SATP as us.
-            raw_satp: get_satp(),
-            sp_phys,
-            fdt_ptr_virt: VirtualConst::<_, DirectMapped>::from_ptr(fdt_ptr),
-        }));
-        let boot_data_virt = VirtualConst::<_, Identity>::from_ptr(boot_data);
-        let boot_data_phys = root_page_table()
-            .lock()
-            .walk(boot_data_virt.cast())
-            .into_usize();
+            let boot_data = Box::into_raw(Box::new(HartBootData {
+                // We're both in the kernel--this hart will use the same SATP as us.
+                raw_satp: get_satp(),
+                sp_phys,
+                fdt_ptr_virt: VirtualConst::<_, DirectMapped>::from_ptr(fdt_ptr),
+            }));
+            let boot_data_virt = VirtualConst::<_, Identity>::from_ptr(boot_data);
+            let boot_data_phys = root_page_table()
+                .lock()
+                .walk(boot_data_virt.cast())
+                .into_usize();
 
-        let start_hart = boot::start_hart as *const u8;
-        let start_hart_addr = VirtualConst::<_, Kernel>::from_ptr(start_hart)
-            .into_phys()
-            .into_usize();
+            let start_hart = boot::start_hart as *const u8;
+            let start_hart_addr = VirtualConst::<_, Kernel>::from_ptr(start_hart)
+                .into_phys()
+                .into_usize();
 
-        sbi::hsm::hart_start(id, start_hart_addr as usize, boot_data_phys)
-            .expect("Could not start hart")
-    }
+            sbi::hsm::hart_start(id, start_hart_addr as usize, boot_data_phys)
+                .expect("Could not start hart")
+        }
+        hart.pop_off();
 
-    let timebase_freq = fdt
-        .cpus()
-        .find(|cpu| cpu.ids().first() == hart as usize)
-        .expect("Could not find boot hart in FDT")
-        .timebase_frequency() as u64;
+        let timebase_freq = fdt
+            .cpus()
+            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
+            .expect("Could not find boot hart in FDT")
+            .timebase_frequency() as u64;
 
-    let time = asm::read_time();
-    println!("setting timer");
-    sbi::timer::set_timer(time + 10 * timebase_freq).unwrap();
+        let time = asm::read_time();
+        println!("setting timer");
+        sbi::timer::set_timer(time + 10 * timebase_freq).unwrap();
+    });
 
     loop {
         nop()

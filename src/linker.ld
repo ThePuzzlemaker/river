@@ -37,6 +37,10 @@ SECTIONS {
         *(.init.kmain_hart);
         *(.text .text.*);
         . = ALIGN(4K);
+        *(.init.trampoline);
+        . = ALIGN(4K);
+        *(.init.user_trap);
+        . = ALIGN(4K);
         PROVIDE(__text_end = .);
     }
 
