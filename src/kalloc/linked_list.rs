@@ -304,18 +304,6 @@ unsafe impl Allocator for LinkedListAlloc {
                 }
 
                 unsafe { ptr.cast::<usize>().write(needed_size) };
-                // if n_bytes_padding == 0 {
-                //     // This is kind of inefficient but I think it's the best we
-                //     // can do.
-
-                //     // TODO: look into this
-
-                //     // N.B. if layout.align() == mem::size_of::<usize>(), having
-                //     // 0 bytes of padding is still well-aligned, even with the
-                //     // padding-size tag
-                //     // TODO: is this right?
-                //     n_bytes_padding = layout.align().saturating_sub(2 * mem::size_of::<usize>());
-                // }
 
                 unsafe {
                     ptr.cast::<u8>()

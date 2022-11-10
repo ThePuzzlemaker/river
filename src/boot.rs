@@ -158,7 +158,6 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let tmp_stack_start = symbol::tmp_stack_bottom().into_usize();
     let tmp_stack_end = symbol::tmp_stack_top().into_usize();
 
-    // TODO: make this expandable
     for addr in (tmp_stack_start..tmp_stack_end).step_by(4096) {
         let addr: PhysicalConst<_, Kernel> = PhysicalConst::from_usize(addr);
         root_pgtbl.map(

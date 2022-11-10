@@ -14,7 +14,6 @@
 )]
 #![no_std]
 #![no_main]
-// TODO: maybe relax this a bit?
 #![deny(unsafe_op_in_unsafe_fn, clippy::semicolon_if_nothing_returned)]
 #![warn(clippy::undocumented_unsafe_blocks, clippy::pedantic)]
 #![allow(

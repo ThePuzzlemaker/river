@@ -52,7 +52,7 @@ impl Ns16650 {
     }
 }
 
-// TODO: make this not Ns16650Inner
+// TODO: make this not Ns16650Inner, at least the public functions.
 impl Ns16650Inner {
     #[inline]
     pub fn is_initialized(&self) -> bool {

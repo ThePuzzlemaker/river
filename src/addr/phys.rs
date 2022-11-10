@@ -2,7 +2,6 @@ use core::{fmt, marker::PhantomData};
 
 use super::{Identity, Mapping, Mutability, PgOff, Virtual};
 
-// TODO: maybe nonnull of physical & virtual ptrs?
 // TODO: document physical addr structure
 #[repr(transparent)]
 pub struct Physical<T, Map: Mapping, Mut: Mutability<T>> {
