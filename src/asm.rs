@@ -32,19 +32,19 @@ pub fn intr_enabled() -> bool {
 /// Disable S-interrupts. Returns whether or not they were enabled before.
 #[inline]
 pub fn intr_off() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrrc {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack)) }
-    r != 0
+    r & SSTATUS_SIE != 0
 }
 
 /// Enable S-interrupts. Returns whether or not they were enabled before.
 #[inline]
 pub fn intr_on() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrrs {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack)) }
-    r != 0
+    r & SSTATUS_SIE != 0
 }
 
 #[inline]
@@ -97,50 +97,50 @@ pub fn get_satp() -> RawSatp {
 
 #[inline]
 pub fn software_intr_on() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrrs {}, sie, {}", out(reg) r, in(reg) SIE_SSIE, options(nostack)) }
-    r != 0
+    r & SIE_SSIE != 0
 }
 
 #[inline]
 pub fn software_intr_off() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic
     unsafe { asm!("csrrc {}, sie, {}", out(reg) r, in(reg) SIE_SSIE, options(nostack)) }
-    r != 0
+    r & SIE_SSIE != 0
 }
 
 #[inline]
 pub fn external_intr_on() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrrs {}, sie, {}", out(reg) r, in(reg) SIE_SEIE, options(nostack)) }
-    r != 0
+    r & SIE_SEIE != 0
 }
 
 #[inline]
 pub fn external_intr_off() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic
     unsafe { asm!("csrrc {}, sie, {}", out(reg) r, in(reg) SIE_SEIE, options(nostack)) }
-    r != 0
+    r & SIE_SEIE != 0
 }
 
 #[inline]
 pub fn timer_intr_on() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrrs {}, sie, {}", out(reg) r, in(reg) SIE_STIE, options(nostack)) }
-    r != 0
+    r & SIE_STIE != 0
 }
 
 #[inline]
 pub fn timer_intr_off() -> bool {
-    let r: u8;
+    let r: u64;
     // SAFETY: Writes to CSRs are atomic
     unsafe { asm!("csrrc {}, sie, {}", out(reg) r, in(reg) SIE_STIE, options(nostack)) }
-    r != 0
+    r & SIE_STIE != 0
 }
 
 #[inline]
@@ -149,10 +149,10 @@ pub fn timer_intr_clear() {
     unsafe { asm!("csrrc {}, sie, {}", out(reg) _, in(reg) SIP_STIP, options(nostack)) }
 }
 
-const SIE_SSIE: usize = 1 << 1;
-const SIE_STIE: usize = 1 << 5;
-const SIP_STIP: usize = 1 << 5;
-const SIE_SEIE: usize = 1 << 9;
+const SIE_SSIE: u64 = 1 << 1;
+const SIE_STIE: u64 = 1 << 5;
+const SIP_STIP: u64 = 1 << 5;
+const SIE_SEIE: u64 = 1 << 9;
 
 #[inline]
 pub fn read_sepc() -> u64 {
