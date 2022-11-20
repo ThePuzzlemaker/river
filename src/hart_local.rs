@@ -69,8 +69,9 @@ impl<T: 'static> HartLocal<T> {
         }
     }
 
-    /// Run a function in the context of the hart-local data. This also ensures
-    /// that the code within does not get interrupted.
+    /// Run a function in the context of the hart-local data. This
+    /// also ensures that the code within the closure does not get
+    /// interrupted.
     ///
     /// # Panics
     ///
