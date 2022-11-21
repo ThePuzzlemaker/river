@@ -1,6 +1,7 @@
 use core::{
     alloc::{AllocError, Allocator, Layout},
     fmt,
+    intrinsics::likely,
     mem::MaybeUninit,
     ptr::{self, NonNull},
 };
@@ -430,8 +431,11 @@ impl RawSatp {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn enabled() -> bool {
     let satp = asm::get_satp();
-    satp.mode() == 8
+    // Except for the small point before paging is enabled at boot,
+    // this should be true. (Not sure if this helps *too* much with
+    // perf, but can't hurt).
+    likely(satp.mode() == 8)
 }
