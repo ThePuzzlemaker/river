@@ -6,6 +6,8 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use alloc::fmt;
+
 use crate::{
     asm::{self, hartid},
     hart_local::{self, LOCAL_HART},
@@ -34,7 +36,6 @@ use crate::{
 /// These behaviours are not unsafe or unsound, but they may cause deadlocks,
 /// which are undesirable.
 // TODO: SpinRwLock?
-#[derive(Debug)]
 pub struct SpinMutex<T> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
@@ -103,6 +104,13 @@ impl<T> SpinMutex<T> {
             mutex: self,
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<T> fmt::Debug for SpinMutex<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: make this better
+        write!(f, "SpinMutex(<opaque>)")
     }
 }
 
