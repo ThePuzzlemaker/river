@@ -42,6 +42,7 @@ extern "C" {
     static __text_end: Symbol;
     static __tdata_start: Symbol;
     static __tdata_end: Symbol;
+    static TRAMPOLINE_START: Symbol;
 }
 
 impl_symbols![
@@ -56,5 +57,6 @@ impl_symbols![
     text_start; __text_start,
     text_end; __text_end,
     tdata_start; __tdata_start,
-    tdata_end; __tdata_end
+    tdata_end; __tdata_end,
+    trampoline_start; TRAMPOLINE_START,
 ];

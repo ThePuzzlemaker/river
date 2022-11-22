@@ -37,6 +37,7 @@ SECTIONS {
         *(.init.kmain_hart);
         *(.text .text.*);
         . = ALIGN(4K);
+	PROVIDE(TRAMPOLINE_START = .);
         *(.init.trampoline);
         . = ALIGN(4K);
         *(.init.user_trap);

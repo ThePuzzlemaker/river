@@ -111,6 +111,14 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 PageTableFlags::empty(),
             );
         }
+        let trampoline_virt =
+            VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
+        let trampoline_phys = trampoline_virt.into_phys();
+        pgtbl.map(
+            trampoline_phys.into_identity(),
+            Virtual::from_usize(usize::MAX - 4.kib() + 1),
+            PageTableFlags::VAD | PageTableFlags::RX,
+        );
     }
     println!("mapped 64GiB of virtual heap");
     // SAFETY: We guarantee that this virtual address is well-aligned and unaliased.
