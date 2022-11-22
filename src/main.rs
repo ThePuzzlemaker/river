@@ -5,7 +5,6 @@
     alloc_error_handler,
     panic_info_message,
     maybe_uninit_slice,
-    int_log,
     int_roundings,
     ptr_as_uninit,
     once_cell,

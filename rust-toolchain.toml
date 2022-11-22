@@ -1,3 +1,3 @@
 [toolchain]
 # some older nightlies are borked.
-channel = "nightly-2022-10-19"
+channel = "nightly-2022-11-19"
