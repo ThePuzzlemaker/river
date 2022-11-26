@@ -54,6 +54,7 @@ use crate::{
     addr::{Identity, Virtual, VirtualMut},
     kalloc::phys::{self, PMAlloc},
     paging::{root_page_table, PageTableFlags},
+    println,
     spin::SpinMutex,
     units::StorageUnits,
 };
@@ -177,7 +178,11 @@ impl LinkedListAllocInner {
                 let new_node = self.unmanaged_ptr;
                 // println_hacky!("find_first_fit: new_node/unmanaged_ptr={:#p}", new_node);
 
-                let node_base = unsafe { new_node.add(mem::size_of::<usize>()) };
+                let node_base = unsafe {
+                    new_node
+                        //.add(new_node.align_offset(mem::align_of::<usize>()))
+                        .add(mem::size_of::<usize>())
+                };
                 // println_hacky!("find_first_fit: new_node node_base={:#p}", node_base);
                 let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
                 // println_hacky!(
@@ -190,6 +195,10 @@ impl LinkedListAllocInner {
                 // println_hacky!("available_space={:#x}", available_space);
                 let grow_heap = available_space < needed_size;
                 let new_unmanaged_ptr = unsafe { node_base.add(needed_size) };
+                // Make sure the new unmanaged pointer is well-aligned for the next node.
+                let new_unmanaged_ptr = unsafe {
+                    new_unmanaged_ptr.add(new_unmanaged_ptr.align_offset(mem::align_of::<usize>()))
+                };
                 // println_hacky!("find_first_fit: new_unmanaged_ptr={:#p}", new_unmanaged_ptr);
                 return FoundNode::New {
                     ptr: new_node.cast(),
