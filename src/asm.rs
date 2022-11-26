@@ -9,6 +9,7 @@ use crate::{
 /// Supervisor Interrupt Enable
 pub const SSTATUS_SIE: u64 = 1 << 1;
 pub const SSTATUS_SPP: u64 = 1 << 8;
+pub const SSTATUS_SPIE: u64 = 1 << 5;
 
 #[inline]
 pub fn read_sstatus() -> u64 {
@@ -27,6 +28,38 @@ pub fn write_sstatus(x: u64) {
 #[inline]
 pub fn intr_enabled() -> bool {
     (read_sstatus() & SSTATUS_SIE) != 0
+}
+
+#[inline(always)]
+pub fn set_spie() -> bool {
+    let r: u64;
+    // SAFETY: Write to CSRs are atomic.
+    unsafe { asm!("csrrs {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SPIE, options(nostack)) }
+    r & SSTATUS_SPIE != 0
+}
+
+#[inline(always)]
+pub fn clear_spie() -> bool {
+    let r: u64;
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrrc {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SPIE, options(nostack)) }
+    r & SSTATUS_SPIE != 0
+}
+
+#[inline(always)]
+pub fn set_spp() -> bool {
+    let r: u64;
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrrs {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SPP, options(nostack)) }
+    r & SSTATUS_SPP != 0
+}
+
+#[inline(always)]
+pub fn clear_spp() -> bool {
+    let r: u64;
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrrc {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SPP, options(nostack)) }
+    r & SSTATUS_SPP != 0
 }
 
 /// Disable S-interrupts. Returns whether or not they were enabled before.
