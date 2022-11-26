@@ -107,6 +107,12 @@ impl<T> SpinMutex<T> {
     }
 }
 
+impl<T: Default> Default for SpinMutex<T> {
+    fn default() -> Self {
+        SpinMutex::new(T::default())
+    }
+}
+
 impl<T> fmt::Debug for SpinMutex<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // TODO: make this better
