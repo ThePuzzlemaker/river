@@ -3,6 +3,7 @@ use core::{
     hint,
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    ptr::addr_of,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -57,6 +58,11 @@ impl<T> SpinMutex<T> {
             data: UnsafeCell::new(data),
             held_by: Cell::new(None),
         }
+    }
+
+    #[inline]
+    pub fn to_components(&self) -> (*mut T, *const AtomicBool) {
+        (self.data.get(), addr_of!(self.locked))
     }
 
     /// Lock the `SpinMutex`, potentially spinning if it is not available.
