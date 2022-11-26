@@ -43,6 +43,9 @@ extern "C" {
     static __tdata_start: Symbol;
     static __tdata_end: Symbol;
     static TRAMPOLINE_START: Symbol;
+    static trampoline: Symbol;
+    static ret_user: Symbol;
+    static user_code_woo: Symbol;
 }
 
 impl_symbols![
@@ -59,4 +62,7 @@ impl_symbols![
     tdata_start; __tdata_start,
     tdata_end; __tdata_end,
     trampoline_start; TRAMPOLINE_START,
+    fn_trampoline; trampoline,
+    fn_ret_user; ret_user,
+    fn_user_code_woo; user_code_woo,
 ];

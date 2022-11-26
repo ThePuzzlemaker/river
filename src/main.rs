@@ -21,7 +21,8 @@
     clippy::cast_possible_truncation,
     clippy::module_name_repetitions,
     clippy::cast_ptr_alignment,
-    clippy::cast_lossless
+    clippy::cast_lossless,
+    clippy::too_many_lines
 )]
 
 extern crate alloc;
@@ -48,23 +49,32 @@ extern "C" {
     pub fn start() -> !;
 }
 
-use core::{alloc::Layout, arch::asm, panic::PanicInfo};
+use core::{
+    alloc::Layout,
+    arch::{asm, global_asm},
+    mem,
+    panic::PanicInfo,
+};
 
 use addr::{Physical, Virtual};
-use alloc::boxed::Box;
+use alloc::{boxed::Box, string::String, sync::Arc};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
+use symbol::Symbol;
 use uart::UART;
 
 use crate::{
-    addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst},
+    addr::{DirectMapped, Identity, Kernel, PhysicalConst, PhysicalMut, VirtualConst},
     asm::get_satp,
     boot::HartBootData,
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     plic::PLIC,
-    trap::{Irqs, IRQS},
+    proc::{context_switch, Proc, ProcState},
+    symbol::fn_user_code_woo,
+    trampoline::Trapframe,
+    trap::{user_trap_ret, Irqs, IRQS},
     units::StorageUnits,
 };
 
@@ -74,6 +84,18 @@ static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
 // It's unlikely the kernel itself is 64GiB in size, so we use this space.
 pub const KHEAP_VMEM_OFFSET: usize = 0xFFFF_FFE0_0000_0000;
 pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
+
+global_asm!(
+    "
+.pushsection .user_code,\"ax\",@progbits
+.type user_code_woo,@function
+.global user_code_woo
+user_code_woo:
+    li a0, 42
+    ecall
+.popsection
+"
+);
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -159,6 +181,41 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
+
+    let mut proc = Proc::new(String::from("user_mode_woo"));
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    {
+        let private = proc.private_mut();
+        private.mem_size = 4.kib();
+        let trapframe = unsafe { &mut *private.trapframe };
+        let mut trapframe = trapframe.write(Trapframe::default());
+        trapframe.user_epc = 0;
+        trapframe.sp = 4.kib() - 8;
+        private.pgtbl.map(
+            VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
+                .into_phys()
+                .into_identity(),
+            VirtualConst::from_usize(0),
+            PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
+        );
+    };
+    LOCAL_HART.with(|hart| {
+        *hart.proc.borrow_mut() = Some(Arc::new(proc));
+        let token = hart.proc().unwrap();
+
+        let proc = token.proc();
+        let mut proc_lock = proc.spin_protected.lock();
+        proc_lock.state = ProcState::Running;
+        drop(proc_lock);
+
+        let _old_ctx = hart.context.lock();
+        let _new_ctx = proc.context.lock();
+
+        let (old_ctx, old_lock) = hart.context.to_components();
+        let (new_ctx, new_lock) = proc.context.to_components();
+
+        unsafe { context_switch(old_ctx, new_ctx, old_lock, new_lock) }
+    });
 
     LOCAL_HART.with(|hart| {
         hart.push_off();
@@ -265,6 +322,14 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
                     location.column()
                 );
             }
+            /*let bt = Backtrace::<16>::capture();
+            println!("  Backtrace:");
+            for frame in bt.frames {
+                println!("    - {:#x}", frame);
+            }
+            if bt.frames_omitted {
+                println!("    - ... <omitted>");
+            }*/
         } else {
             println!("panic occurred (reason unknown).\n");
             if let Some(location) = panic_info.location() {

@@ -1,15 +1,19 @@
 use core::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     marker::PhantomData,
     mem::{self, MaybeUninit},
     slice,
 };
+
+use alloc::sync::Arc;
 
 use crate::{
     addr::{Kernel, VirtualConst, KERNEL_PHYS_OFFSET},
     asm::{self, intr_off, intr_on},
     kalloc::phys::{self, PMAlloc},
     paging,
+    proc::{Context, Proc},
+    spin::SpinMutex,
     symbol::{self, tdata_end, tdata_start},
 };
 
@@ -55,7 +59,10 @@ pub struct HartLocal<T: 'static> {
     base_func: Cell<Option<unsafe fn() -> usize>>,
 }
 
+// SAFETY: Data inside a HartLocal<T> is never sent or shared across
+// threads.
 unsafe impl<T: 'static> Send for HartLocal<T> {}
+// SAFETY: See above.
 unsafe impl<T: 'static> Sync for HartLocal<T> {}
 
 impl<T: 'static> HartLocal<T> {
@@ -183,6 +190,10 @@ pub struct HartCtx {
     pub hartid: Cell<u64>,
     /// In trap handler?
     pub trap: Cell<bool>,
+    /// What process are we running?
+    pub proc: RefCell<Option<Arc<Proc>>>,
+    /// Register spill area for this hart
+    pub context: SpinMutex<Context>,
     /// Ensure HartCtx is !Send + !Sync
     _phantom: PhantomData<*const ()>,
 }

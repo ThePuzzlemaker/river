@@ -1,11 +1,16 @@
-use core::arch::global_asm;
+use core::{arch::global_asm, mem, ptr};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
     hart_local::LOCAL_HART,
     once_cell::OnceCell,
+    paging::Satp,
     plic::PLIC,
-    println, uart,
+    println,
+    proc::{ProcPrivate, ProcToken},
+    trampoline::{self, trampoline},
+    uart,
+    units::StorageUnits,
 };
 
 pub struct Irqs {
@@ -233,5 +238,55 @@ unsafe extern "C" fn user_trap() {
         asm::read_sstatus()
     );
 
-    todo!();
+    LOCAL_HART.with(|hart| {
+        hart.trap.set(true);
+        let token = hart.proc().unwrap();
+        let proc = token.proc();
+        let private = proc.private(&token);
+        let trapframe = unsafe { (&*private.trapframe).assume_init_ref() };
+        println!("user trap! trapframe={:x?}", trapframe);
+    });
+
+    LOCAL_HART.with(|hart| hart.trap.set(false));
+    todo!()
+}
+
+/// # Safety
+/// TODO
+/// # Panics
+/// TODO
+pub unsafe extern "C" fn user_trap_ret() {
+    asm::intr_off();
+    LOCAL_HART.with(|hart| hart.trap.set(true));
+
+    unsafe { core::arch::asm!("csrw stvec, {}", in(reg) trampoline()) };
+
+    let satp = LOCAL_HART.with(|hart| {
+        let token = hart.proc().unwrap();
+
+        let mut private = token.proc().private(&token);
+
+        let mut trapframe = unsafe { (&mut *private.trapframe).assume_init_mut() };
+        trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
+        trapframe.kernel_sp = (private.kernel_stack.into_usize() as u64) + 4u64.mib() - 8u64;
+        trapframe.kernel_trap = unsafe { mem::transmute::<unsafe extern "C" fn(), u64>(user_trap) };
+        trapframe.kernel_tp = asm::tp();
+
+        asm::write_sepc(trapframe.user_epc);
+        let satp = Satp {
+            asid: 1,
+            ppn: private.pgtbl.as_physical().ppn(),
+        };
+        satp.encode().as_usize()
+    });
+
+    // Enable interrupts in user mode
+    asm::set_spie();
+    // Clear SPP = user mode
+    asm::clear_spp();
+
+    let ret_user =
+        unsafe { mem::transmute::<usize, unsafe fn(usize) -> !>(trampoline::ret_user()) };
+    LOCAL_HART.with(|hart| hart.trap.set(false));
+    unsafe { (ret_user)(satp) }
 }

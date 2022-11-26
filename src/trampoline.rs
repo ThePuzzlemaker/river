@@ -1,5 +1,7 @@
 use core::arch::global_asm;
 
+use crate::{symbol, units::StorageUnits};
+
 global_asm!(
     "
 // Switch from user-space into the kernel. This must be mapped at the same
@@ -18,7 +20,7 @@ trampoline:
     csrw sscratch, t0
 
     // Load the address of the trapframe into t0 
-    li t0, 0xffffffffffffefff
+    li t0, 0xffffffffffffd000
 
     sd x1,    0(t0)
     sd x2,    8(t0)
@@ -76,8 +78,8 @@ trampoline:
     // N.B. We need to keep the trap-related values (stvec, sepc, etc.) and I
     // don't want to have to store those and swap them out later, so we don't
     // use the same method to get to the user mode trap handler that we do to
-    // get to kmain (specifically, setting stvec and `unimp`) 
-    j t1
+    // get to kmain (specifically, setting stvec and `unimp`)
+    jr t1
 
 .type ret_user, @function
 .global ret_user
@@ -91,7 +93,7 @@ ret_user:
     sfence.vma
 
     // Load the address of the trapframe into t0 
-    li t0, 0xffffffffffffefff
+    li t0, 0xffffffffffffd000
 
     ld x1,    0(t0)
     ld x2,    8(t0)
@@ -135,44 +137,55 @@ ret_user:
 "
 );
 
-extern "C" {
-    pub fn trampoline();
-    pub fn user_ret();
+pub fn ret_user() -> usize {
+    let ret_user = symbol::fn_ret_user().into_usize();
+    let trampoline_start = symbol::trampoline_start().into_usize();
+    let offset = ret_user - trampoline_start;
+    usize::MAX - 4.kib() + offset + 1
+}
+
+pub fn trampoline() -> usize {
+    let trampoline = symbol::fn_trampoline().into_usize();
+    let trampoline_start = symbol::trampoline_start().into_usize();
+    // TODO: make sure this is actually zero, then maybe remove trampoline_start
+    let offset = trampoline - trampoline_start;
+    usize::MAX - 4.kib() + offset + 1
 }
 
 #[repr(C)]
+#[derive(Debug, Default)]
 pub struct Trapframe {
-    /*   0 */ pub x1: u64,
-    /*   8 */ pub x2: u64,
-    /*  16 */ pub x3: u64,
-    /*  24 */ pub x4: u64,
-    /*  32 */ pub x5: u64,
-    /*  40 */ pub x6: u64,
-    /*  48 */ pub x7: u64,
-    /*  56 */ pub x8: u64,
-    /*  64 */ pub x9: u64,
-    /*  72 */ pub x10: u64,
-    /*  80 */ pub x11: u64,
-    /*  88 */ pub x12: u64,
-    /*  96 */ pub x13: u64,
-    /* 104 */ pub x14: u64,
-    /* 112 */ pub x15: u64,
-    /* 120 */ pub x16: u64,
-    /* 128 */ pub x17: u64,
-    /* 136 */ pub x18: u64,
-    /* 144 */ pub x19: u64,
-    /* 152 */ pub x20: u64,
-    /* 160 */ pub x21: u64,
-    /* 168 */ pub x22: u64,
-    /* 176 */ pub x23: u64,
-    /* 184 */ pub x24: u64,
-    /* 192 */ pub x25: u64,
-    /* 200 */ pub x26: u64,
-    /* 208 */ pub x27: u64,
-    /* 216 */ pub x28: u64,
-    /* 224 */ pub x29: u64,
-    /* 232 */ pub x30: u64,
-    /* 240 */ pub x31: u64,
+    /*   0 */ pub ra: u64,
+    /*   8 */ pub sp: u64,
+    /*  16 */ pub gp: u64,
+    /*  24 */ pub tp: u64,
+    /*  32 */ pub t0: u64,
+    /*  40 */ pub t1: u64,
+    /*  48 */ pub t2: u64,
+    /*  56 */ pub s0: u64,
+    /*  64 */ pub s1: u64,
+    /*  72 */ pub a0: u64,
+    /*  80 */ pub a1: u64,
+    /*  88 */ pub a2: u64,
+    /*  96 */ pub a3: u64,
+    /* 104 */ pub a4: u64,
+    /* 112 */ pub a5: u64,
+    /* 120 */ pub a6: u64,
+    /* 128 */ pub a7: u64,
+    /* 136 */ pub s2: u64,
+    /* 144 */ pub s3: u64,
+    /* 152 */ pub s4: u64,
+    /* 160 */ pub s5: u64,
+    /* 168 */ pub s6: u64,
+    /* 176 */ pub s7: u64,
+    /* 184 */ pub s8: u64,
+    /* 192 */ pub s9: u64,
+    /* 200 */ pub s10: u64,
+    /* 208 */ pub s11: u64,
+    /* 216 */ pub t3: u64,
+    /* 224 */ pub t4: u64,
+    /* 232 */ pub t5: u64,
+    /* 240 */ pub t6: u64,
     /* 248 */ pub kernel_sp: u64,
     /* 256 */ pub kernel_tp: u64,
     /* 264 */ pub kernel_trap: u64,

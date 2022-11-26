@@ -42,6 +42,8 @@ SECTIONS {
         . = ALIGN(4K);
         *(.init.user_trap);
         . = ALIGN(4K);
+	*(.user_code);
+	. = ALIGN(4K);
         PROVIDE(__text_end = .);
     }
 
