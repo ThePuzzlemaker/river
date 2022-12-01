@@ -238,3 +238,21 @@ pub fn nop() {
     // SAFETY: Executing a NOP is always safe.
     unsafe { asm!("nop") }
 }
+
+#[inline(always)]
+pub fn read_stvec() -> u64 {
+    let r: u64;
+    // SAFETY: Reads from CSRs are atomic.
+    unsafe { asm!("csrr {}, stvec", out(reg) r, options(nostack)) }
+    r
+}
+
+/// Write a function or vector as the trap handler.
+///
+/// # Safety
+///
+/// The address provided must be a valid value for a trap handler.
+pub unsafe fn write_stvec(stvec: *const u8) {
+    // SAFETY: Writes to CSRs are atomic, and our caller guarantees the value is valid.
+    unsafe { asm!("csrw stvec, {}", in(reg) stvec, options(nostack)) }
+}

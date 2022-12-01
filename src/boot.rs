@@ -43,8 +43,8 @@ fn early_trap_handler() -> ! {
 #[allow(clippy::too_many_lines)]
 unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     // Make sure traps don't cause a bunch of exceptions, by just loop { nop }-ing them.
-    // SAFETY: Writes to CSRs are atomic and the trap handler address is valid.
-    unsafe { asm!("csrw stvec, {}", in(reg) early_trap_handler as usize) };
+    // SAFETY: The trap handler address is valid.
+    unsafe { asm::write_stvec(early_trap_handler as *const u8) };
     // SAFETY: OpenSBI guarantees the FDT pointer is valid.
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
@@ -356,8 +356,8 @@ extern "C" {
 #[no_mangle]
 unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMapped>) -> ! {
     // Make sure traps don't cause a bunch of exceptions, by just loop { nop }-ing them.
-    // SAFETY: Writes to CSRs are atomic and the trap handler address is valid.
-    unsafe { asm!("csrw stvec, {}", in(reg) early_trap_handler as usize) };
+    // SAFETY: The trap handler address is valid.
+    unsafe { asm::write_stvec(early_trap_handler as *const u8) };
 
     {
         let mut uart = UART.lock();

@@ -229,8 +229,8 @@ pub fn describe_exception(id: u64) -> &'static str {
 #[link_section = ".init.user_trap"]
 unsafe extern "C" fn user_trap() {
     // Make sure we interrupt into kernel_trapvec, now that we're in S-mode.
-    // SAFETY: Writes to CSRs are atomic and the address we provide is valid.
-    unsafe { core::arch::asm!("csrw stvec, {}", in(reg) kernel_trapvec) }
+    // SAFETY: The address we provide is valid.
+    unsafe { asm::write_stvec(kernel_trapvec as *const u8) }
 
     assert!(
         asm::read_sstatus() & SSTATUS_SPP == 0,
@@ -259,7 +259,8 @@ pub unsafe extern "C" fn user_trap_ret() {
     asm::intr_off();
     LOCAL_HART.with(|hart| hart.trap.set(true));
 
-    unsafe { core::arch::asm!("csrw stvec, {}", in(reg) trampoline()) };
+    // SAFETY: The address we provide is valid.
+    unsafe { asm::write_stvec(trampoline() as *const u8) };
 
     let satp = LOCAL_HART.with(|hart| {
         let token = hart.proc().unwrap();
