@@ -273,7 +273,7 @@ pub unsafe extern "C" fn user_trap_ret() {
 
         let mut trapframe = unsafe { (&mut *private.trapframe).assume_init_mut() };
         trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
-        trapframe.kernel_sp = (private.kernel_stack.into_usize() as u64) + 4u64.mib() - 8u64;
+        trapframe.kernel_sp = (private.kernel_stack.into_usize() as u64) + 4u64.mib();
         trapframe.kernel_trap = unsafe { mem::transmute::<unsafe extern "C" fn(), u64>(user_trap) };
         trapframe.kernel_tp = asm::tp();
 
