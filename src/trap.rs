@@ -62,6 +62,18 @@ unsafe extern "C" fn kernel_trap() {
         asm::read_stval(),
         scause
     );
+    LOCAL_HART.with(|hart| {
+        if kind == InterruptKind::Timer {
+            if let Some(token) = hart.proc() {
+                let proc = token.proc();
+                let proc_lock = proc.spin_protected.lock();
+                if proc_lock.state == ProcState::Running {
+                    drop(proc_lock);
+                    proc::proc_yield(&token);
+                }
+            }
+        }
+    });
 
     asm::write_sepc(sepc);
     asm::write_sstatus(sstatus);
@@ -244,15 +256,58 @@ unsafe extern "C" fn user_trap() -> ! {
 
     LOCAL_HART.with(|hart| {
         hart.trap.set(true);
+
         let token = hart.proc().unwrap();
         let proc = token.proc();
-        let private = proc.private(&token);
-        let trapframe = unsafe { (&*private.trapframe).assume_init_ref() };
-        println!("user trap! trapframe={:x?}", trapframe);
+
+        let mut private = proc.private(&token);
+
+        // SAFETY: Being in this process's context means that the
+        // trapframe must be initialized and valid.
+        let mut trapframe = unsafe { (*private.trapframe).assume_init_mut() };
+        trapframe.user_epc = asm::read_sepc();
+
+        let scause = asm::read_scause();
+        // Exception, not a syscall or interrupt.
+        assert!(
+            scause & SCAUSE_INTR_BIT != 0 || scause == 8,
+            "user exception: {}, hart={} pid={} sepc={:#x} stval={:#x} scause={:#x}",
+            describe_exception(scause),
+            hartid(),
+            proc.pid,
+            asm::read_sepc(),
+            asm::read_stval(),
+            scause
+        );
+
+        if scause == 8 {
+            // syscall
+
+            // `ecall` instrs are 4 bytes, skip to the instruction after
+            trapframe.user_epc += 4;
+
+            println!("user trap! a0={} epc={}", trapframe.a0, trapframe.user_epc);
+        } else {
+            let kind = device_interrupt(scause);
+            assert!(
+                kind != InterruptKind::Unknown,
+                "user trap from unknown device, pid={} sepc={:#x} stval={:#x} scause={:#x}",
+                proc.pid,
+                trapframe.user_epc,
+                asm::read_stval(),
+                scause
+            );
+            if kind == InterruptKind::Timer {
+                drop(private);
+                proc::proc_yield(&token);
+            }
+        }
     });
 
     LOCAL_HART.with(|hart| hart.trap.set(false));
-    todo!()
+    // SAFETY: We are calling this function in the context of a valid
+    // process.
+    unsafe { user_trap_ret() }
 }
 
 /// # Safety

@@ -53,29 +53,30 @@ extern "C" {
 use core::{
     alloc::Layout,
     arch::{asm, global_asm},
-    mem,
     panic::PanicInfo,
 };
 
 use addr::{Physical, Virtual};
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    string::String,
+    sync::Arc,
+};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
-use symbol::Symbol;
 use uart::UART;
 
 use crate::{
-    addr::{DirectMapped, Identity, Kernel, PhysicalConst, PhysicalMut, VirtualConst},
-    asm::get_satp,
-    boot::HartBootData,
+    addr::{DirectMapped, Kernel, PhysicalMut, VirtualConst},
     hart_local::LOCAL_HART,
-    kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
+    kalloc::linked_list::LinkedListAlloc,
     plic::PLIC,
-    proc::{context_switch, Proc, ProcState},
+    proc::{Proc, ProcState, SchedulerInner},
+    spin::SpinMutex,
     symbol::fn_user_code_woo,
     trampoline::Trapframe,
-    trap::{user_trap_ret, Irqs, IRQS},
+    trap::{Irqs, IRQS},
     units::StorageUnits,
 };
 
@@ -94,6 +95,16 @@ global_asm!(
 user_code_woo:
     li a0, 42
     ecall
+    //addi a0, a0, 1
+user_code_woo.loop:
+    j user_code_woo
+.type user_code_woo2,@function
+.global user_code_woo2
+user_code_woo2:
+    li a0, 64
+    ecall
+user_code_woo2.loop:
+    j user_code_woo2
 .popsection
 "
 );
@@ -191,7 +202,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         let trapframe = unsafe { &mut *private.trapframe };
         let mut trapframe = trapframe.write(Trapframe::default());
         trapframe.user_epc = 0;
-        trapframe.sp = 4.kib() - 8;
+        trapframe.sp = 4.kib();
         private.pgtbl.map(
             VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
                 .into_phys()
@@ -199,67 +210,93 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             VirtualConst::from_usize(0),
             PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
         );
+        proc.spin_protected.lock().state = ProcState::Runnable;
     };
+    let mut proc2 = Proc::new(String::from("user_mode_woo2"));
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    {
+        let private = proc2.private_mut();
+        private.mem_size = 4.kib();
+        let trapframe = unsafe { &mut *private.trapframe };
+        let mut trapframe = trapframe.write(Trapframe::default());
+        trapframe.user_epc = 0x0c;
+        trapframe.sp = 4.kib();
+        private.pgtbl.map(
+            VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
+                .into_phys()
+                .into_identity(),
+            VirtualConst::from_usize(0),
+            PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
+        );
+        proc2.spin_protected.lock().state = ProcState::Runnable;
+    }
+
     LOCAL_HART.with(|hart| {
-        *hart.proc.borrow_mut() = Some(Arc::new(proc));
-        let token = hart.proc().unwrap();
-
-        let proc = token.proc();
-        let mut proc_lock = proc.spin_protected.lock();
-        proc_lock.state = ProcState::Running;
-        drop(proc_lock);
-
-        let _old_ctx = hart.context.lock();
-        let _new_ctx = proc.context.lock();
-
-        let (old_ctx, old_lock) = hart.context.to_components();
-        let (new_ctx, new_lock) = proc.context.to_components();
-
-        unsafe { context_switch(old_ctx, new_ctx, old_lock, new_lock) }
+        proc::SCHED.per_hart.get_or_init(|| {
+            BTreeMap::from([(
+                hart.hartid.get(),
+                SpinMutex::new(SchedulerInner {
+                    procs: VecDeque::new(),
+                    run_queue: BTreeMap::new(),
+                }),
+            )])
+        });
+        let mut sched = proc::SCHED
+            .per_hart
+            .expect("sched")
+            .get(&hart.hartid.get())
+            .unwrap()
+            .lock();
+        let pid = proc.pid;
+        sched.run_queue.insert(pid, Arc::new(proc));
+        sched.procs.push_back(pid);
+        let pid2 = proc2.pid;
+        sched.run_queue.insert(pid2, Arc::new(proc2));
+        sched.procs.push_back(pid2);
     });
 
     LOCAL_HART.with(|hart| {
-        hart.push_off();
+        //hart.push_off();
         println!(
             "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!",
             hart.hartid.get()
         );
         // panic!("{:#?}", asm::get_pagetable());
 
-        for hart in fdt
-            .cpus()
-            .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
-        {
-            let id = hart.ids().first();
-            println!("found FDT node for hart {id}");
-            // Allocate a 4 MiB stack
-            let sp_phys = {
-                let mut pma = PMAlloc::get();
-                pma.allocate(kalloc::phys::what_order(4.mib()))
-                    .expect("Could not allocate stack for hart")
-            };
+        // for hart in fdt
+        //     .cpus()
+        //     .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
+        // {
+        //     let id = hart.ids().first();
+        //     println!("found FDT node for hart {id}");
+        //     // Allocate a 4 MiB stack
+        //     let sp_phys = {
+        //         let mut pma = PMAlloc::get();
+        //         pma.allocate(kalloc::phys::what_order(4.mib()))
+        //             .expect("Could not allocate stack for hart")
+        //     };
 
-            let boot_data = Box::into_raw(Box::new(HartBootData {
-                // We're both in the kernel--this hart will use the same SATP as us.
-                raw_satp: get_satp(),
-                sp_phys,
-                fdt_ptr_virt: VirtualConst::<_, DirectMapped>::from_ptr(fdt_ptr),
-            }));
-            let boot_data_virt = VirtualConst::<_, Identity>::from_ptr(boot_data);
-            let boot_data_phys = root_page_table()
-                .lock()
-                .walk(boot_data_virt.cast())
-                .into_usize();
+        //     let boot_data = Box::into_raw(Box::new(HartBootData {
+        //         // We're both in the kernel--this hart will use the same SATP as us.
+        //         raw_satp: get_satp(),
+        //         sp_phys,
+        //         fdt_ptr_virt: VirtualConst::<_, DirectMapped>::from_ptr(fdt_ptr),
+        //     }));
+        //     let boot_data_virt = VirtualConst::<_, Identity>::from_ptr(boot_data);
+        //     let boot_data_phys = root_page_table()
+        //         .lock()
+        //         .walk(boot_data_virt.cast())
+        //         .into_usize();
 
-            let start_hart = boot::start_hart as *const u8;
-            let start_hart_addr = VirtualConst::<_, Kernel>::from_ptr(start_hart)
-                .into_phys()
-                .into_usize();
+        //     let start_hart = boot::start_hart as *const u8;
+        //     let start_hart_addr = VirtualConst::<_, Kernel>::from_ptr(start_hart)
+        //         .into_phys()
+        //         .into_usize();
 
-            sbi::hsm::hart_start(id, start_hart_addr, boot_data_phys)
-                .expect("Could not start hart");
-        }
-        hart.pop_off();
+        //     sbi::hsm::hart_start(id, start_hart_addr, boot_data_phys)
+        //         .expect("Could not start hart");
+        // }
+        // hart.pop_off();
 
         let timebase_freq = fdt
             .cpus()
@@ -273,9 +310,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         sbi::timer::set_timer(asm::read_time() + interval).unwrap();
     });
 
-    loop {
-        asm::nop();
-    }
+    // SAFETY: The scheduler is only run once on the main hart.
+    unsafe { proc::scheduler() }
 }
 
 #[no_mangle]
