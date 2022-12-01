@@ -150,7 +150,7 @@ pub struct ProcProtected {
     pub state: ProcState,
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ProcState {
     Uninit,
     Sleeping,
