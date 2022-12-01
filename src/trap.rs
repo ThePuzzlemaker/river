@@ -1,4 +1,4 @@
-use core::{arch::global_asm, mem, ptr};
+use core::{arch::global_asm, mem};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
@@ -7,7 +7,7 @@ use crate::{
     paging::Satp,
     plic::PLIC,
     println,
-    proc::{ProcPrivate, ProcToken},
+    proc::{self, ProcState},
     trampoline::{self, trampoline},
     uart,
     units::StorageUnits,
@@ -231,7 +231,7 @@ pub fn describe_exception(id: u64) -> &'static str {
 }
 
 #[link_section = ".init.user_trap"]
-unsafe extern "C" fn user_trap() {
+unsafe extern "C" fn user_trap() -> ! {
     // Make sure we interrupt into kernel_trapvec, now that we're in S-mode.
     // SAFETY: The address we provide is valid.
     unsafe { asm::write_stvec(kernel_trapvec as *const u8) }
@@ -256,10 +256,15 @@ unsafe extern "C" fn user_trap() {
 }
 
 /// # Safety
-/// TODO
+///
+/// This function must be called within the context of a
+/// valid process.
+///
 /// # Panics
-/// TODO
-pub unsafe extern "C" fn user_trap_ret() {
+///
+/// This function will panic if there is not a process scheduled on
+/// the local hart.
+pub unsafe extern "C" fn user_trap_ret() -> ! {
     asm::intr_off();
     LOCAL_HART.with(|hart| hart.trap.set(true));
 
@@ -271,10 +276,12 @@ pub unsafe extern "C" fn user_trap_ret() {
 
         let mut private = token.proc().private(&token);
 
-        let mut trapframe = unsafe { (&mut *private.trapframe).assume_init_mut() };
+        // SAFETY: Our caller guarantees that we are within a valid
+        // process's context.
+        let mut trapframe = unsafe { (*private.trapframe).assume_init_mut() };
         trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
         trapframe.kernel_sp = (private.kernel_stack.into_usize() as u64) + 4u64.mib();
-        trapframe.kernel_trap = unsafe { mem::transmute::<unsafe extern "C" fn(), u64>(user_trap) };
+        trapframe.kernel_trap = user_trap as u64;
         trapframe.kernel_tp = asm::tp();
 
         asm::write_sepc(trapframe.user_epc);
@@ -290,8 +297,12 @@ pub unsafe extern "C" fn user_trap_ret() {
     // Clear SPP = user mode
     asm::clear_spp();
 
-    let ret_user =
-        unsafe { mem::transmute::<usize, unsafe fn(usize) -> !>(trampoline::ret_user()) };
+    // SAFETY: The function pointer type and address are valid.
+    let ret_user = unsafe {
+        mem::transmute::<usize, unsafe extern "C" fn(usize) -> !>(trampoline::ret_user())
+    };
     LOCAL_HART.with(|hart| hart.trap.set(false));
+
+    // SAFETY: The function address is valid and we have provided it with the proper values.
     unsafe { (ret_user)(satp) }
 }
