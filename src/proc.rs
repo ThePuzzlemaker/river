@@ -2,7 +2,7 @@ use core::{
     arch::global_asm,
     cell::{Cell, RefCell, RefMut, UnsafeCell},
     mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use alloc::{string::String, sync::Arc};
@@ -230,12 +230,10 @@ context_switch:
 );
 
 extern "C" {
-    // N.B. We never access these values from the C side, only move them around.
-    #[allow(improper_ctypes)]
     pub fn context_switch(
         old: *mut Context,
         new: *mut Context,
-        old_lock: *const AtomicBool,
-        new_lock: *const AtomicBool,
+        old_lock: *const AtomicU64,
+        new_lock: *const AtomicU64,
     );
 }

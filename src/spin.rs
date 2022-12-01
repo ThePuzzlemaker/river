@@ -4,7 +4,7 @@ use core::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::addr_of,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use alloc::fmt;
@@ -38,7 +38,7 @@ use crate::{
 /// which are undesirable.
 // TODO: SpinRwLock?
 pub struct SpinMutex<T> {
-    locked: AtomicBool,
+    locked: AtomicU64,
     data: UnsafeCell<T>,
     held_by: Cell<Option<u64>>,
 }
@@ -54,14 +54,14 @@ unsafe impl<T: Sync + Send> Sync for SpinMutex<T> {}
 impl<T> SpinMutex<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            locked: AtomicU64::new(0),
             data: UnsafeCell::new(data),
             held_by: Cell::new(None),
         }
     }
 
     #[inline]
-    pub fn to_components(&self) -> (*mut T, *const AtomicBool) {
+    pub fn to_components(&self) -> (*mut T, *const AtomicU64) {
         (self.data.get(), addr_of!(self.locked))
     }
 
@@ -84,7 +84,7 @@ impl<T> SpinMutex<T> {
             hartid()
         };
         assert!(
-            self.held_by.get() != Some(hartid),
+            self.locked.load(Ordering::Relaxed) == 0 || self.held_by.get() != Some(hartid),
             "SpinMutex::lock: deadlock detected"
         );
 
@@ -98,7 +98,7 @@ impl<T> SpinMutex<T> {
         // necessary there as we do not have access to the data.
         while self
             .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             hint::spin_loop();
@@ -161,7 +161,7 @@ impl<'a, T> Drop for SpinMutexGuard<'a, T> {
         // Set the locked flag to false.
         // The Release ordering ensures that the acquisition of this guard
         // cannot occur after its release.
-        self.mutex.locked.store(false, Ordering::Release);
+        self.mutex.locked.store(0, Ordering::Release);
 
         // If interrupts were previously enabled, re-enable them.
         // Interrupts will always be disabled before TLS is enabled,
