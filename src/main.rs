@@ -22,7 +22,8 @@
     clippy::module_name_repetitions,
     clippy::cast_ptr_alignment,
     clippy::cast_lossless,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::fn_to_numeric_cast
 )]
 
 extern crate alloc;
