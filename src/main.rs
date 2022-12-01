@@ -266,9 +266,10 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .expect("Could not find boot hart in FDT")
             .timebase_frequency() as u64;
 
-        let time = asm::read_time();
-        println!("setting timer");
-        sbi::timer::set_timer(time + 10 * timebase_freq).unwrap();
+        // About 1/10 sec.
+        hart.timer_interval.set(timebase_freq / 10);
+        let interval = hart.timer_interval.get();
+        sbi::timer::set_timer(asm::read_time() + interval).unwrap();
     });
 
     loop {

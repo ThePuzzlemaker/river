@@ -194,6 +194,8 @@ pub struct HartCtx {
     pub proc: RefCell<Option<Arc<Proc>>>,
     /// Register spill area for this hart
     pub context: SpinMutex<Context>,
+    /// Interval for timer interrupts
+    pub timer_interval: Cell<u64>,
     /// Ensure HartCtx is !Send + !Sync
     _phantom: PhantomData<*const ()>,
 }

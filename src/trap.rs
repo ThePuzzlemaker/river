@@ -89,8 +89,12 @@ fn device_interrupt(scause: u64) -> InterruptKind {
 
         InterruptKind::External
     } else if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 5 {
-        println!("clock interrupt on hart {}", asm::hartid());
         asm::timer_intr_clear();
+
+        let interval = LOCAL_HART.with(|hart| hart.timer_interval.get());
+        sbi::timer::set_timer(asm::read_time() + interval).unwrap();
+
+        asm::timer_intr_on();
 
         InterruptKind::Timer
     } else {
