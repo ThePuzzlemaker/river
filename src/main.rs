@@ -171,8 +171,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     PLIC.set_priority(uart_irq, 1);
     PLIC.hart_senable(uart_irq);
     PLIC.hart_set_spriority(0);
-    // SAFETY: Writes to CSRs are atomic and the trap vector address is valid.
-    unsafe { asm!("csrw stvec, {}", in(reg) trap::kernel_trapvec) }
+    // SAFETY: The trap vector address is valid.
+    unsafe { asm::write_stvec(trap::kernel_trapvec as *const u8) }
 
     IRQS.get_or_init(|| Irqs { uart: uart_irq });
 
@@ -295,8 +295,8 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     PLIC.set_priority(uart_irq, 1);
     PLIC.hart_senable(uart_irq);
     PLIC.hart_set_spriority(0);
-    // SAFETY: Writes to CSRs are atomic, and the address provided is valid.
-    unsafe { asm!("csrw stvec, {}", in(reg) trap::kernel_trapvec) }
+    // SAFETY: The address provided is valid.
+    unsafe { asm::write_stvec(trap::kernel_trapvec as *const u8) };
 
     asm::software_intr_on();
     asm::timer_intr_on();
