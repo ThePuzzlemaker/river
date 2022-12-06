@@ -56,6 +56,7 @@ impl<T> SpinMutex<T> {
         Self {
             locked: AtomicU64::new(0),
             data: UnsafeCell::new(data),
+            // TODO: is this safe? doubt so tbh
             held_by: Cell::new(None),
         }
     }
@@ -161,10 +162,16 @@ impl<T: Default> Default for SpinMutex<T> {
     }
 }
 
-impl<T> fmt::Debug for SpinMutex<T> {
+impl<T: fmt::Debug> fmt::Debug for SpinMutex<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: make this better
-        write!(f, "SpinMutex(<opaque>)")
+        match self.try_lock() {
+            Some(lock) => f.debug_struct("SpinMutex").field("data", &*lock).finish(),
+            None => f
+                .debug_struct("SpinMutex")
+                .field("data", &"<locked>")
+                .field("held_by", &self.held_by)
+                .finish_non_exhaustive(),
+        }
     }
 }
 
