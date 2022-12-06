@@ -31,7 +31,7 @@ macro_rules! hart_local {
             unsafe fn __get_base() -> usize {
                 &__STATIC_INNER as *const _ as usize
             }
-            HartLocal::new(__init, __get_base)
+            $crate::hart_local::HartLocal::new(__init, __get_base)
         };
         $crate::hart_local! { $($($rest)*)? }
     }
