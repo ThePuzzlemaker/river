@@ -65,6 +65,48 @@ impl<T> SpinMutex<T> {
         (self.data.get(), addr_of!(self.locked))
     }
 
+    /// Try to lock the `SpinMutex`, returning `None` if it is not
+    /// available.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if it detects a deadlock.
+    #[track_caller]
+    pub fn try_lock(&'_ self) -> Option<SpinMutexGuard<'_, T>> {
+        // Disable interrupts to prevent deadlocks.  Interrupts will
+        // always be disabled before TLS is enabled, as it's enabled
+        // very early (before paging, even).
+        let hartid = if hart_local::enabled() {
+            LOCAL_HART.with(|hart| {
+                hart.push_off();
+                hart.hartid.get()
+            })
+        } else {
+            hartid()
+        };
+        assert!(
+            self.locked.load(Ordering::Relaxed) == 0 || self.held_by.get() != Some(hartid),
+            "SpinMutex::lock: deadlock detected"
+        );
+
+        // N.B. We don't use `compare_exchange_weak` which can
+        // spuriously fail, which we don't want this function to do.
+        if self
+            .locked
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+
+        self.held_by.set(Some(hartid));
+
+        Some(SpinMutexGuard {
+            mutex: self,
+            _phantom: PhantomData,
+        })
+    }
+
     /// Lock the `SpinMutex`, potentially spinning if it is not available.
     ///
     /// # Panics
