@@ -224,44 +224,9 @@ pub struct RawPageTable {
     pub ptes: [RawPageTableEntry; 512],
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct RawPageTableEntry(u64);
-
-unsafe fn subtable_ref(ppn: Ppn) -> &'static RawPageTable {
-    let phys_addr: PhysicalMut<_, DirectMapped> = Physical::from_components(ppn, None);
-    let virt_addr = phys_addr.into_virt();
-    // TODO: make this actually properly safe
-    unsafe { &*virt_addr.into_ptr() }
-}
-
-#[derive(Copy, Clone)]
-#[repr(transparent)]
-struct KindFormatter(PageTableEntry);
-impl fmt::Debug for KindFormatter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.kind() {
-            PTEKind::Leaf => f.debug_tuple("PTEKind::Leaf").field(&self.0.ppn).finish(),
-            PTEKind::Branch(_) => f
-                .debug_struct("PTEKind::Branch")
-                .field("phys_addr", &self.0.ppn)
-                .field("subtable", &unsafe { subtable_ref(self.0.ppn) })
-                .finish(),
-            PTEKind::Invalid => f.debug_tuple("PTEKind::Invalid").finish(),
-        }
-    }
-}
-
-impl fmt::Debug for RawPageTableEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let decoded = self.decode();
-
-        f.debug_struct("RawPageTableEntry")
-            .field("as_raw", &self.0)
-            .field("decoded", &decoded)
-            .finish()
-    }
-}
 
 impl RawPageTableEntry {
     pub const fn decode(self) -> PageTableEntry {
@@ -281,19 +246,10 @@ impl RawPageTableEntry {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PageTableEntry {
     pub ppn: Ppn,
     pub flags: PageTableFlags,
-}
-
-impl fmt::Debug for PageTableEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PageTableEntry")
-            .field("flags", &self.flags)
-            .field("kind", &KindFormatter(*self))
-            .finish()
-    }
 }
 
 pub enum PTEKind {
