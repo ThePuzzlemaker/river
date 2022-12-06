@@ -140,7 +140,10 @@ impl PMAlloc {
     ///
     /// # Panics
     ///
-    /// TODO: I have no clue why this can panic.
+    /// This function will panic if there is not enough space in the
+    /// allocator.
+    ///
+    /// TODO: make this not panic, if possible
     pub fn allocate(&mut self, order: u32) -> Option<PhysicalMut<u8, DirectMapped>> {
         if order > TOTAL_MAX_ORDER {
             return None;
