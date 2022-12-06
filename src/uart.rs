@@ -41,8 +41,8 @@ const RHR: usize = 0b000;
 const DIVISOR_LATCH_LSB: usize = 0b000;
 const DIVISOR_LATCH_MSB: usize = 0b001;
 
-pub static SERIAL_BACKUP: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
-pub static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
+static SERIAL_BACKUP: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
+static SERIAL: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 
 impl Ns16650 {
     // TODO: make this better
@@ -68,9 +68,12 @@ impl Ns16650Inner {
         }
     }
 
+    /// Initialize the UART driver with the given serial base.
+    ///
     /// # Safety
     ///
-    /// This function MUST be called ONLY ONCE.
+    /// This function MUST be called ONLY ONCE. Additionally, the
+    /// serial base address must be valid.
     pub unsafe fn init(&mut self, serial_base: *mut u8) {
         debug_assert!(
             !self.init,
@@ -83,82 +86,94 @@ impl Ns16650Inner {
         self.init = true;
 
         // Disable interrupts
-        unsafe { self.write_ier(IERFlags::empty().bits) };
+        self.write_ier(IERFlags::empty().bits);
 
         // Baud rate = 38.4K, msb=0 lsb=3
-        unsafe { self.set_clock_divisor(0x00, 0x03) };
+        self.set_clock_divisor(0x00, 0x03);
 
         // Reset and enable FIFOs.
-        unsafe { self.write_fcr(FCRFlags::FIFO_ENABLE.bits | FCRFlags::RESET_ALL_FIFOS.bits) };
+        self.write_fcr(FCRFlags::FIFO_ENABLE.bits | FCRFlags::RESET_ALL_FIFOS.bits);
 
         // Enable IRQs. (Don't enable RX yet, since I haven't implemented it :P)
-        unsafe { self.write_ier(IERFlags::TX_IRQ_ENABLE.bits) };
+        self.write_ier(IERFlags::TX_IRQ_ENABLE.bits);
     }
 
+    /// Update the serial base. This is only used for after paging is enabled.
+    ///
+    /// # Safety
+    ///
+    /// The serial base address must be valid.
     pub unsafe fn update_serial_base(&mut self, serial_base: *mut u8) {
         self.serial_base = serial_base;
         SERIAL.store(serial_base, Ordering::Relaxed);
     }
 
-    unsafe fn set_clock_divisor(&mut self, msb: u8, lsb: u8) {
-        let lcr = unsafe { self.read_lcr() };
-        unsafe { self.write_lcr(lcr | LCRFlags::DIVISOR_LATCH_ENABLE.bits) };
+    #[allow(clippy::similar_names)]
+    fn set_clock_divisor(&mut self, msb: u8, lsb: u8) {
+        let lcr = self.read_lcr();
+        self.write_lcr(lcr | LCRFlags::DIVISOR_LATCH_ENABLE.bits);
 
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe {
             self.serial_base()
                 .add(DIVISOR_LATCH_LSB)
                 .write_volatile(lsb);
-        }
-        unsafe {
             self.serial_base()
                 .add(DIVISOR_LATCH_MSB)
                 .write_volatile(msb);
         }
 
-        unsafe { self.write_lcr(lcr) }
+        self.write_lcr(lcr);
     }
 
-    unsafe fn read_lcr(&self) -> u8 {
+    fn read_lcr(&self) -> u8 {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(LCR).read_volatile() }
     }
 
-    unsafe fn write_lcr(&mut self, data: u8) {
+    fn write_lcr(&mut self, data: u8) {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(LCR).write_volatile(data) }
     }
 
-    unsafe fn write_ier(&mut self, data: u8) {
+    fn write_ier(&mut self, data: u8) {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(IER).write_volatile(data) }
     }
 
-    unsafe fn write_fcr(&mut self, data: u8) {
+    fn write_fcr(&mut self, data: u8) {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(FCR).write_volatile(data) }
     }
 
-    unsafe fn read_lsr(&mut self) -> u8 {
+    fn read_lsr(&mut self) -> u8 {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(LSR).read_volatile() }
     }
 
-    unsafe fn write_thr(&mut self, data: u8) {
+    fn write_thr(&mut self, data: u8) {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(THR).write_volatile(data) }
     }
 
     pub fn putc_sync(&mut self, char: u8) {
         // Spin until LSR gives the okay to put a bytes into THR
-        while unsafe { self.read_lsr() } & LSRFlags::TX_HOLDING_IDLE.bits == 0 {
+        while self.read_lsr() & LSRFlags::TX_HOLDING_IDLE.bits == 0 {
             hint::spin_loop();
         }
-        unsafe { self.write_thr(char) }
+        self.write_thr(char);
     }
 
-    unsafe fn read_rhr(&mut self) -> u8 {
+    fn read_rhr(&mut self) -> u8 {
+        // SAFETY: Our invariants ensure that the serial base is valid.
         unsafe { self.serial_base().add(RHR).read_volatile() }
     }
 
     pub fn getc_sync(&mut self) -> Option<u8> {
-        if unsafe { self.read_lsr() } & LSRFlags::RX_DATA_READY.bits != 0 {
-            Some(unsafe { self.read_rhr() })
-        } else {
+        if self.read_lsr() & LSRFlags::RX_DATA_READY.bits == 0 {
             None
+        } else {
+            Some(self.read_rhr())
         }
     }
 
@@ -169,7 +184,9 @@ impl Ns16650Inner {
     }
 }
 
+// SAFETY: All data in a `Ns16650` is protected by a `SpinMutex`.
 unsafe impl Sync for Ns16650 {}
+// SAFETY: See above.
 unsafe impl Send for Ns16650 {}
 
 pub static UART: Ns16650 = Ns16650 {
@@ -226,9 +243,11 @@ pub fn print_backup(s: &str) {
         SERIAL_BACKUP.load(Ordering::Relaxed)
     };
     for b in s.as_bytes() {
+        // SAFETY: The invariants of the serial driver ensure this is valid.
         while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
             hint::spin_loop();
         }
+        // SAFETY: See above.
         unsafe { ptr::write_volatile(serial, *b) }
     }
 }
