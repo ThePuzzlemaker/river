@@ -2,7 +2,33 @@ use core::{fmt, marker::PhantomData};
 
 use super::{Identity, Mapping, Mutability, PgOff, Virtual};
 
-// TODO: document physical addr structure
+/// A physical address, with a specific [`Mapping`], used to convert it to and
+/// from a [`Virtual`] address.
+///
+/// # Internal Structure
+///
+/// With the Sv39[^1] paging strategy, a physical address is 55 bits long and is
+/// structured as follows:
+/// ```plaintext
+/// |<-55                      12->|<-11     0->| bit index
+/// |------------------------------|------------|
+/// |     physical page number     | pg. offset |
+/// |------------------------------|------------|
+/// |               26             |     12     | bit size
+/// ```
+///
+/// The physical page number (also called a "PPN") is a unique 44-bit
+/// page-aligned identifier to a page in physical memory.
+///
+/// The "page offset" is the remaining 12 bits, indexing into each 4 KiB
+/// (`4096` bytes) page.
+///
+/// To get the page offset, use [`Self::page_offset`]. Similarly, there is a
+/// function [`Self::ppn`] that gets the PPN of a specific physical address.
+///
+/// [^1]: See the [module-level documentation][crate::addr] or
+///  [the RISCV privileged ISA spec](https://github.com/riscv/riscv-isa-manual/releases/download/draft-20220604-4a01cbb/riscv-privileged.pdf),
+///  section 4.4
 #[repr(transparent)]
 pub struct Physical<T, Map: Mapping, Mut: Mutability<T>> {
     pub(super) addr: usize,
