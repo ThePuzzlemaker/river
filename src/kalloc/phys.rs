@@ -21,30 +21,25 @@ pub const fn what_order(size: usize) -> u32 {
 /// We currently only support up to 64GiB of physical memory.
 pub const TOTAL_MAX_ORDER: u32 = calc_max_order(64 * 1024 * 1024 * 1024);
 
-static PMALLOC: SpinMutex<PMAlloc> = SpinMutex::new(PMAlloc::new_uninit());
+static PMALLOC: PMAlloc = PMAlloc {
+    inner: SpinMutex::new(PMAllocInner::new_uninit()),
+};
 
 #[derive(Debug)]
 pub struct PMAlloc {
-    init: bool,
-    bitree: Bitree,
-    base: PhysicalMut<u8, DirectMapped>,
-    max_order: u32,
-    size: usize,
+    inner: SpinMutex<PMAllocInner>,
 }
 
 impl PMAlloc {
-    const fn new_uninit() -> Self {
-        PMAlloc {
-            init: false,
-            bitree: Bitree {
-                base: Physical::null(),
-                n_bits: 0,
-                max_order: 0,
-            },
-            base: Physical::null(),
-            max_order: 0,
-            size: 0,
-        }
+    /// # Panics
+    ///
+    /// This function will panic if the global `PMAlloc` has not been initialized.
+    /// See [`PMAlloc::init`].
+    #[track_caller]
+    pub fn get() -> SpinMutexGuard<'static, PMAllocInner> {
+        let pma = PMALLOC.inner.lock();
+        assert!(pma.init, "PMAlloc::get: not initialized");
+        pma
     }
 
     /// # Safety
@@ -69,7 +64,7 @@ impl PMAlloc {
             0,
             "PMAlloc::init: size must be a multiple of 4096"
         );
-        let mut pma = PMALLOC.lock();
+        let mut pma = PMALLOC.inner.lock();
         debug_assert!(
             !pma.init,
             "PMAlloc::init: pma must not already be initialized"
@@ -89,16 +84,32 @@ impl PMAlloc {
             unsafe { pma.mark_used(base.cast().add(4096 * page_idx), 0) };
         }
     }
+}
 
-    /// # Panics
-    ///
-    /// This function will panic if the global `PMAlloc` has not been initialized.
-    /// See [`PMAlloc::init`].
-    #[track_caller]
-    pub fn get() -> SpinMutexGuard<'static, PMAlloc> {
-        let pma = PMALLOC.lock();
-        assert!(pma.init, "PMAlloc::get: not initialized");
-        pma
+#[derive(Debug)]
+pub struct PMAllocInner {
+    init: bool,
+    bitree: Bitree,
+    base: PhysicalMut<u8, DirectMapped>,
+    max_order: u32,
+    size: usize,
+}
+
+type PMAllocLock<'a> = SpinMutexGuard<'a, PMAllocInner>;
+
+impl PMAllocInner {
+    const fn new_uninit() -> Self {
+        PMAllocInner {
+            init: false,
+            bitree: Bitree {
+                base: Physical::null(),
+                n_bits: 0,
+                max_order: 0,
+            },
+            base: Physical::null(),
+            max_order: 0,
+            size: 0,
+        }
     }
 
     pub fn get_max_order(&self) -> u32 {
@@ -173,7 +184,7 @@ impl PMAlloc {
     /// # Safety
     ///
     /// - The pointer provided must have been allocated by
-    ///   [`PMAlloc::allocate`].
+    ///   [`PMAllocInner::allocate`].
     /// - The order provided must be the same as the one used to allocate this
     ///   chunk.
     ///
@@ -225,7 +236,6 @@ impl PMAlloc {
     }
 }
 
-// TODO: Do a PMAllocInner because this technically isn't safe.
 unsafe impl Send for PMAlloc {}
 unsafe impl Sync for PMAlloc {}
 
