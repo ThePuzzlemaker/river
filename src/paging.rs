@@ -1,6 +1,5 @@
 use core::{
     alloc::{AllocError, Allocator, Layout},
-    fmt,
     intrinsics::likely,
     mem::MaybeUninit,
     ptr::{self, NonNull},

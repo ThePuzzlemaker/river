@@ -1,8 +1,7 @@
 use core::{
-    arch::global_asm,
     cell::{RefCell, RefMut},
     mem::MaybeUninit,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use alloc::{string::String, sync::Arc};
