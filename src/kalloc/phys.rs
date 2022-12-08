@@ -36,7 +36,7 @@ impl PMAlloc {
     /// This function will panic if the global `PMAlloc` has not been initialized.
     /// See [`PMAlloc::init`].
     #[track_caller]
-    pub fn get() -> SpinMutexGuard<'static, PMAllocInner> {
+    pub fn get() -> PMAllocLock<'static> {
         let pma = PMALLOC.inner.lock();
         assert!(pma.init, "PMAlloc::get: not initialized");
         pma
