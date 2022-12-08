@@ -210,7 +210,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             VirtualConst::from_usize(0),
             PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
         );
-        proc.spin_protected.lock().state = ProcState::Runnable;
+        proc.set_state(ProcState::Runnable);
     };
     let mut proc2 = Proc::new(String::from("user_mode_woo2"));
     #[allow(clippy::undocumented_unsafe_blocks)]
@@ -228,7 +228,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             VirtualConst::from_usize(0),
             PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
         );
-        proc2.spin_protected.lock().state = ProcState::Runnable;
+        proc2.set_state(ProcState::Runnable);
     }
 
     LOCAL_HART.with(|hart| {

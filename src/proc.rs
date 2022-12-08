@@ -21,7 +21,7 @@ use crate::{
 #[derive(Debug)]
 pub struct Proc {
     pub pid: usize,
-    pub spin_protected: SpinMutex<ProcProtected>,
+    spin_protected: SpinMutex<ProcProtected>,
     // N.B. We don't need atomics here since there's no way that we
     // can soundly obtain two ProcTokens to the same process on
     // different threads, and the only way to modify (or read) this
