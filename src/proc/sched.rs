@@ -7,21 +7,23 @@ use crate::{asm, hart_local::LOCAL_HART, once_cell::OnceCell, spin::SpinMutex};
 
 use super::{Context, Proc, ProcState};
 
-pub static SCHED: Scheduler = Scheduler {
+static SCHED: Scheduler = Scheduler {
     per_hart: OnceCell::new(),
     wait_queue: SpinMutex::new(BTreeMap::new()),
 };
 
 #[derive(Debug)]
 pub struct Scheduler {
-    pub per_hart: OnceCell<BTreeMap<u64, SpinMutex<SchedulerInner>>>,
-    pub wait_queue: SpinMutex<BTreeMap<usize, Arc<Proc>>>,
+    per_hart: OnceCell<BTreeMap<u64, SpinMutex<SchedulerInner>>>,
+    wait_queue: SpinMutex<BTreeMap<usize, Arc<Proc>>>,
 }
 
+// TODO: maybe make this a LocalScheduler and be able to get it via
+// the current hart's ctx?
 #[derive(Debug)]
-pub struct SchedulerInner {
-    pub procs: VecDeque<usize>,
-    pub run_queue: BTreeMap<usize, Arc<Proc>>,
+struct SchedulerInner {
+    procs: VecDeque<usize>,
+    run_queue: BTreeMap<usize, Arc<Proc>>,
 }
 
 impl Scheduler {
@@ -80,5 +82,39 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    pub fn init() {
+        LOCAL_HART.with(|hart| {
+            SCHED.per_hart.get_or_init(|| {
+                BTreeMap::from([(
+                    hart.hartid.get(),
+                    SpinMutex::new(SchedulerInner {
+                        procs: VecDeque::new(),
+                        run_queue: BTreeMap::new(),
+                    }),
+                )])
+            });
+        });
+    }
+
+    /// Enqueue a process on to the scheduler.
+    ///
+    /// # Panic
+    ///
+    /// This function will panic if the scheduler is not initialized.
+    pub fn enqueue(proc: Proc) {
+        LOCAL_HART.with(|hart| {
+            let mut sched = SCHED
+                .per_hart
+                .expect("Scheduler::enqueue: scheduler not initialized")
+                .get(&hart.hartid.get())
+                .unwrap()
+                .lock();
+
+            let pid = proc.pid;
+            sched.run_queue.insert(pid, Arc::new(proc));
+            sched.procs.push_back(pid);
+        });
     }
 }

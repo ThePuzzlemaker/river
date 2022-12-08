@@ -57,11 +57,7 @@ use core::{
 };
 
 use addr::{Physical, Virtual};
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    string::String,
-    sync::Arc,
-};
+use alloc::string::String;
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
@@ -72,8 +68,7 @@ use crate::{
     hart_local::LOCAL_HART,
     kalloc::linked_list::LinkedListAlloc,
     plic::PLIC,
-    proc::{Proc, ProcState, Scheduler, SchedulerInner},
-    spin::SpinMutex,
+    proc::{Proc, ProcState, Scheduler},
     symbol::fn_user_code_woo,
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
@@ -231,29 +226,9 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         proc2.set_state(ProcState::Runnable);
     }
 
-    LOCAL_HART.with(|hart| {
-        proc::SCHED.per_hart.get_or_init(|| {
-            BTreeMap::from([(
-                hart.hartid.get(),
-                SpinMutex::new(SchedulerInner {
-                    procs: VecDeque::new(),
-                    run_queue: BTreeMap::new(),
-                }),
-            )])
-        });
-        let mut sched = proc::SCHED
-            .per_hart
-            .expect("sched")
-            .get(&hart.hartid.get())
-            .unwrap()
-            .lock();
-        let pid = proc.pid;
-        sched.run_queue.insert(pid, Arc::new(proc));
-        sched.procs.push_back(pid);
-        let pid2 = proc2.pid;
-        sched.run_queue.insert(pid2, Arc::new(proc2));
-        sched.procs.push_back(pid2);
-    });
+    Scheduler::init();
+    Scheduler::enqueue(proc);
+    Scheduler::enqueue(proc2);
 
     LOCAL_HART.with(|hart| {
         //hart.push_off();
