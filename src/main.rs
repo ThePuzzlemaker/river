@@ -72,7 +72,7 @@ use crate::{
     hart_local::LOCAL_HART,
     kalloc::linked_list::LinkedListAlloc,
     plic::PLIC,
-    proc::{Proc, ProcState, SchedulerInner},
+    proc::{Proc, ProcState, Scheduler, SchedulerInner},
     spin::SpinMutex,
     symbol::fn_user_code_woo,
     trampoline::Trapframe,
@@ -310,8 +310,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         sbi::timer::set_timer(asm::read_time() + interval).unwrap();
     });
 
-    // SAFETY: The scheduler is only run once on the main hart.
-    unsafe { proc::scheduler() }
+    // SAFETY: The scheduler is only started once on the main hart.
+    unsafe { Scheduler::start() }
 }
 
 #[no_mangle]

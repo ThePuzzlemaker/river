@@ -7,7 +7,7 @@ use crate::{
     paging::Satp,
     plic::PLIC,
     println,
-    proc::{self, ProcState},
+    proc::ProcState,
     trampoline::{self, trampoline},
     uart,
     units::StorageUnits,
@@ -66,10 +66,10 @@ unsafe extern "C" fn kernel_trap() {
         if kind == InterruptKind::Timer {
             if let Some(token) = hart.proc() {
                 let proc = token.proc();
-                let proc_lock = proc.spin_protected.lock();
-                if proc_lock.state == ProcState::Running {
-                    drop(proc_lock);
-                    proc::proc_yield(&token);
+
+                if proc.state() == ProcState::Running {
+                    proc.set_state(ProcState::Runnable);
+                    token.yield_to_scheduler();
                 }
             }
         }
@@ -299,7 +299,8 @@ unsafe extern "C" fn user_trap() -> ! {
             );
             if kind == InterruptKind::Timer {
                 drop(private);
-                proc::proc_yield(&token);
+                token.proc().set_state(ProcState::Runnable);
+                token.yield_to_scheduler();
             }
         }
     });

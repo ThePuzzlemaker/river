@@ -1,6 +1,6 @@
 use core::{
     cell::{RefCell, RefMut},
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -17,8 +17,6 @@ use crate::{
     trap::user_trap_ret,
     units::StorageUnits,
 };
-
-use self::sched::goto_scheduler;
 
 #[derive(Debug)]
 pub struct Proc {
@@ -121,6 +119,15 @@ impl Proc {
     pub fn private_mut(&mut self) -> &mut ProcPrivate {
         self.private.get_mut()
     }
+
+    pub fn state(&self) -> ProcState {
+        self.spin_protected.lock().state
+    }
+
+    pub fn set_state(&self, state: ProcState) -> ProcState {
+        let mut lock = self.spin_protected.lock();
+        mem::replace(&mut lock.state, state)
+    }
 }
 
 /// An opaque token representing the process running on the current
@@ -132,12 +139,25 @@ pub struct ProcToken<'h> {
 }
 
 impl<'h> ProcToken<'h> {
+    #[inline(always)]
     pub fn proc(&self) -> &Arc<Proc> {
         &self.proc
     }
 
-    pub fn cpu(&self) -> &'h HartCtx {
+    #[inline(always)]
+    pub fn hart(&self) -> &'h HartCtx {
         self.hart
+    }
+
+    pub fn yield_to_scheduler(&self) {
+        let intena = self.hart.intena.get();
+        let proc = &self.proc;
+
+        // SAFETY: The scheduler context is always valid, as
+        // guaranteed by the scheduler.
+        unsafe { Context::switch(&self.hart.context, &proc.context) }
+
+        self.hart.intena.set(intena);
     }
 }
 
@@ -165,11 +185,3 @@ mod context;
 mod sched;
 pub use context::*;
 pub use sched::*;
-
-pub fn proc_yield(token: &ProcToken<'_>) {
-    let mut proc_lock = token.proc.spin_protected.lock();
-    proc_lock.state = ProcState::Runnable;
-    drop(proc_lock);
-
-    goto_scheduler(token);
-}
