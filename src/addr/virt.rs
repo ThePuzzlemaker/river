@@ -1,6 +1,6 @@
 use core::{fmt, marker::PhantomData};
 
-use super::{Identity, Mapping, Mutability, PgOff, Physical};
+use super::{Identity, Mapping, Mutability, PgOff, Physical, PGOFF_MASK};
 
 /// A virtual address, with a specific [`Mapping`], used to convert it to and
 /// from a [`Physical`] address.
@@ -157,6 +157,17 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         let vpn_0 = vpn_0.into_usize();
         let pgoff = pgoff.unwrap_or_default().into_usize();
         Self::try_from_usize(vpn_2 | vpn_1 | vpn_0 | pgoff)
+    }
+
+    /// Align a virtual address to the page it is in.
+    ///
+    /// This is essentially equivalent to
+    /// `Virtual::from_components(addr.vpns(), None)`, but more
+    /// convenient.
+    #[inline]
+    pub fn page_align(self) -> Virtual<T, Map, Mut> {
+        // SAFETY: Page-aligning an address will not
+        unsafe { Self::from_usize_unchecked(self.into_usize() & !PGOFF_MASK) }
     }
 
     #[inline]
