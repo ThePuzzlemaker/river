@@ -1,8 +1,10 @@
 use core::{
     alloc::{AllocError, Allocator, Layout},
-    intrinsics::likely,
+    cmp,
+    intrinsics::{self, likely},
     mem::MaybeUninit,
     ptr::{self, NonNull},
+    slice,
 };
 
 use alloc::boxed::Box;
@@ -45,6 +47,9 @@ pub fn root_page_table() -> &'static SpinMutex<PageTable> {
 pub struct PageTable {
     root: Box<RawPageTable, PagingAllocator>,
 }
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserspaceCopyError;
 
 impl PageTable {
     #[allow(clippy::new_without_default)]
@@ -90,9 +95,12 @@ impl PageTable {
     /// This function will panic if it is called with an unmapped virtual
     /// address.
     #[track_caller]
-    pub fn walk(&self, virt_addr: VirtualConst<u8, Identity>) -> PhysicalConst<u8, Identity> {
+    pub fn walk<T>(
+        &self,
+        virt_addr: VirtualConst<T, Identity>,
+    ) -> Option<(PhysicalConst<T, DirectMapped>, PageTableFlags)> {
         let addr = virt_addr.into_usize();
-        let page = addr.next_multiple_of(4096) - 4096;
+        let page = virt_addr.page_align().into_usize();
         let offset = addr - page;
 
         let mut table = &*self.root;
@@ -107,16 +115,13 @@ impl PageTable {
                         ppn,
                         Some(PgOff::from_usize_truncate(offset)),
                     );
-                    return phys_page;
+                    return Some((phys_page, entry.flags));
                 }
                 PTEKind::Branch(phys_addr) => {
                     // SAFETY: By our invariants, this is safe.
-                    table = unsafe { &*(phys_addr.into_virt().into_ptr()) }
+                    table = unsafe { &*(phys_addr.into_virt().into_ptr()) };
                 }
-                PTEKind::Invalid => panic!(
-                    "PageTable::walk: attempted to walk an unmapped vaddr: vaddr={:#p}, flags={:?}",
-                    virt_addr, entry.flags
-                ),
+                PTEKind::Invalid => return None,
             }
         }
 
@@ -214,6 +219,56 @@ impl PageTable {
                 }
             }
         }
+    }
+
+    /// Try to copy `dst.len()` bytes from the address in this
+    /// userspace page table into `dst`.
+    ///
+    /// The provided `dst` slice will be fully initialized **if and
+    /// only if** the function returns `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// This function will error if the data could not be copied.
+    ///
+    /// # Safety
+    ///
+    /// The memory at the provided source address, if accessible by
+    /// U-mode, must be initialized.
+    pub unsafe fn copy_from_user(
+        &self,
+        dst: &mut [MaybeUninit<u8>],
+        src: VirtualConst<u8, Identity>,
+    ) -> Result<(), UserspaceCopyError> {
+        let src_page = src.page_align();
+
+        let mut len = dst.len();
+        let mut offset = src.into_usize() - src_page.into_usize();
+        for page in 0..dst.len().div_ceil(4.kib()) {
+            let (phys_addr, flags) = self
+                .walk(src_page.add(4.kib() * page + offset))
+                .ok_or(UserspaceCopyError)?;
+            let virt_addr = phys_addr.into_virt();
+            if !flags.contains(PageTableFlags::USER | PageTableFlags::READ | PageTableFlags::VALID)
+            {
+                return Err(UserspaceCopyError);
+            }
+
+            let copy_len = cmp::min(len, 4096);
+            let dst_slice_part = &mut dst[(page * 4.kib())..(page * 4.kib() + copy_len)];
+
+            // SAFETY: Our caller guarantees this memory is valid and initialized. Additionally, the layout of `MaybeUninit<u8>` is the same as `u8`.
+            unsafe {
+                dst_slice_part
+                    .copy_from_slice(slice::from_raw_parts(virt_addr.into_ptr().cast(), copy_len));
+            }
+
+            len -= copy_len;
+            offset = 0;
+        }
+        debug_assert_eq!(len, 0, "PageTable::copy_from_user: did not copy all bytes");
+
+        Ok(())
     }
 }
 

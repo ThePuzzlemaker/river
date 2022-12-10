@@ -1,10 +1,13 @@
 use core::{arch::global_asm, mem};
 
+use alloc::boxed::Box;
+
 use crate::{
+    addr::{DirectMapped, PhysicalConst, VirtualConst},
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
     hart_local::LOCAL_HART,
     once_cell::OnceCell,
-    paging::Satp,
+    paging::{PageTableFlags, Satp},
     plic::PLIC,
     println,
     proc::ProcState,
@@ -285,6 +288,31 @@ unsafe extern "C" fn user_trap() -> ! {
 
             // `ecall` instrs are 4 bytes, skip to the instruction after
             trapframe.user_epc += 4;
+
+            match trapframe.a0 {
+                0 => {
+                    let str_ptr = trapframe.a1 as usize;
+                    let str_len = trapframe.a2 as usize;
+
+                    assert!(str_ptr + str_len < private.mem_size, "too long");
+
+                    let mut slice = Box::new_uninit_slice(str_len);
+                    // SAFETY: All values are valid for u8 and process
+                    // memory is zeroed and is thus never
+                    // uninitialized.
+                    unsafe {
+                        private
+                            .pgtbl
+                            .copy_from_user(&mut slice, VirtualConst::from_usize(str_ptr))
+                            .unwrap();
+                    }
+                    // SAFETY: The above call fully initialize the slice.
+                    let slice = unsafe { slice.assume_init() };
+                    let s = core::str::from_utf8(&slice).unwrap();
+                    println!("from user: {:?}", s);
+                }
+                _ => todo!("invalid syscall number"),
+            }
 
             println!("user trap! a0={} epc={}", trapframe.a0, trapframe.user_epc);
         } else {

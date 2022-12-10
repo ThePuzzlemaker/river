@@ -88,11 +88,30 @@ global_asm!(
 .type user_code_woo,@function
 .global user_code_woo
 user_code_woo:
-    li a0, 42
+    // syscall num = 0
+    li a0, 0
+
+    // str ptr = hello
+    lla a1, hello
+
+    // str len = hello_end - hello
+    lla t0, hello_end
+    lla t1, hello
+    sub a2, t0, t1
+
     ecall
-    //addi a0, a0, 1
 user_code_woo.loop:
-    j user_code_woo
+    j user_code_woo.loop
+hello:
+    .byte 0x48,0x65,0x6c,0x6c,0x6f,0x2c,0x20,0x77,0x6f,0x72,0x6c,0x64,0x21,0x0a
+hello_end:
+
+
+
+
+
+
+
 .type user_code_woo2,@function
 .global user_code_woo2
 user_code_woo2:
@@ -207,28 +226,28 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         );
         proc.set_state(ProcState::Runnable);
     };
-    let mut proc2 = Proc::new(String::from("user_mode_woo2"));
-    #[allow(clippy::undocumented_unsafe_blocks)]
-    {
-        let private = proc2.private_mut();
-        private.mem_size = 4.kib();
-        let trapframe = unsafe { &mut *private.trapframe };
-        let mut trapframe = trapframe.write(Trapframe::default());
-        trapframe.user_epc = 0x0c;
-        trapframe.sp = 4.kib();
-        private.pgtbl.map(
-            VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
-                .into_phys()
-                .into_identity(),
-            VirtualConst::from_usize(0),
-            PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
-        );
-        proc2.set_state(ProcState::Runnable);
-    }
+    // let mut proc2 = Proc::new(String::from("user_mode_woo2"));
+    // #[allow(clippy::undocumented_unsafe_blocks)]
+    // {
+    //     let private = proc2.private_mut();
+    //     private.mem_size = 4.kib();
+    //     let trapframe = unsafe { &mut *private.trapframe };
+    //     let mut trapframe = trapframe.write(Trapframe::default());
+    //     trapframe.user_epc = 0x0c;
+    //     trapframe.sp = 4.kib();
+    //     private.pgtbl.map(
+    //         VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
+    //             .into_phys()
+    //             .into_identity(),
+    //         VirtualConst::from_usize(0),
+    //         PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
+    //     );
+    //     proc2.set_state(ProcState::Runnable);
+    // }
 
     Scheduler::init();
     Scheduler::enqueue(proc);
-    Scheduler::enqueue(proc2);
+    //Scheduler::enqueue(proc2);
 
     LOCAL_HART.with(|hart| {
         //hart.push_off();
