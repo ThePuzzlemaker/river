@@ -1,5 +1,7 @@
 use core::{fmt, mem};
 
+use alloc::vec::Vec;
+
 use crate::{
     addr::{DirectMapped, Physical, PhysicalMut},
     paging,
@@ -177,6 +179,38 @@ impl PMAllocInner {
             return Physical::try_from_usize(addr);
         }
         None
+    }
+
+    /// Returns the number of free pages in the allocator.
+    ///
+    /// # Panics
+    ///
+    /// This function should not panic unless the allocator's internal
+    /// state is invalid.
+    pub fn num_free_pages(&self) -> u64 {
+        let mut n_pgs = 0;
+
+        let mut stack = Vec::new();
+        let mut cur_ix = Some(self.bitree.ix_of_first(self.max_order));
+        loop {
+            if let Some(ix) = cur_ix {
+                stack.push(ix);
+                cur_ix = self.bitree.left_child(ix);
+            } else {
+                cur_ix = stack.pop();
+                let ix = cur_ix.unwrap();
+                if !self.bitree.get(ix) {
+                    n_pgs += 1 << self.bitree.order_of(ix).unwrap();
+                }
+                cur_ix = self.bitree.right_child(ix);
+            }
+
+            if stack.is_empty() {
+                break;
+            }
+        }
+
+        n_pgs
     }
 
     /// Deallocate a (2^order * 4096)-large chunk.
