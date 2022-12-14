@@ -211,6 +211,11 @@ impl PMAllocInner {
         n_pgs
     }
 
+    /// Returns the number of overall pages in the allocator.
+    pub fn num_pages(&self) -> u64 {
+        (self.size / 4096) as u64
+    }
+
     /// Deallocate a (2^order * 4096)-large chunk.
     ///
     /// # Safety
