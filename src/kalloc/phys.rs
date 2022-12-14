@@ -381,7 +381,7 @@ impl Bitree {
     #[allow(dead_code)]
     pub fn left_child(&self, ix: usize) -> Option<usize> {
         let ix = 2 * ix + 1;
-        if ix > self.n_bits {
+        if ix >= self.n_bits {
             return None;
         }
         Some(ix)
@@ -390,7 +390,7 @@ impl Bitree {
     #[allow(dead_code)]
     pub fn right_child(&self, ix: usize) -> Option<usize> {
         let ix = 2 * ix + 2;
-        if ix > self.n_bits {
+        if ix >= self.n_bits {
             return None;
         }
         Some(ix)
@@ -401,7 +401,7 @@ impl Bitree {
             return None;
         }
         let ix = (ix - 1) / 2;
-        if ix > self.n_bits {
+        if ix >= self.n_bits {
             return None;
         }
         Some(ix)
@@ -412,7 +412,7 @@ impl Bitree {
             return None;
         }
         let ix = if ix % 2 == 0 { ix - 1 } else { ix + 1 };
-        if ix > self.n_bits {
+        if ix >= self.n_bits {
             return None;
         }
         Some(ix)
@@ -423,7 +423,7 @@ impl Bitree {
         let ix_base = self.ix_of_first(order);
         // add in the offset
         let ix = ix_base + alloc_off;
-        if ix > self.n_bits {
+        if ix >= self.n_bits {
             return None;
         }
         Some(ix)
@@ -445,7 +445,7 @@ impl Bitree {
     /// Get the order of the ix'th node.
     #[inline]
     pub fn order_of(&self, ix: usize) -> Option<u32> {
-        if ix == usize::MAX || ix > self.n_bits {
+        if ix == usize::MAX || ix >= self.n_bits {
             return None;
         }
         Some(self.max_order - (ix + 1).ilog2())
