@@ -1,6 +1,6 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct FileHeader {
+pub struct FileHdr {
     pub ident: FileIdent,
     pub filety: u16,
     pub machine: u16,
@@ -49,4 +49,17 @@ pub struct SectionHdr {
     pub info: u32,
     pub addr_align: usize,
     pub entry_size: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct ProgramHdr {
+    pub seg_type: u32,
+    pub flags: u32,
+    pub offset: u64,
+    pub virt_addr: u64,
+    pub phys_addr: u64,
+    pub file_size: u64,
+    pub mem_size: u64,
+    pub align: u64,
 }

@@ -213,7 +213,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     let mut cursor = Cursor::new(BASIC_ELF);
     let mut elf = Elf::parse_header(&mut cursor).unwrap();
-    elf.parse_section_headers(&mut cursor).unwrap();
+    elf.parse_sections(&mut cursor).unwrap();
+    elf.parse_segments(&mut cursor).unwrap();
     println!("{:#x?}", elf);
 
     // Now that the PLIC is set up, it's fine to interrupt.

@@ -42,10 +42,13 @@ pub const MACHINE_TYPE_RISCV: u16 = 243;
 pub struct Elf {
     pub filety: FileType,
     pub entry_addr: usize,
-    pub section_headers: Vec<SectionHdr>,
+    pub sections: Vec<Section>,
+    pub segments: Vec<Segment>,
     sec_hdr_offset: usize,
     sec_hdr_count: u16,
     sec_strtab_index: u16,
+    prog_hdr_offset: usize,
+    prog_hdr_count: u16,
 }
 
 pub mod raw;
@@ -58,18 +61,21 @@ impl Elf {
         let mut elf = Self {
             filety: FileType::None,
             entry_addr: 0,
-            section_headers: vec![],
+            sections: vec![],
+            segments: vec![],
             sec_hdr_offset: 0,
             sec_hdr_count: 0,
             sec_strtab_index: 0,
+            prog_hdr_offset: 0,
+            prog_hdr_count: 0,
         };
 
-        let mut buf = [0; mem::size_of::<raw::FileHeader>()];
+        let mut buf = [0; mem::size_of::<raw::FileHdr>()];
         reader.read_exact(&mut buf).map_err(|_| ParseError)?;
 
         // SAFETY: `FileHeader` is valid in any bit pattern, and has
         // the same size.
-        let file_hdr = unsafe { mem::transmute::<_, raw::FileHeader>(buf) };
+        let file_hdr = unsafe { mem::transmute::<_, raw::FileHdr>(buf) };
 
         let proper_ident = FileIdent {
             magic: raw::MAGIC,
@@ -88,9 +94,11 @@ impl Elf {
         elf.sec_hdr_offset = file_hdr.sec_hdr_offset;
         elf.sec_hdr_count = file_hdr.sec_hdr_count;
         elf.sec_strtab_index = file_hdr.sec_strtab_index;
+        elf.prog_hdr_offset = file_hdr.prog_hdr_offset;
+        elf.prog_hdr_count = file_hdr.prog_hdr_count;
 
         if file_hdr.version != raw::EV_CURRENT
-            || file_hdr.hdr_size != mem::size_of::<raw::FileHeader>() as u16
+            || file_hdr.hdr_size != mem::size_of::<raw::FileHdr>() as u16
             || file_hdr.prog_hdr_size != 56
             || file_hdr.sec_hdr_size != mem::size_of::<raw::SectionHdr>() as u16
         {
@@ -105,17 +113,32 @@ impl Elf {
     /// # Errors
     ///
     /// TODO
-    pub fn parse_section_headers<R: Read + Seek>(
-        &mut self,
-        reader: &mut R,
-    ) -> Result<(), ParseError> {
+    pub fn parse_sections<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), ParseError> {
         reader
             .seek(SeekFrom::Start(self.sec_hdr_offset as u64))
             .map_err(|_| ParseError)?;
 
         for _ in 0..self.sec_hdr_count {
-            let section_hdr = SectionHdr::parse(reader)?;
-            self.section_headers.push(section_hdr);
+            let section = Section::parse(reader)?;
+            self.sections.push(section);
+        }
+
+        Ok(())
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn parse_segments<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), ParseError> {
+        reader
+            .seek(SeekFrom::Start(self.prog_hdr_offset as u64))
+            .map_err(|_| ParseError)?;
+
+        for _ in 0..self.prog_hdr_count {
+            let segment = Segment::parse(reader)?;
+            self.segments.push(segment);
         }
 
         Ok(())
@@ -135,8 +158,8 @@ pub enum FileType {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ParseError;
 
-#[derive(Debug)]
-pub struct SectionHdr {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Section {
     name_offset: u32,
     pub sec_type: SectionType,
     pub flags: SectionFlags,
@@ -149,14 +172,14 @@ pub struct SectionHdr {
     pub link: u32,
 }
 
-impl SectionHdr {
+impl Section {
     /// TODO
     ///
     /// # Errors
     ///
     /// TODO
     pub fn parse<R: Read + Seek>(reader: &mut R) -> Result<Self, ParseError> {
-        let mut sec = SectionHdr {
+        let mut sec = Section {
             name_offset: 0,
             sec_type: SectionType::Null,
             flags: SectionFlags::empty(),
@@ -217,12 +240,94 @@ pub enum SectionType {
 // rustfmt keeps messing this up idk why
 #[rustfmt::skip]
 bitflags! {
-    #[repr(transparent)]
+    #[repr(C)]
     pub struct SectionFlags: u64 {
 	const WRITE = 1;
 	const ALLOC = 2;
 	const EXEC_INSTR = 4;
 	const MASK_OS = 0x0F00_0000;
 	const MASK_PROC = 0xF000_0000;
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u32)]
+pub enum SegmentType {
+    Null = 0,
+    Load = 1,
+    Dynamic = 2,
+    Interp = 3,
+    Note = 4,
+    Shlib = 5,
+    Phdr = 6,
+    RVAttributes = 0x7000_0003,
+}
+
+#[rustfmt::skip]
+bitflags! {
+    #[repr(C)]
+    pub struct SegmentFlags: u32 {
+	const EXEC = 1;
+	const WRITE = 2;
+	const READ = 4;
+	const MASK_OS = 0x00FF_0000;
+	const MASK_PROC = 0xFF00_0000;
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Segment {
+    pub seg_type: SegmentType,
+    pub flags: SegmentFlags,
+    pub offset: usize,
+    pub virt_addr: usize,
+    pub file_size: usize,
+    pub mem_size: usize,
+    pub align: usize,
+}
+
+impl Segment {
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn parse<R: Read + Seek>(reader: &mut R) -> Result<Self, ParseError> {
+        let mut seg = Segment {
+            seg_type: SegmentType::Null,
+            flags: SegmentFlags::empty(),
+            offset: 0,
+            virt_addr: 0,
+            file_size: 0,
+            mem_size: 0,
+            align: 0,
+        };
+
+        let mut buf = [0; mem::size_of::<raw::ProgramHdr>()];
+        reader.read_exact(&mut buf).map_err(|_| ParseError)?;
+
+        // SAFETY: `ProgramHdr` is valid in any bit pattern, and has
+        // the same size.
+        let prog_hdr = unsafe { mem::transmute::<_, raw::ProgramHdr>(buf) };
+        seg.seg_type = SegmentType::try_from(prog_hdr.seg_type).map_err(|_| ParseError)?;
+        seg.flags = SegmentFlags::from_bits_truncate(prog_hdr.flags);
+        seg.offset = prog_hdr.offset as usize;
+        seg.virt_addr = prog_hdr.virt_addr as usize;
+        // phys addr is ignored
+        seg.file_size = prog_hdr.file_size as usize;
+        seg.mem_size = prog_hdr.mem_size as usize;
+        seg.align = prog_hdr.align as usize;
+
+        if !prog_hdr.align.is_power_of_two()
+            && (prog_hdr.align != 0 || seg.seg_type != SegmentType::Null)
+        {
+            return Err(ParseError);
+        }
+
+        if seg.align != 0 && seg.virt_addr % seg.align != seg.offset % seg.align {
+            return Err(ParseError);
+        }
+
+        Ok(seg)
     }
 }
