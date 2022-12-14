@@ -220,3 +220,10 @@ impl<'a, T> Drop for SpinMutexGuard<'a, T> {
         }
     }
 }
+
+impl<'a, T: fmt::Debug> fmt::Debug for SpinMutexGuard<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v: &T = self;
+        v.fmt(f)
+    }
+}
