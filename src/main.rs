@@ -70,7 +70,7 @@ use crate::{
     elf::Elf,
     hart_local::LOCAL_HART,
     io_traits::Cursor,
-    kalloc::linked_list::LinkedListAlloc,
+    kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     plic::PLIC,
     proc::{Proc, ProcState, Scheduler},
     symbol::fn_user_code_woo,
@@ -215,7 +215,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let mut elf = Elf::parse_header(&mut cursor).unwrap();
     elf.parse_sections(&mut cursor).unwrap();
     elf.parse_segments(&mut cursor).unwrap();
-    println!("{:#x?}", elf);
+    println!("{:x?}", elf);
 
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
@@ -266,6 +266,19 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         println!(
             "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!",
             hart.hartid.get()
+        );
+
+        let (free, total) = {
+            let pma = PMAlloc::get();
+            (pma.num_free_pages(), pma.num_pages())
+        };
+        let used = total - free;
+        let free = (free * 4.kib()) / 1.mib();
+        let used = (used * 4.kib()) / 1.mib();
+        let total = (total * 4.kib()) / 1.mib();
+        println!(
+            "current memory usage: {}MiB / {}MiB ({}MiB free)",
+            used, total, free
         );
         // panic!("{:#?}", asm::get_pagetable());
 
