@@ -1,6 +1,6 @@
 use core::{fmt, mem};
 
-use alloc::vec::Vec;
+use alloc::collections::VecDeque;
 
 use crate::{
     addr::{DirectMapped, Physical, PhysicalMut},
@@ -188,28 +188,26 @@ impl PMAllocInner {
     /// This function should not panic unless the allocator's internal
     /// state is invalid.
     pub fn num_free_pages(&self) -> u64 {
-        let mut n_pgs = 0;
-
-        let mut stack = Vec::new();
-        let mut cur_ix = Some(self.bitree.ix_of_first(self.max_order));
-        loop {
-            if let Some(ix) = cur_ix {
-                stack.push(ix);
-                cur_ix = self.bitree.left_child(ix);
-            } else {
-                cur_ix = stack.pop();
-                let ix = cur_ix.unwrap();
-                if !self.bitree.get(ix) {
-                    n_pgs += 1 << self.bitree.order_of(ix).unwrap();
+        fn helper(bitree: &Bitree, n_pgs: &mut u64, ix: usize) {
+            if bitree.get(ix) {
+                if let Some(ix_left) = bitree.left_child(ix) {
+                    helper(bitree, n_pgs, ix_left);
                 }
-                cur_ix = self.bitree.right_child(ix);
-            }
-
-            if stack.is_empty() {
-                break;
+                if let Some(ix_right) = bitree.right_child(ix) {
+                    helper(bitree, n_pgs, ix_right);
+                }
+            } else {
+                *n_pgs += 1 << bitree.order_of(ix).unwrap();
             }
         }
 
+        let mut n_pgs = 0;
+
+        helper(
+            &self.bitree,
+            &mut n_pgs,
+            self.bitree.ix_of_first(self.max_order),
+        );
         n_pgs
     }
 
