@@ -1,0 +1,15 @@
+.global _start
+.type _start, @function
+_start:
+    li a0, 0
+
+    lla a1, hello
+
+    lla t0, hello_end
+    lla t1, hello
+    sub a2, t0, t1
+
+    ecall
+hello:
+    .byte 0x48,0x65,0x6c,0x6c,0x6f,0x2c,0x20,0x77,0x6f,0x72,0x6c,0x64,0x21,0x0a
+hello_end:

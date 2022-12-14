@@ -31,7 +31,9 @@ extern crate alloc;
 pub mod addr;
 pub mod asm;
 pub mod boot;
+pub mod elf;
 pub mod hart_local;
+pub mod io_traits;
 pub mod kalloc;
 pub mod once_cell;
 pub mod paging;
@@ -65,7 +67,9 @@ use uart::UART;
 
 use crate::{
     addr::{DirectMapped, Kernel, PhysicalMut, VirtualConst},
+    elf::Elf,
     hart_local::LOCAL_HART,
+    io_traits::Cursor,
     kalloc::linked_list::LinkedListAlloc,
     plic::PLIC,
     proc::{Proc, ProcState, Scheduler},
@@ -122,6 +126,8 @@ user_code_woo2.loop:
 .popsection
 "
 );
+
+pub static BASIC_ELF: &[u8] = include_bytes!("../tmp");
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -204,6 +210,11 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     asm::software_intr_on();
     asm::timer_intr_on();
     asm::external_intr_on();
+
+    let mut cursor = Cursor::new(BASIC_ELF);
+    let mut elf = Elf::parse_header(&mut cursor).unwrap();
+    elf.parse_section_headers(&mut cursor).unwrap();
+    println!("{:#x?}", elf);
 
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
