@@ -236,7 +236,9 @@ impl PMAllocInner {
     }
 }
 
+// SAFETY: PMAlloc's inner data is `SpinMutex` protected.
 unsafe impl Send for PMAlloc {}
+// SAFETY: See above.
 unsafe impl Sync for PMAlloc {}
 
 #[inline(always)]
