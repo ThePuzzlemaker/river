@@ -66,6 +66,17 @@ impl<T> SpinMutex<T> {
         (self.data.get(), addr_of!(self.locked))
     }
 
+    /// Forcibly unlock this `SpinMutex`.
+    ///
+    /// # Safety
+    ///
+    /// This function is **very unsafe** as it allows unlocking the
+    /// mutex even while it is locked, allowing multiple mutable
+    /// references. Use with extreme caution.
+    pub unsafe fn force_unlock(&self) {
+        self.locked.store(0, Ordering::Release);
+    }
+
     /// Try to lock the `SpinMutex`, returning `None` if it is not
     /// available.
     ///

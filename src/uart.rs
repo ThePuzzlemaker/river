@@ -50,6 +50,16 @@ impl Ns16650 {
     pub fn lock(&self) -> SpinMutexGuard<'_, Ns16650Inner> {
         self.inner.lock()
     }
+
+    /// Forcibly unlock the serial device.
+    ///
+    /// # Safety
+    ///
+    /// See [`SpinMutex::force_unlock`].
+    pub unsafe fn force_unlock(&self) {
+        // SAFETY: Our caller guarantees this is safe.
+        unsafe { self.inner.force_unlock() };
+    }
 }
 
 // TODO: make this not Ns16650Inner, at least the public functions.

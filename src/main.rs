@@ -354,6 +354,11 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
 
 #[panic_handler]
 pub fn panic_handler(panic_info: &PanicInfo) -> ! {
+    // Forcibly unlock the UART device, so we don't accidentally
+    // deadlock here. SAFETY: This panic handler will never return to
+    // the code that locked the UART device.
+    unsafe { UART.force_unlock() };
+
     if paging::enabled() {
         // Paging is set up, we can use dynamic dispatch.
         if let Some(msg) = panic_info.message() {
