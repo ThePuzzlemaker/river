@@ -1,7 +1,5 @@
 use core::{fmt, mem};
 
-use alloc::collections::VecDeque;
-
 use crate::{
     addr::{DirectMapped, Physical, PhysicalMut},
     paging,
