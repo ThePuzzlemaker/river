@@ -7,7 +7,7 @@ use core::{
     slice,
 };
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, fmt};
 use bitflags::bitflags;
 
 use crate::{
@@ -23,6 +23,8 @@ use crate::{
 };
 
 static ROOT_PAGE_TABLE: OnceCell<SpinMutex<PageTable>> = OnceCell::new();
+
+pub const LOWER_HALF_TOP: usize = 0x003F_FFFF_F000;
 
 /// Get the root page table.
 ///
@@ -79,6 +81,10 @@ impl PageTable {
 
     pub fn as_physical(&mut self) -> PhysicalMut<RawPageTable, DirectMapped> {
         Virtual::from_ptr(core::ptr::addr_of_mut!(*self.root)).into_phys()
+    }
+
+    pub fn as_physical_const(&self) -> PhysicalConst<RawPageTable, DirectMapped> {
+        Virtual::from_ptr(core::ptr::addr_of!(*self.root)).into_phys()
     }
 
     fn new_table() -> Box<RawPageTable, PagingAllocator> {
@@ -272,10 +278,16 @@ impl PageTable {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[repr(C, align(4096))]
 pub struct RawPageTable {
     pub ptes: [RawPageTableEntry; 512],
+}
+
+impl fmt::Debug for RawPageTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawPageTable").finish_non_exhaustive()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

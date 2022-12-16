@@ -55,24 +55,30 @@ extern "C" {
 use core::{
     alloc::Layout,
     arch::{asm, global_asm},
+    cmp,
     panic::PanicInfo,
 };
 
 use addr::{Physical, Virtual};
-use alloc::string::String;
+use alloc::{boxed::Box, collections::BTreeMap, slice, string::String, vec};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 use uart::UART;
 
 use crate::{
-    addr::{DirectMapped, Kernel, PhysicalMut, VirtualConst},
-    elf::Elf,
+    addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst},
+    boot::HartBootData,
+    elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
-    io_traits::Cursor,
+    io_traits::{Cursor, Read, Seek, SeekFrom},
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     plic::PLIC,
-    proc::{Proc, ProcState, Scheduler},
+    proc::{
+        mman::{RegionPurpose, RegionRequest},
+        Proc, ProcState, Scheduler, SchedulerInner,
+    },
+    spin::SpinMutex,
     symbol::fn_user_code_woo,
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
@@ -92,23 +98,33 @@ global_asm!(
 .type user_code_woo,@function
 .global user_code_woo
 user_code_woo:
-    // syscall num = 0
+    li s0, 0
+user_code_woo.loop:
     li a0, 0
 
-    // str ptr = hello
     lla a1, hello
 
-    // str len = hello_end - hello
     lla t0, hello_end
     lla t1, hello
     sub a2, t0, t1
 
     ecall
-user_code_woo.loop:
+
+    // li a0, 1
+    // ecall
+
     j user_code_woo.loop
+
+//     //beq s0, x0, user_code_woo.loop
+// user_code_woo.loop_spin:
+//     //li s0, 1
+//     j user_code_woo.loop_spin	
+
+//.section .rodata
 hello:
     .byte 0x48,0x65,0x6c,0x6c,0x6f,0x2c,0x20,0x77,0x6f,0x72,0x6c,0x64,0x21,0x0a
 hello_end:
+
 
 
 
@@ -133,26 +149,7 @@ pub static BASIC_ELF: &[u8] = include_bytes!("../tmp");
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
 extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
-    println!("[info] initialized paging");
-
-    // // Allocate a 64-MiB heap.
-    // let heap_base: VirtualMut<u8, Identity> = VirtualMut::from_usize(0x0010_0000);
-    // let mut pgtbl = root_page_table().lock();
-    // for offset in (0..64.mib()).step_by(4096) {
-    //     let curr_page = {
-    //         let mut pma = PMAlloc::get();
-    //         pma.allocate().expect("oom")
-    //     };
-    //     pgtbl.map(
-    //         curr_page
-    //             .into_physical()
-    //             .into_identity()
-    //             .cast()
-    //             .into_const(),
-    //         heap_base.add(offset).into_const(),
-    //         PageTableFlags::RW | PageTableFlags::VAD,
-    //     );
-    // }
+    println!("[{}] [info] initialized paging", hartid());
 
     {
         let mut pgtbl = root_page_table().lock();
@@ -173,7 +170,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             PageTableFlags::VAD | PageTableFlags::RX,
         );
     }
-    println!("mapped 64GiB of virtual heap");
     // SAFETY: We guarantee that this virtual address is well-aligned and unaliased.
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
 
@@ -182,11 +178,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         Ok(fdt) => fdt,
         Err(e) => panic!("error loading fdt: {}", e),
     };
-    println!(
-        "fdt @ {:#p} -> {:#x}",
-        fdt_ptr,
-        fdt_ptr as usize + fdt.total_size()
-    );
 
     let plic = fdt
         .find_compatible(&["riscv,plic0"])
@@ -215,37 +206,115 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let mut elf = Elf::parse_header(&mut cursor).unwrap();
     elf.parse_sections(&mut cursor).unwrap();
     elf.parse_segments(&mut cursor).unwrap();
-    println!("{:x?}", elf);
 
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    let mut proc = Proc::new(String::from("user_mode_woo"));
-    #[allow(clippy::undocumented_unsafe_blocks)]
+    let mut proc = Proc::new(String::from("basic_elf"));
     {
         let private = proc.private_mut();
-        private.mem_size = 4.kib();
+        // TODO: what does xv6 even use this for
+        private.mem_size = usize::MAX;
+
         let trapframe = unsafe { &mut *private.trapframe };
         let mut trapframe = trapframe.write(Trapframe::default());
-        trapframe.user_epc = 0;
-        trapframe.sp = 4.kib();
-        private.pgtbl.map(
-            VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
-                .into_phys()
-                .into_identity(),
-            VirtualConst::from_usize(0),
-            PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
-        );
+
+        trapframe.user_epc = elf.entry_addr as u64;
+
+        trapframe.sp = private
+            .mman
+            .alloc(
+                &RegionRequest {
+                    n_pages: 4.mib() / 4.kib(),
+                    contiguous: true,
+                    flags: PageTableFlags::VAD | PageTableFlags::RW | PageTableFlags::USER,
+                    purpose: RegionPurpose::Stack,
+                },
+                Some(VirtualConst::from_usize(paging::LOWER_HALF_TOP)),
+            )
+            .unwrap()
+            .end
+            .into_usize() as u64;
+
+        for seg in &elf.segments {
+            if seg.seg_type == SegmentType::Load {
+                let start_addr =
+                    VirtualConst::<u8, Identity>::from_usize(seg.virt_addr).page_align();
+                let end_addr =
+                    VirtualConst::<u8, Identity>::from_usize(seg.virt_addr + seg.mem_size)
+                        .add(4.kib())
+                        .page_align();
+                let n_pages = (end_addr.into_usize() - start_addr.into_usize()) / 4.kib();
+                // println!("seg.virt_addr = {:#x}, seg.virt_addr + seg.mem_size = {:#x}, start_addr={:#x}, end_addr={:#x}",
+                //     seg.virt_addr,
+                //     seg.virt_addr + seg.mem_size,
+                //     start_addr.into_usize(),
+                //     end_addr.into_usize()
+                // );
+
+                let mut flags = PageTableFlags::VAD | PageTableFlags::USER;
+                if seg.flags.contains(SegmentFlags::READ) {
+                    flags |= PageTableFlags::READ;
+                }
+                if seg.flags.contains(SegmentFlags::WRITE) {
+                    flags |= PageTableFlags::WRITE;
+                }
+                if seg.flags.contains(SegmentFlags::EXEC) {
+                    flags |= PageTableFlags::EXECUTE;
+                }
+
+                // TODO: find purpose
+                private
+                    .mman
+                    .alloc(
+                        &RegionRequest {
+                            n_pages,
+                            contiguous: true,
+                            flags,
+                            purpose: RegionPurpose::Unknown,
+                        },
+                        Some(start_addr),
+                    )
+                    .unwrap();
+
+                cursor.seek(SeekFrom::Start(seg.offset as u64)).unwrap();
+                let mut len = seg.file_size;
+                for page in 0..n_pages {
+                    if len == 0 {
+                        break;
+                    }
+                    let n = cmp::min(4.kib(), len);
+
+                    let phys_addr = private
+                        .mman
+                        .get_table()
+                        .walk(start_addr.add(page * 4.kib()))
+                        .unwrap()
+                        .0;
+                    let virt_addr = phys_addr.into_virt();
+
+                    // SAFETY: This page was allocated by the
+                    // UserMemoryManager and is 4 KiB long, and len <=
+                    // n <= 4 KiB.
+                    let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
+                    cursor.read(buf).unwrap();
+
+                    len -= n;
+                }
+            }
+        }
+
         proc.set_state(ProcState::Runnable);
-    };
-    // let mut proc2 = Proc::new(String::from("user_mode_woo2"));
+    }
+
+    // let mut proc = Proc::new(String::from("user_mode_woo"));
     // #[allow(clippy::undocumented_unsafe_blocks)]
     // {
-    //     let private = proc2.private_mut();
+    //     let private = proc.private_mut();
     //     private.mem_size = 4.kib();
     //     let trapframe = unsafe { &mut *private.trapframe };
     //     let mut trapframe = trapframe.write(Trapframe::default());
-    //     trapframe.user_epc = 0x0c;
+    //     trapframe.user_epc = 0;
     //     trapframe.sp = 4.kib();
     //     private.pgtbl.map(
     //         VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
@@ -254,17 +323,31 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     //         VirtualConst::from_usize(0),
     //         PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
     //     );
-    //     proc2.set_state(ProcState::Runnable);
-    // }
-
-    Scheduler::init();
-    Scheduler::enqueue(proc);
-    //Scheduler::enqueue(proc2);
+    //     proc.set_state(ProcState::Runnable);
+    // };
+    let mut proc2 = Proc::new(String::from("user_mode_woo2"));
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    {
+        let private = proc2.private_mut();
+        private.mem_size = 4.kib();
+        let trapframe = unsafe { &mut *private.trapframe };
+        let mut trapframe = trapframe.write(Trapframe::default());
+        trapframe.user_epc = 0x00;
+        trapframe.sp = 4.kib();
+        private.mman.map_direct(
+            VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
+                .into_phys()
+                .into_identity(),
+            VirtualConst::from_usize(0),
+            PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
+        );
+        proc2.set_state(ProcState::Runnable);
+    }
 
     LOCAL_HART.with(|hart| {
         //hart.push_off();
         println!(
-            "=== river v0.0.-Inf ===\nboot hart id: {:?}\nhello world from kmain!",
+            "=== river v0.0.-Inf ===\n- boot hart id: {0}\n",
             hart.hartid.get()
         );
 
@@ -282,39 +365,49 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         );
         // panic!("{:#?}", asm::get_pagetable());
 
-        // for hart in fdt
-        //     .cpus()
-        //     .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
-        // {
-        //     let id = hart.ids().first();
-        //     println!("found FDT node for hart {id}");
-        //     // Allocate a 4 MiB stack
-        //     let sp_phys = {
-        //         let mut pma = PMAlloc::get();
-        //         pma.allocate(kalloc::phys::what_order(4.mib()))
-        //             .expect("Could not allocate stack for hart")
-        //     };
+        let mut scheduler_map = BTreeMap::new();
+        scheduler_map.insert(hart.hartid.get(), SpinMutex::new(SchedulerInner::default()));
+        for hart in fdt
+            .cpus()
+            .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
+        {
+            let id = hart.ids().first();
+            println!("found FDT node for hart {id}");
+            // Allocate a 4 MiB stack
+            let sp_phys = {
+                let mut pma = PMAlloc::get();
+                pma.allocate(kalloc::phys::what_order(4.mib()))
+                    .expect("Could not allocate stack for hart")
+            };
 
-        //     let boot_data = Box::into_raw(Box::new(HartBootData {
-        //         // We're both in the kernel--this hart will use the same SATP as us.
-        //         raw_satp: get_satp(),
-        //         sp_phys,
-        //         fdt_ptr_virt: VirtualConst::<_, DirectMapped>::from_ptr(fdt_ptr),
-        //     }));
-        //     let boot_data_virt = VirtualConst::<_, Identity>::from_ptr(boot_data);
-        //     let boot_data_phys = root_page_table()
-        //         .lock()
-        //         .walk(boot_data_virt.cast())
-        //         .into_usize();
+            let boot_data = Box::into_raw(Box::new(HartBootData {
+                // We're both in the kernel--this hart will use the same SATP as us.
+                raw_satp: asm::get_satp(),
+                sp_phys,
+                fdt_ptr_virt: VirtualConst::<_, DirectMapped>::from_ptr(fdt_ptr),
+            }));
+            let boot_data_virt = VirtualConst::<_, Identity>::from_ptr(boot_data);
+            let boot_data_phys = root_page_table()
+                .lock()
+                .walk(boot_data_virt.cast::<u8>())
+                .unwrap()
+                .0
+                .into_usize();
 
-        //     let start_hart = boot::start_hart as *const u8;
-        //     let start_hart_addr = VirtualConst::<_, Kernel>::from_ptr(start_hart)
-        //         .into_phys()
-        //         .into_usize();
+            let start_hart = boot::start_hart as *const u8;
+            let start_hart_addr = VirtualConst::<_, Kernel>::from_ptr(start_hart)
+                .into_phys()
+                .into_usize();
 
-        //     sbi::hsm::hart_start(id, start_hart_addr, boot_data_phys)
-        //         .expect("Could not start hart");
-        // }
+            scheduler_map.insert(id as u64, SpinMutex::new(SchedulerInner::default()));
+
+            sbi::hsm::hart_start(id, start_hart_addr, boot_data_phys)
+                .expect("Could not start hart");
+        }
+
+        Scheduler::init(scheduler_map);
+        Scheduler::enqueue(proc);
+        Scheduler::enqueue(proc2);
         // hart.pop_off();
 
         let timebase_freq = fdt
@@ -360,9 +453,8 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    loop {
-        asm::nop();
-    }
+    // SAFETY: The scheduler is only started once on the main hart.
+    unsafe { Scheduler::start() }
 }
 
 #[panic_handler]
@@ -370,6 +462,9 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
     // Forcibly unlock the UART device, so we don't accidentally
     // deadlock here. SAFETY: This panic handler will never return to
     // the code that locked the UART device.
+    //
+    // FIXME: Deadlock in the panic handler somehow causes traps. Not
+    // sure why.
     unsafe { UART.force_unlock() };
 
     if paging::enabled() {

@@ -3,7 +3,7 @@ use alloc::{
     sync::Arc,
 };
 
-use crate::{asm, hart_local::LOCAL_HART, once_cell::OnceCell, spin::SpinMutex};
+use crate::{asm, hart_local::LOCAL_HART, once_cell::OnceCell, println, spin::SpinMutex};
 
 use super::{Context, Proc, ProcState};
 
@@ -20,8 +20,8 @@ pub struct Scheduler {
 
 // TODO: maybe make this a LocalScheduler and be able to get it via
 // the current hart's ctx?
-#[derive(Debug)]
-struct SchedulerInner {
+#[derive(Debug, Default)]
+pub struct SchedulerInner {
     procs: VecDeque<usize>,
     run_queue: BTreeMap<usize, Arc<Proc>>,
 }
@@ -55,11 +55,32 @@ impl Scheduler {
                 .get(&asm::hartid())
                 .unwrap()
                 .lock();
+            // crate::println!("{:#?}", scheduler);
             loop {
-                let pid = *scheduler.procs.front().unwrap();
-                scheduler.procs.rotate_left(1);
-                let proc = Arc::clone(scheduler.run_queue.get(&pid).unwrap());
+                let (pid, proc) = match scheduler.procs.front() {
+                    Some(&pid) => {
+                        scheduler.procs.rotate_left(1);
+                        (pid, Arc::clone(scheduler.run_queue.get(&pid).unwrap()))
+                    }
+                    None => {
+                        continue 'outer;
+                        // let mut wait_queue = SCHED.wait_queue.lock();
+                        // if !wait_queue.is_empty() {
+                        //     let v = (asm::read_time() as usize * 717) % wait_queue.len();
+                        //     if let Some(entry) = wait_queue.values().cloned().nth(v) {
+                        //         let (pid, proc) = wait_queue.remove_entry(&entry.pid).unwrap();
+                        //         (pid, proc)
+                        //     } else {
+                        //         continue 'outer;
+                        //     }
+                        // } else {
+                        //     continue 'outer;
+                        // }
+                    }
+                };
+
                 let mut proc_lock = proc.spin_protected.lock();
+
                 if proc_lock.state == ProcState::Runnable {
                     drop(scheduler);
                     proc_lock.state = ProcState::Running;
@@ -84,17 +105,9 @@ impl Scheduler {
         }
     }
 
-    pub fn init() {
+    pub fn init(hart_map: BTreeMap<u64, SpinMutex<SchedulerInner>>) {
         LOCAL_HART.with(|hart| {
-            SCHED.per_hart.get_or_init(|| {
-                BTreeMap::from([(
-                    hart.hartid.get(),
-                    SpinMutex::new(SchedulerInner {
-                        procs: VecDeque::new(),
-                        run_queue: BTreeMap::new(),
-                    }),
-                )])
-            });
+            SCHED.per_hart.get_or_init(|| hart_map);
         });
     }
 
@@ -115,6 +128,29 @@ impl Scheduler {
             let pid = proc.pid;
             sched.run_queue.insert(pid, Arc::new(proc));
             sched.procs.push_back(pid);
+        });
+    }
+
+    pub fn current_proc_wait() {
+        LOCAL_HART.with(|hart| {
+            let mut sched = SCHED
+                .per_hart
+                .expect("Scheduler::current_proc_wait: scheduler not initialized")
+                .get(&hart.hartid.get())
+                .unwrap()
+                .lock();
+
+            let proc = hart
+                .proc()
+                .expect("Scheduler::current_proc_wait: no process");
+            let pid = proc.proc().pid;
+
+            sched.run_queue.remove(&pid);
+            sched.procs.retain(|p| *p != pid);
+            // crate::println!("{:#?}", sched);
+
+            let mut wait_queue = SCHED.wait_queue.lock();
+            wait_queue.insert(pid, Arc::clone(proc.proc()));
         });
     }
 }

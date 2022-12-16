@@ -18,6 +18,15 @@ use crate::{
     units::StorageUnits,
 };
 
+mod context;
+mod sched;
+pub use context::*;
+pub use sched::*;
+
+use self::mman::UserMemoryManager;
+
+pub mod mman;
+
 #[derive(Debug)]
 pub struct Proc {
     pub pid: usize,
@@ -39,7 +48,7 @@ unsafe impl Sync for Proc {}
 pub struct ProcPrivate {
     pub kernel_stack: VirtualMut<u8, DirectMapped>,
     pub mem_size: usize,
-    pub pgtbl: PageTable,
+    pub mman: UserMemoryManager,
     pub trapframe: *mut MaybeUninit<Trapframe>,
     pub name: String,
 }
@@ -56,15 +65,18 @@ impl Proc {
             let trapframe = pma.allocate(phys::what_order(4.kib())).unwrap();
             (kernel_stack, trapframe)
         };
-        let mut pgtbl = PageTable::new();
+        let mut mman = UserMemoryManager::new();
+
         let trampoline_virt =
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
-        pgtbl.map(
+
+        mman.map_direct(
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
             PageTableFlags::VAD | PageTableFlags::RX,
         );
-        pgtbl.map(
+
+        mman.map_direct(
             trapframe.into_const().into_identity(),
             VirtualConst::from_usize(usize::MAX - 3 * 4.kib() + 1),
             PageTableFlags::VAD | PageTableFlags::RW,
@@ -88,7 +100,7 @@ impl Proc {
             private: RefCell::new(ProcPrivate {
                 kernel_stack: kernel_stack_virt,
                 mem_size: 0,
-                pgtbl,
+                mman,
                 trapframe: trapframe.into_virt().cast().into_ptr_mut(),
                 name,
             }),
@@ -153,6 +165,7 @@ impl<'h> ProcToken<'h> {
         let intena = self.hart.intena.get();
         let proc = &self.proc;
 
+        proc.set_state(ProcState::Runnable);
         // SAFETY: The scheduler context is always valid, as
         // guaranteed by the scheduler.
         unsafe { Context::switch(&self.hart.context, &proc.context) }
@@ -180,8 +193,3 @@ pub enum ProcState {
     Runnable,
     Running,
 }
-
-mod context;
-mod sched;
-pub use context::*;
-pub use sched::*;

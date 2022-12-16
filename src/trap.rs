@@ -10,7 +10,7 @@ use crate::{
     paging::{PageTableFlags, Satp},
     plic::PLIC,
     println,
-    proc::ProcState,
+    proc::{ProcState, Scheduler},
     trampoline::{self, trampoline},
     uart,
     units::StorageUnits,
@@ -94,6 +94,10 @@ fn device_interrupt(scause: u64) -> InterruptKind {
 
         if irq == IRQS.expect("IRQS").uart {
             uart::handle_interrupt();
+        } else if irq == 0x0 {
+            // FIXME: I have no idea what the hell this means and why
+            // it's being triggered here, but... sure it's fine
+            return InterruptKind::External;
         } else {
             panic!("device_interrupt: unexpected IRQ {}", irq);
         }
@@ -302,19 +306,33 @@ unsafe extern "C" fn user_trap() -> ! {
                     // uninitialized.
                     unsafe {
                         private
-                            .pgtbl
+                            .mman
+                            .get_table()
                             .copy_from_user(&mut slice, VirtualConst::from_usize(str_ptr))
                             .unwrap();
                     }
                     // SAFETY: The above call fully initialize the slice.
                     let slice = unsafe { slice.assume_init() };
                     let s = core::str::from_utf8(&slice).unwrap();
-                    println!("from user: {:?}", s);
+                    println!(
+                        "[{}] [info] from user proc {}: {:?}",
+                        hart.hartid.get(),
+                        proc.pid,
+                        s
+                    );
+                }
+                1 => {
+                    Scheduler::current_proc_wait();
+                    println!("Moving current process ({}) to the wait queue", proc.pid);
+                    token.yield_to_scheduler();
                 }
                 _ => todo!("invalid syscall number"),
             }
 
-            println!("user trap! a0={} epc={}", trapframe.a0, trapframe.user_epc);
+            // println!(
+            //     "user trap! a0={} epc={:#x}",
+            //     trapframe.a0, trapframe.user_epc
+            // );
         } else {
             let kind = device_interrupt(scause);
             assert!(
@@ -371,7 +389,7 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
         asm::write_sepc(trapframe.user_epc);
         let satp = Satp {
             asid: 1,
-            ppn: private.pgtbl.as_physical().ppn(),
+            ppn: private.mman.get_table().as_physical_const().ppn(),
         };
         satp.encode().as_usize()
     });
