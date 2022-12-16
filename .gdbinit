@@ -1,5 +1,6 @@
 # disable this if you'd like
 source ~/.gdbinit-gef.py
+pi set_arch("riscv")
 target remote :1234
 
 define hook-stop
