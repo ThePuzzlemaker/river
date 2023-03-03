@@ -1,8 +1,2 @@
-[build]
-target = "riscv64gc-unknown-none-elf"
-rustflags = ["-Ccode-model=medium", "-Cpanic=abort"]
-
-# not sure if this ever worked.
-# [unstable]
-# build-std = ["core", "alloc", "compiler_builtins"]
-# build-std-features = ["compiler-builtins-mem"]
+[alias]
+xtask = "run --manifest-path ./xtask/Cargo.toml --"

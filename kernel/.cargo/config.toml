@@ -1,0 +1,15 @@
+[build]
+target = "riscv64gc-unknown-none-elf"
+rustflags = ["-Ccode-model=medium", "-Cpanic=abort"]
+
+# not sure if this ever worked.
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[profile.dev]
+# opt-level=1 is necessary because LLVM is weird
+opt-level = 1
+# debug=2 is beefy, but **incredibly** helpful for debugging, esp. before paging
+# as it gives your debugger type layout info
+debug = 2

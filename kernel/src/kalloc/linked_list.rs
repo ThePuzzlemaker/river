@@ -114,34 +114,23 @@ pub struct FreeNode {
 }
 
 fn calculate_needed_size(node_base: *mut u8, layout: Layout) -> (usize, usize) {
-    // TODO: is this correct?
-    // println_hacky!(
-    //     "calc: layout.size={:?} layout.align={:?}",
-    //     layout.size(),
-    //     layout.align()
-    // );
     let mut n_bytes_padding = node_base.align_offset(layout.align());
-    // println_hacky!("calc: n_bytes_padding={:?}", n_bytes_padding);
     // make sure this node is at least big enough to hold a freed node
     let min_layout_size = cmp::max(layout.size(), MIN_NODE_SIZE);
-    // println_hacky!("calc: min_layout_size={:?}", min_layout_size);
     // calculate the amount of padding added from the above calculation, so that
     // we don't need to add this padding twice for the bytes of padding
     let extra_padding = min_layout_size - layout.size();
-    // println_hacky!("calc: extra_padding={:?}", extra_padding);
     if n_bytes_padding == 0 {
         n_bytes_padding = Layout::new::<usize>()
             .align_to(layout.align())
             .unwrap()
             .align();
     }
-    // println_hacky!("calc: n_bytes_padding={:?}", n_bytes_padding);
     // N.B. We don't need to round up the `Layout`'s size since we make
     // no assumptions about the alignment of blocks following this one
     // (as those allocations will just insert their own padding as
     // necessary, anyway!)
     let needed_size = layout.size() + cmp::max(n_bytes_padding, extra_padding);
-    // println_hacky!("calc: needed_size={:?}", needed_size);
     (needed_size, n_bytes_padding)
 }
 
@@ -168,37 +157,22 @@ impl LinkedListAllocInner {
         let mut current_node = self.free_list;
 
         loop {
-            // println_hacky!("find_first_fit loop: next={:#p}", current_node);
-
             if current_node.is_null() {
                 // Our first-fit block wasn't found, i.e. there wasn't a block
                 // large enough. This means we need to make a new block, which
                 // potentially means expanding the memory.
                 let new_node = self.unmanaged_ptr;
-                // println_hacky!("find_first_fit: new_node/unmanaged_ptr={:#p}", new_node);
 
-                let node_base = unsafe {
-                    new_node
-                        //.add(new_node.align_offset(mem::align_of::<usize>()))
-                        .add(mem::size_of::<usize>())
-                };
-                // println_hacky!("find_first_fit: new_node node_base={:#p}", node_base);
+                let node_base = unsafe { new_node.add(mem::size_of::<usize>()) };
                 let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
-                // println_hacky!(
-                //     "find_first_fit: needed_size={:#x} n_bytes_padding={}",
-                //     needed_size,
-                //     n_bytes_padding
-                // );
                 let available_space =
                     (self.base.into_usize() + self.mapped_size).saturating_sub(node_base as usize);
-                // println_hacky!("available_space={:#x}", available_space);
                 let grow_heap = available_space < needed_size;
                 let new_unmanaged_ptr = unsafe { node_base.add(needed_size) };
                 // Make sure the new unmanaged pointer is well-aligned for the next node.
                 let new_unmanaged_ptr = unsafe {
                     new_unmanaged_ptr.add(new_unmanaged_ptr.align_offset(mem::align_of::<usize>()))
                 };
-                // println_hacky!("find_first_fit: new_unmanaged_ptr={:#p}", new_unmanaged_ptr);
                 return FoundNode::New {
                     ptr: new_node.cast(),
                     needed_size,
@@ -220,12 +194,6 @@ impl LinkedListAllocInner {
             let node_size = size_tag & !(1 << 63);
             let node_base = unsafe { current_node.cast::<u8>().add(mem::size_of::<usize>()) };
             let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
-            // println_hacky!(
-            //     "free node loop: node_size={:?} needed_size={:?} n_bytes_padding={:?}",
-            //     node_size,
-            //     needed_size,
-            //     n_bytes_padding
-            // );
             // This node is not for us. Move on!
             if node_size < needed_size {
                 current_node = unsafe { &*current_node }.next;
@@ -266,7 +234,6 @@ unsafe impl GlobalAlloc for LinkedListAlloc {
 unsafe impl Allocator for LinkedListAlloc {
     #[track_caller]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        // println_hacky!("linked list alloc: allocate: layout={:?}", layout);
         let mut alloc = self.inner.lock();
         debug_assert!(
             alloc.init,
@@ -290,12 +257,6 @@ unsafe impl Allocator for LinkedListAlloc {
                     };
                     {
                         let mut pgtbl = root_page_table().lock();
-                        // println_hacky!("mapped_size={:#x}", alloc.mapped_size);
-                        // println_hacky!(
-                        //     "adding to page table: {:#x},{:#x}",
-                        //     page.into_usize(),
-                        //     alloc.base.into_usize() + alloc.mapped_size
-                        // );
                         // TODO: this would probably be a lot better with huge pages
                         for i in 0..(1 << order) {
                             pgtbl.map(
@@ -307,12 +268,12 @@ unsafe impl Allocator for LinkedListAlloc {
                             );
                         }
                         alloc.mapped_size += 4.kib() * (1 << order);
-                        // println_hacky!("mapped_size={:#x}", alloc.mapped_size);
                     }
                 }
 
                 unsafe { ptr.cast::<usize>().write(needed_size) };
 
+                debug_assert_ne!(n_bytes_padding, 0);
                 unsafe {
                     ptr.cast::<u8>()
                         .add(n_bytes_padding)
@@ -322,45 +283,88 @@ unsafe impl Allocator for LinkedListAlloc {
                 alloc.unmanaged_ptr = new_unmanaged_ptr;
                 unsafe {
                     ptr.cast::<u8>()
-                        .add(mem::size_of::<usize>())
                         .add(n_bytes_padding)
+                        .add(mem::size_of::<usize>())
                 }
             }
             FoundNode::Old {
                 ptr,
                 needed_size,
                 n_bytes_padding,
-                ..
+                node_size,
             } => {
-                // println_hacky!(
-                //     "old node: ptr={:#p} needed_size={:?} n_bytes_padding={:?}",
-                //     ptr,
-                //     needed_size,
-                //     n_bytes_padding
-                // );
-                let mut node = unsafe { &mut *ptr };
-                node.size_tag = needed_size;
-                // N.B. null prev == node is at head of free-list
-                if node.prev.is_null() {
-                    alloc.free_list = node.next;
+                if node_size - needed_size >= MIN_NODE_SIZE {
+                    let next = unsafe {
+                        ptr.cast::<u8>()
+                            .add(needed_size)
+                            .add(mem::size_of::<usize>())
+                    };
+                    let end_pad = next.align_offset(mem::align_of::<FreeNode>());
+                    let next = unsafe { next.add(end_pad).cast::<FreeNode>() };
+
+                    let needed_size = needed_size + end_pad;
+                    let next_size = node_size - needed_size;
+
+                    let mut node = unsafe { &mut *ptr };
+
+                    node.size_tag = needed_size;
+
+                    unsafe {
+                        addr_of_mut!((*next).size_tag).write(next_size | (1 << 63));
+                        addr_of_mut!((*next).prev).write(node.prev);
+                        addr_of_mut!((*next).next).write(node.next);
+                    }
+
+                    // N.B. null prev == node is at head of free-list
+                    if node.prev.is_null() {
+                        alloc.free_list = next;
+                    } else {
+                        unsafe { (*node.prev).next = next };
+                    }
+
+                    if !node.next.is_null() {
+                        unsafe { (*node.next).prev = next };
+                    }
+
+                    debug_assert_ne!(n_bytes_padding, 0);
+                    unsafe {
+                        ptr.cast::<u8>()
+                            .add(n_bytes_padding)
+                            .cast::<usize>()
+                            .write(n_bytes_padding)
+                    }
+
+                    unsafe {
+                        ptr.cast::<u8>()
+                            .add(n_bytes_padding)
+                            .add(mem::size_of::<usize>())
+                    }
                 } else {
-                    unsafe { (*node.prev).next = node.next };
-                }
-                // Don't need to do anything here if this is at the tail of the
-                // free-list.
-                if !node.next.is_null() {
-                    unsafe { (*node.next).prev = node.prev };
-                }
-                unsafe {
-                    ptr.cast::<u8>()
-                        .add(n_bytes_padding)
-                        .cast::<usize>()
-                        .write(n_bytes_padding)
-                };
-                unsafe {
-                    ptr.cast::<u8>()
-                        .add(mem::size_of::<usize>())
-                        .add(n_bytes_padding)
+                    let mut node = unsafe { &mut *ptr };
+                    node.size_tag = node_size;
+                    // N.B. null prev == node is at head of free-list
+                    if node.prev.is_null() {
+                        alloc.free_list = node.next;
+                    } else {
+                        unsafe { (*node.prev).next = node.next };
+                    }
+                    // Don't need to do anything here if this is at the tail of the
+                    // free-list.
+                    if !node.next.is_null() {
+                        unsafe { (*node.next).prev = node.prev };
+                    }
+                    debug_assert_ne!(n_bytes_padding, 0);
+                    unsafe {
+                        ptr.cast::<u8>()
+                            .add(n_bytes_padding)
+                            .cast::<usize>()
+                            .write(n_bytes_padding)
+                    };
+                    unsafe {
+                        ptr.cast::<u8>()
+                            .add(n_bytes_padding)
+                            .add(mem::size_of::<usize>())
+                    }
                 }
             }
         };
@@ -393,7 +397,6 @@ unsafe impl Allocator for LinkedListAlloc {
                 .sub(mem::size_of::<usize>())
                 .cast::<FreeNode>()
         };
-        // println_hacky!("kalloc dealloc: ptr={:#p} node_ptr={:#p}", ptr, node_ptr);
 
         let node_size = unsafe { node_ptr.cast::<usize>().read() };
         debug_assert_eq!(

@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+color-eyre = "0.6.2"
+clap = { version = "4.1.8", features = ["derive"] }
+xshell = "0.2.3"
+tokio = { version = "1.26.0", features = ["rt-multi-thread", "sync", "process", "macros", "parking_lot"] }

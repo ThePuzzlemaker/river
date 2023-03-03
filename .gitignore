@@ -2,3 +2,5 @@
 *.dtb
 /target
 *~
+.*#
+.dir-locals.el

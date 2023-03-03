@@ -31,6 +31,7 @@ extern crate alloc;
 pub mod addr;
 pub mod asm;
 pub mod boot;
+pub mod capability;
 pub mod elf;
 pub mod hart_local;
 pub mod io_traits;
@@ -53,7 +54,7 @@ extern "C" {
 }
 
 use core::{
-    alloc::Layout,
+    alloc::{GlobalAlloc, Layout},
     arch::{asm, global_asm},
     cmp,
     panic::PanicInfo,
