@@ -1,4 +1,4 @@
-use core::{marker::PhantomData, mem::MaybeUninit};
+use core::marker::PhantomData;
 
 use crate::{
     addr::{DirectMapped, VirtualMut},
@@ -117,7 +117,7 @@ impl Captbl {
     pub unsafe fn walk_mut(&mut self, captr: Captr, depth_limit: u8) -> &mut Capability {
         let captr = captr.0;
         let mut captbl: &mut Self = self;
-        let mut radix = captbl.radix;
+        let radix = captbl.radix;
         let mut bits_left = depth_limit;
         loop {
             let current_idx = captr >> (64 - radix);

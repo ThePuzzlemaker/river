@@ -33,7 +33,7 @@ use crate::{
 
 #[no_mangle]
 #[link_section = ".init.early_trapvec"]
-fn early_trap_handler() -> ! {
+extern "C" fn early_trap_handler() -> ! {
     loop {
         asm::nop();
     }
@@ -61,7 +61,7 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     {
         let mut uart = UART.lock();
         // SAFETY: Our caller guarantees that this address is valid.
-        unsafe { uart.init(uart_reg.starting_address as *mut u8) };
+        unsafe { uart.init(uart_reg.starting_address.cast_mut()) };
         uart.print_str_sync("[");
         uart.early_print_u64(hartid());
         uart.print_str_sync("] ");

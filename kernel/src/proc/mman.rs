@@ -3,7 +3,7 @@ use core::ops::Range;
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use crate::{
-    addr::{Identity, PhysicalConst, PhysicalMut, VirtualConst, VirtualMut},
+    addr::{Identity, PhysicalConst, VirtualConst},
     kalloc::{self, phys::PMAlloc},
     paging::{PageTable, PageTableFlags},
     units::StorageUnits,
@@ -55,12 +55,18 @@ pub enum RegionPurpose {
     Unknown,
 }
 
-impl UserMemoryManager {
-    pub fn new() -> Self {
+impl Default for UserMemoryManager {
+    fn default() -> Self {
         Self {
             table: PageTable::new(),
             map: BTreeMap::new(),
         }
+    }
+}
+
+impl UserMemoryManager {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// TODO

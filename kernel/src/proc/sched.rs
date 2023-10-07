@@ -3,7 +3,7 @@ use alloc::{
     sync::Arc,
 };
 
-use crate::{asm, hart_local::LOCAL_HART, once_cell::OnceCell, println, spin::SpinMutex};
+use crate::{asm, hart_local::LOCAL_HART, once_cell::OnceCell, spin::SpinMutex};
 
 use super::{Context, Proc, ProcState};
 
@@ -57,7 +57,7 @@ impl Scheduler {
                 .lock();
             // crate::println!("{:#?}", scheduler);
             loop {
-                let (pid, proc) = match scheduler.procs.front() {
+                let (_pid, proc) = match scheduler.procs.front() {
                     Some(&pid) => {
                         scheduler.procs.rotate_left(1);
                         (pid, Arc::clone(scheduler.run_queue.get(&pid).unwrap()))
@@ -106,14 +106,14 @@ impl Scheduler {
     }
 
     pub fn init(hart_map: BTreeMap<u64, SpinMutex<SchedulerInner>>) {
-        LOCAL_HART.with(|hart| {
+        LOCAL_HART.with(|_hart| {
             SCHED.per_hart.get_or_init(|| hart_map);
         });
     }
 
     /// Enqueue a process on to the scheduler.
     ///
-    /// # Panic
+    /// # Panics
     ///
     /// This function will panic if the scheduler is not initialized.
     pub fn enqueue(proc: Proc) {
@@ -131,6 +131,12 @@ impl Scheduler {
         });
     }
 
+    /// Move the current process to the wait queue.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the scheduler is not initialized,
+    /// or if there is no process currently running.
     pub fn current_proc_wait() {
         LOCAL_HART.with(|hart| {
             let mut sched = SCHED

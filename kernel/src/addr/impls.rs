@@ -5,10 +5,7 @@ use super::{Mapping, Mutability, Physical, Virtual};
 impl<T, Map: Mapping, Mut: Mutability<T>> Copy for Physical<T, Map, Mut> {}
 impl<T, Map: Mapping, Mut: Mutability<T>> Clone for Physical<T, Map, Mut> {
     fn clone(&self) -> Self {
-        Self {
-            addr: self.addr,
-            phantom: self.phantom,
-        }
+        *self
     }
 }
 impl<T, Map: Mapping, Mut: Mutability<T>> PartialEq for Physical<T, Map, Mut> {
@@ -28,7 +25,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> fmt::Debug for Physical<T, Map, Mut> {
 }
 impl<T, Map: Mapping, Mut: Mutability<T>> PartialOrd for Physical<T, Map, Mut> {
     fn partial_cmp(&self, other: &Physical<T, Map, Mut>) -> Option<core::cmp::Ordering> {
-        self.addr.partial_cmp(&other.addr)
+        Some(self.addr.cmp(&other.addr))
     }
 }
 impl<T, Map: Mapping, Mut: Mutability<T>> Ord for Physical<T, Map, Mut> {
@@ -45,10 +42,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> hash::Hash for Physical<T, Map, Mut> {
 impl<T, Map: Mapping, Mut: Mutability<T>> Copy for Virtual<T, Map, Mut> {}
 impl<T, Map: Mapping, Mut: Mutability<T>> Clone for Virtual<T, Map, Mut> {
     fn clone(&self) -> Self {
-        Self {
-            addr: self.addr,
-            phantom: self.phantom,
-        }
+        *self
     }
 }
 impl<T, Map: Mapping, Mut: Mutability<T>> PartialEq for Virtual<T, Map, Mut> {
@@ -68,7 +62,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> fmt::Debug for Virtual<T, Map, Mut> {
 }
 impl<T, Map: Mapping, Mut: Mutability<T>> PartialOrd for Virtual<T, Map, Mut> {
     fn partial_cmp(&self, other: &Virtual<T, Map, Mut>) -> Option<core::cmp::Ordering> {
-        self.addr.partial_cmp(&other.addr)
+        Some(self.addr.cmp(&other.addr))
     }
 }
 impl<T, Map: Mapping, Mut: Mutability<T>> Ord for Virtual<T, Map, Mut> {

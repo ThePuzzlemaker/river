@@ -3,11 +3,11 @@ use core::{arch::global_asm, mem};
 use alloc::boxed::Box;
 
 use crate::{
-    addr::{DirectMapped, PhysicalConst, VirtualConst},
+    addr::VirtualConst,
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
     hart_local::LOCAL_HART,
     once_cell::OnceCell,
-    paging::{PageTableFlags, Satp},
+    paging::Satp,
     plic::PLIC,
     println,
     proc::{ProcState, Scheduler},
@@ -42,8 +42,7 @@ unsafe extern "C" fn kernel_trap() {
     debug_assert_ne!(
         sstatus & SSTATUS_SPP,
         0,
-        "kernel_trap: did not trap from S-mode, sstatus={}",
-        sstatus
+        "kernel_trap: did not trap from S-mode, sstatus={sstatus}",
     );
 
     // Not an interrupt.
@@ -271,7 +270,7 @@ unsafe extern "C" fn user_trap() -> ! {
 
         // SAFETY: Being in this process's context means that the
         // trapframe must be initialized and valid.
-        let mut trapframe = unsafe { (*private.trapframe).assume_init_mut() };
+        let trapframe = unsafe { (*private.trapframe).assume_init_mut() };
         trapframe.user_epc = asm::read_sepc();
 
         let scause = asm::read_scause();
@@ -380,7 +379,7 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
 
         // SAFETY: Our caller guarantees that we are within a valid
         // process's context.
-        let mut trapframe = unsafe { (*private.trapframe).assume_init_mut() };
+        let trapframe = unsafe { (*private.trapframe).assume_init_mut() };
         trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
         trapframe.kernel_sp = (private.kernel_stack.into_usize() as u64) + 4u64.mib();
         trapframe.kernel_trap = user_trap as u64;

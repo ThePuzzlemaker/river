@@ -271,14 +271,16 @@ unsafe impl Allocator for LinkedListAlloc {
                     }
                 }
 
-                unsafe { ptr.cast::<usize>().write(needed_size) };
+                unsafe {
+                    ptr.cast::<usize>().write(needed_size);
+                };
 
                 debug_assert_ne!(n_bytes_padding, 0);
                 unsafe {
                     ptr.cast::<u8>()
                         .add(n_bytes_padding)
                         .cast::<usize>()
-                        .write(n_bytes_padding)
+                        .write(n_bytes_padding);
                 };
                 alloc.unmanaged_ptr = new_unmanaged_ptr;
                 unsafe {
@@ -305,7 +307,7 @@ unsafe impl Allocator for LinkedListAlloc {
                     let needed_size = needed_size + end_pad;
                     let next_size = node_size - needed_size;
 
-                    let mut node = unsafe { &mut *ptr };
+                    let node = unsafe { &mut *ptr };
 
                     node.size_tag = needed_size;
 
@@ -331,7 +333,7 @@ unsafe impl Allocator for LinkedListAlloc {
                         ptr.cast::<u8>()
                             .add(n_bytes_padding)
                             .cast::<usize>()
-                            .write(n_bytes_padding)
+                            .write(n_bytes_padding);
                     }
 
                     unsafe {
@@ -340,7 +342,7 @@ unsafe impl Allocator for LinkedListAlloc {
                             .add(mem::size_of::<usize>())
                     }
                 } else {
-                    let mut node = unsafe { &mut *ptr };
+                    let node = unsafe { &mut *ptr };
                     node.size_tag = node_size;
                     // N.B. null prev == node is at head of free-list
                     if node.prev.is_null() {
@@ -358,7 +360,7 @@ unsafe impl Allocator for LinkedListAlloc {
                         ptr.cast::<u8>()
                             .add(n_bytes_padding)
                             .cast::<usize>()
-                            .write(n_bytes_padding)
+                            .write(n_bytes_padding);
                     };
                     unsafe {
                         ptr.cast::<u8>()
@@ -402,8 +404,7 @@ unsafe impl Allocator for LinkedListAlloc {
         debug_assert_eq!(
             node_size & (1 << 63),
             0,
-            "kalloc::linked_list: double free at {:#p}",
-            ptr
+            "kalloc::linked_list: double free at {ptr:#p}",
         );
         debug_assert!(
             layout.size() <= node_size,

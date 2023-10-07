@@ -1,7 +1,7 @@
 use core::{
     alloc::{AllocError, Allocator, Layout},
     cmp,
-    intrinsics::{self, likely},
+    intrinsics::likely,
     mem::MaybeUninit,
     ptr::{self, NonNull},
     slice,

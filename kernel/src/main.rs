@@ -7,7 +7,6 @@
     maybe_uninit_slice,
     int_roundings,
     ptr_as_uninit,
-    once_cell,
     core_intrinsics,
     slice_ptr_get
 )]
@@ -54,14 +53,14 @@ extern "C" {
 }
 
 use core::{
-    alloc::{GlobalAlloc, Layout},
+    alloc::Layout,
     arch::{asm, global_asm},
     cmp,
     panic::PanicInfo,
 };
 
 use addr::{Physical, Virtual};
-use alloc::{boxed::Box, collections::BTreeMap, slice, string::String, vec};
+use alloc::{boxed::Box, collections::BTreeMap, slice, string::String};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
@@ -184,7 +183,12 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         .find_compatible(&["riscv,plic0"])
         .expect("Could not find a compatible PLIC");
     let plic_base_phys = PhysicalMut::<u8, DirectMapped>::from_ptr(
-        plic.reg().unwrap().next().unwrap().starting_address as *mut _,
+        plic.reg()
+            .unwrap()
+            .next()
+            .unwrap()
+            .starting_address
+            .cast_mut(),
     );
     let plic_base = plic_base_phys.into_virt();
     // SAFETY: Our caller guarantees that the PLIC's address in the FDT is valid.
@@ -217,8 +221,9 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         // TODO: what does xv6 even use this for
         private.mem_size = usize::MAX;
 
+        // SAFETY: We have exclusive access to this process
         let trapframe = unsafe { &mut *private.trapframe };
-        let mut trapframe = trapframe.write(Trapframe::default());
+        let trapframe = trapframe.write(Trapframe::default());
 
         trapframe.user_epc = elf.entry_addr as u64;
 
@@ -332,7 +337,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         let private = proc2.private_mut();
         private.mem_size = 4.kib();
         let trapframe = unsafe { &mut *private.trapframe };
-        let mut trapframe = trapframe.write(Trapframe::default());
+        let trapframe = trapframe.write(Trapframe::default());
         trapframe.user_epc = 0x00;
         trapframe.sp = 4.kib();
         private.mman.map_direct(

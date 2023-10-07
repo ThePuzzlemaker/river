@@ -231,9 +231,7 @@ impl PMAllocInner {
     pub unsafe fn deallocate(&mut self, chunk: PhysicalMut<u8, DirectMapped>, order: u32) {
         assert!(
             order <= TOTAL_MAX_ORDER,
-            "PMAlloc::deallocate: order was too large: chunk={:?}, order={:?}",
-            chunk,
-            order
+            "PMAlloc::deallocate: order was too large: chunk={chunk:?}, order={order:?}",
         );
 
         let alloc_off = (chunk.into_usize() - self.base.into_usize()) / (4096 * (1 << order));
@@ -245,9 +243,7 @@ impl PMAllocInner {
         // Deallocate this node
         assert!(
             self.bitree.set(ix, false),
-            "PMAlloc::deallocate: double free: chunk={:?}, order={:?}",
-            chunk,
-            order
+            "PMAlloc::deallocate: double free: chunk={chunk:?}, order={order:?}",
         );
 
         let mut loop_sibling = self.bitree.sibling(ix);

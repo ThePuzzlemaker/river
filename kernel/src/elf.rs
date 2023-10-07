@@ -5,10 +5,7 @@ use alloc::vec::Vec;
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{
-    io_traits::{Read, Seek, SeekFrom},
-    println,
-};
+use crate::io_traits::{Read, Seek, SeekFrom};
 
 use self::raw::FileIdent;
 

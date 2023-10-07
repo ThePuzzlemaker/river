@@ -10,7 +10,7 @@ use crate::{
     addr::{DirectMapped, Kernel, VirtualConst, VirtualMut},
     hart_local::HartCtx,
     kalloc::phys::{self, PMAlloc},
-    paging::{PageTable, PageTableFlags},
+    paging::PageTableFlags,
     spin::SpinMutex,
     symbol,
     trampoline::Trapframe,
