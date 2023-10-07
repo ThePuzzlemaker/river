@@ -305,6 +305,7 @@ impl fmt::Debug for Bitree {
         f.debug_struct("Bitree")
             .field("base", &self.base)
             .field("n_bits", &self.n_bits)
+            .field("max_order", &self.max_order)
             .field(
                 "data",
                 &BitreeDataWrapper {

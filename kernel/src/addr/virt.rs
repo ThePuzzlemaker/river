@@ -165,6 +165,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
     /// `Virtual::from_components(addr.vpns(), None)`, but more
     /// convenient.
     #[inline]
+    #[must_use]
     pub fn page_align(self) -> Virtual<T, Map, Mut> {
         // SAFETY: Page-aligning an address will not
         unsafe { Self::from_usize_unchecked(self.into_usize() & !PGOFF_MASK) }

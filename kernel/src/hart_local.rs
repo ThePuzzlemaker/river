@@ -41,7 +41,8 @@ macro_rules! hart_local {
 ///
 /// # Safety
 ///
-/// DO NOT USE THIS TYPE. This is only used for macro purposes.
+/// DO NOT USE THIS TYPE. THIS IS NOT SAFE!!! This is only used for
+/// macro purposes.
 #[doc(hidden)]
 #[repr(transparent)]
 pub struct UnsafeSendSync<T: 'static>(pub T);
@@ -60,7 +61,7 @@ pub struct HartLocal<T: 'static> {
 }
 
 // SAFETY: Data inside a HartLocal<T> is never sent or shared across
-// threads.
+// threads, and is initialized for all threads.
 unsafe impl<T: 'static> Send for HartLocal<T> {}
 // SAFETY: See above.
 unsafe impl<T: 'static> Sync for HartLocal<T> {}
@@ -88,7 +89,7 @@ impl<T: 'static> HartLocal<T> {
         // N.B. We **never** give out pointers to our internal data, so we
         // instead avoid a race condition by turning off interrupts temporarily.
         // (Note that we don't want infinite recursion, so we must turn off/on
-        // interrupts manually).
+        // interrupts manually, instead of using push_off/pop_off).
         let intena = intr_off();
         // Ensure the offset is valid.
         if !self.offset_init.get() {
@@ -99,10 +100,18 @@ impl<T: 'static> HartLocal<T> {
             } else {
                 let fnptr = fnptr as usize;
                 let fnptr: VirtualConst<u8, Kernel> = VirtualConst::from_usize(fnptr);
+                // SAFETY: Presuming our virtual->physical conversions
+                // are valid, this pointer should actually point to
+                // what we think it does. (And we've already made sure
+                // paging wasn't enabled, and multi-hart action does
+                // not occur until *after* paging has been enabled, so
+                // no race condition there)
                 unsafe {
                     mem::transmute::<usize, unsafe fn() -> usize>(fnptr.into_phys().into_usize())
                 }
             };
+            // SAFETY: By our invariants, presuming we got the pointer
+            // properly, this should be safe.
             let base = unsafe { fnptr() };
             self.offset.set(base - symbol::tdata_start().into_usize());
             self.offset_init.set(true);
@@ -126,6 +135,7 @@ impl<T: 'static> HartLocal<T> {
             } else {
                 let init_func = init_func as usize;
                 let init_func: VirtualConst<u8, Kernel> = VirtualConst::from_usize(init_func);
+                // SAFETY: See comment above the previous mem::transmute for fnptr.
                 unsafe { mem::transmute::<usize, fn() -> T>(init_func.into_phys().into_usize()) }
             };
             val.write(init_func());
@@ -145,6 +155,11 @@ impl<T: 'static> HartLocal<T> {
 /// # Safety
 ///
 /// This must be initialized only once per hart.
+///
+/// # Panics
+///
+/// This function will panic if it fails to allocate the required
+/// memory.
 #[track_caller]
 pub unsafe fn init() {
     let size = tdata_end().into_usize() - tdata_start().into_usize();

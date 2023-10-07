@@ -109,15 +109,20 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let size = size - (size % 4096);
     let size = size.next_power_of_two() >> 1;
 
-    // Initialize the allocator starting at the end of the kernel,
-    // and ending at the end of physical memory.
-    // SAFETY: pma_start is known to be non-zero and aligned
-    // (our kernel cannot be loaded at 0x0).
-    // N.B.: This is a bit wasteful. But PMAlloc makes some assumptions about
-    // how the memory is laid out and assumes it can clobber a bunch of pages
-    // at the start for its bitree.
+    // Initialize the allocator starting at the end of the kernel, and
+    // ending at the end of physical memory.
+    //
+    // SAFETY: pma_start is known to be non-zero and aligned (our
+    // kernel cannot be loaded at 0x0).
+    //
+    // N.B.: This is a bit wasteful. But PMAlloc makes some
+    // assumptions about how the memory is laid out and assumes it can
+    // clobber a bunch of pages at the start for its bitree.
+    //
     // TODO: make this better in the future?
     unsafe { PMAlloc::init(PhysicalMut::from_ptr(pma_start), size) }
+    // SAFETY: Hart-local data has not been initialized at all as of
+    // yet.
     unsafe { hart_local::init() }
     {
         let mut uart = UART.lock();
@@ -243,6 +248,7 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             .update_serial_base(serial_virt_addr.into_ptr_mut());
     };
 
+    // SAFETY: we're the kernel.
     unsafe {
         asm!(
             "
@@ -369,6 +375,7 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
         uart.print_str_sync("...\n");
     }
 
+    // SAFETY: Hart-local data has not been initialized on this hart as of yet.
     unsafe { hart_local::init() }
     {
         let mut uart = UART.lock();
@@ -414,6 +421,7 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
     // SAFETY: Our caller guarantees this is safe.
     let raw_satp = unsafe { (*data.into_identity().into_virt().into_ptr()).raw_satp };
 
+    // SAFETY: we're the kernel
     unsafe {
         asm!(
             "

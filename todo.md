@@ -13,3 +13,5 @@
 - [ ] start work on process syscalls
 - [X] start work on elf parsing
 - [X] work on serial driver--cleanup & U-mode integration
+- [ ] solidify capability interface
+- [ ] don't panic! (so much)
