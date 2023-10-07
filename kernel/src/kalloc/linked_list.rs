@@ -41,6 +41,13 @@
 //!   certain (tunable) threshold, the block will be split into two separate
 //!   blocks, with the latter block being inserted into the free list and the
 //!   former block being spliced out and returned.
+//!
+//! As a final note, here are some assorted notes about the internal
+//! workings of this code:
+//! - `wrapping_add` for pointers is used often, and is admittable as the
+//!   placement of our heap in vmem means that it would take a few TiB of
+//!   memory usage for that pointer to overwrap in a "nominal" (i.e. non-
+//!   clobbered) case
 
 use core::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
@@ -106,7 +113,7 @@ struct LinkedListAllocInner {
 }
 
 #[derive(Debug)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct FreeNode {
     size_tag: usize,
     next: *mut FreeNode,
@@ -114,23 +121,50 @@ pub struct FreeNode {
 }
 
 fn calculate_needed_size(node_base: *mut u8, layout: Layout) -> (usize, usize) {
+    // Make sure the minimum alignment is at least 8. This is
+    // *probably* covered by the n_bytes_padding check, but it
+    // *really* can't hurt.
+    //
+    // SAFETY: The previous layout is valid, and the only possible
+    // values for align are the existing value (valid) and 8 (valid).
+    let layout =
+        unsafe { Layout::from_size_align_unchecked(layout.size(), cmp::max(layout.align(), 8)) };
     let mut n_bytes_padding = node_base.align_offset(layout.align());
     // make sure this node is at least big enough to hold a freed node
     let min_layout_size = cmp::max(layout.size(), MIN_NODE_SIZE);
     // calculate the amount of padding added from the above calculation, so that
     // we don't need to add this padding twice for the bytes of padding
-    let extra_padding = min_layout_size - layout.size();
-    if n_bytes_padding == 0 {
+    let min_size_compensation = min_layout_size - layout.size();
+    if n_bytes_padding < mem::size_of::<usize>() {
+        // make sure that we have enough padding space to put the
+        // number of bytes of padding we used at 1*usize before the
+        // data ptr. but while doing this, ensure that we don't
+        // accidentally unalign our desired data (hence the
+        // `align_to`)
+        //
+        // TODO: is not incorporating the min layout size compensation
+        // into this value wasteful, or even valid? probably, but i'll
+        // need to check that another day when i have a bit more brain
+        // power left
         n_bytes_padding = Layout::new::<usize>()
             .align_to(layout.align())
             .unwrap()
             .align();
     }
-    // N.B. We don't need to round up the `Layout`'s size since we make
-    // no assumptions about the alignment of blocks following this one
-    // (as those allocations will just insert their own padding as
-    // necessary, anyway!)
-    let needed_size = layout.size() + cmp::max(n_bytes_padding, extra_padding);
+    // N.B. We don't need to round up the `Layout`'s size since we
+    // make no assumptions about the alignment of blocks following
+    // this one beyond being 8-aligned (as those allocations will just
+    // insert their own padding as necessary, anyway!)
+    //
+    // N.B. we don't add the min_size_compensation to n_bytes_padding
+    // as that can be put at the end of the node; and besides, the
+    // minimum node must still be 8-aligned, which n_bytes_padding
+    // assumes.
+    let needed_size = layout.size() + cmp::max(n_bytes_padding, min_size_compensation);
+    // However, we *do* need to ensure that needed_size is at least
+    // 8-aligned, so that our next size tag isn't unaligned. This
+    // padding is at the end so we don't compensate in n_bytes_padding.
+    let needed_size = needed_size + 8 - (needed_size % 8);
     (needed_size, n_bytes_padding)
 }
 
@@ -144,8 +178,6 @@ enum FoundNode {
     },
     Old {
         ptr: *mut FreeNode,
-        // will be used for node splitting, probably
-        #[allow(unused)]
         node_size: usize,
         needed_size: usize,
         n_bytes_padding: usize,
@@ -163,16 +195,17 @@ impl LinkedListAllocInner {
                 // potentially means expanding the memory.
                 let new_node = self.unmanaged_ptr;
 
-                let node_base = unsafe { new_node.add(mem::size_of::<usize>()) };
+                // points to the beginning of the padding (new_node + sizeof(size_tag))
+                let node_base = new_node.wrapping_add(mem::size_of::<usize>());
                 let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
                 let available_space =
                     (self.base.into_usize() + self.mapped_size).saturating_sub(node_base as usize);
                 let grow_heap = available_space < needed_size;
-                let new_unmanaged_ptr = unsafe { node_base.add(needed_size) };
+                let new_unmanaged_ptr = node_base.wrapping_add(needed_size);
                 // Make sure the new unmanaged pointer is well-aligned for the next node.
-                let new_unmanaged_ptr = unsafe {
-                    new_unmanaged_ptr.add(new_unmanaged_ptr.align_offset(mem::align_of::<usize>()))
-                };
+                // TODO: is this calculation necessary now that I fixed this in needed_size?
+                let new_unmanaged_ptr = new_unmanaged_ptr
+                    .wrapping_add(new_unmanaged_ptr.align_offset(mem::align_of::<usize>()));
                 return FoundNode::New {
                     ptr: new_node.cast(),
                     needed_size,
@@ -184,22 +217,31 @@ impl LinkedListAllocInner {
 
             // The MSB of the size is the "is free" bit, so we need to take that
             // out to make sure our reference size is right.
+            //
+            // SAFETY: We have ensured that the current node is not
+            // null, and if this got clobbered we have bigger problems.
             let size_tag = unsafe { &*current_node }.size_tag;
             debug_assert_ne!(
                 size_tag & (1 << 63),
                 0,
                 "free list node referred to occupied block"
             );
-            // N.B. doesn't include this size tag
+            // N.B. doesn't include this free tag
             let node_size = size_tag & !(1 << 63);
-            let node_base = unsafe { current_node.cast::<u8>().add(mem::size_of::<usize>()) };
+
+            // points to the beginning of the padding (current_node + sizeof(usize))
+            let node_base = current_node
+                .cast::<u8>()
+                .wrapping_add(mem::size_of::<usize>());
             let (needed_size, n_bytes_padding) = calculate_needed_size(node_base, layout);
             // This node is not for us. Move on!
             if node_size < needed_size {
+                // SAFETY: We have ensured that this node is not null.
                 current_node = unsafe { &*current_node }.next;
                 continue;
             }
-            // This node is good for us. Return size and calculated padding.
+            // This node is good for us. Return size and calculated
+            // padding.
             return FoundNode::Old {
                 ptr: current_node,
                 node_size,
@@ -210,11 +252,17 @@ impl LinkedListAllocInner {
     }
 }
 
-// FreeNode::next and FreeNode::prev (the size tag is universal, and not counted
-// in node sizes)
+// FreeNode::next and FreeNode::prev (the size tag is universal, and
+// not counted in node sizes)
 const MIN_NODE_SIZE: usize = 2 * mem::size_of::<usize>();
 
-// unwind safety: our kernel does not unwind. it is simply not implemented.
+// TODO: Implement grow and shrink logic on Allocator and realloc on
+// GlobalAlloc to coalesce/split blocks when possible instead of
+// dealloc/realloc-ing, since we can save some time and possibly space
+// there on the short path, especially when new_size < old_size
+
+// UNWIND SAFETY: our kernel does not unwind. it is simply not
+// implemented.
 unsafe impl GlobalAlloc for LinkedListAlloc {
     #[track_caller]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -231,6 +279,13 @@ unsafe impl GlobalAlloc for LinkedListAlloc {
     }
 }
 
+// SAFETY: From the points on the documentation of [`Allocator`]:
+// 1. Currently allocated memory blocks are valid until
+//    deallocated while the allocator is alive.
+// 2. LinkedListAlloc is !Copy & !Clone, so this point
+//    does not apply.
+// 3. Any pointer to a currently allocated block can be
+//    passed to any other function on the allocator.
 unsafe impl Allocator for LinkedListAlloc {
     #[track_caller]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -239,6 +294,7 @@ unsafe impl Allocator for LinkedListAlloc {
             alloc.init,
             "LinkedListAlloc::allocate: kalloc not initialized"
         );
+        // SAFETY: Our allocator is initialized.
         let node = unsafe { alloc.find_first_fit(layout) };
 
         let ptr = match node {
@@ -253,7 +309,7 @@ unsafe impl Allocator for LinkedListAlloc {
                     let order = phys::what_order(needed_size);
                     let page = {
                         let mut pma = PMAlloc::get();
-                        pma.allocate(order).expect("oom")
+                        pma.allocate(order).ok_or(AllocError)?
                     };
                     {
                         let mut pgtbl = root_page_table().lock();
@@ -271,11 +327,33 @@ unsafe impl Allocator for LinkedListAlloc {
                     }
                 }
 
+                // SAFETY: This pointer, by the invariants of
+                // find_first_fit, is valid and aligned.
                 unsafe {
                     ptr.cast::<usize>().write(needed_size);
                 };
 
                 debug_assert_ne!(n_bytes_padding, 0);
+                // SAFETY: The base pointer is valid. Adding
+                // n_bytes_padding to this pointer is also valid. Thus
+                // the remaining pointer is valid to write to.
+                //
+                // Alignment is more tricky to argue:
+                // - Note that the minimum alignment for any block is
+                // 8 bytes.
+                // - I did a little trickery with this
+                // addition. Perhaps I should make it more clear, but
+                // for now I'll document it: `ptr` points to the
+                // begining of the node, **including** the size
+                // tag. By adding `n_bytes_padding` but not
+                // compensating for another `usize`, we end up
+                // `1*usize` before the data (which must be at least
+                // 8-aligned), as by compensating for the usize, we'd
+                // end up directly at the data pointer.
+                // - Thus, as it is 8 bytes (sizeof(usize)) before the
+                // data pointer (8-aligned at minimum), this pointer
+                // is properly aligned.
+                // [REF 1]
                 unsafe {
                     ptr.cast::<u8>()
                         .add(n_bytes_padding)
@@ -283,6 +361,8 @@ unsafe impl Allocator for LinkedListAlloc {
                         .write(n_bytes_padding);
                 };
                 alloc.unmanaged_ptr = new_unmanaged_ptr;
+                // SAFETY: The base pointer is valid, and we properly
+                // offset the pointer to the data.
                 unsafe {
                     ptr.cast::<u8>()
                         .add(n_bytes_padding)
@@ -295,22 +375,31 @@ unsafe impl Allocator for LinkedListAlloc {
                 n_bytes_padding,
                 node_size,
             } => {
-                if node_size - needed_size >= MIN_NODE_SIZE {
+                // Check if our size excess is more than our threshold.
+                if node_size - needed_size >= BLOCK_SPLIT_THRESHOLD {
+                    // SAFETY: This pointer is valid as needed_size
+                    // accounts for the data size *and* the padding
+                    // size, and is also 8-aligned. Also, we account
+                    // for the size tag as well; thus, this pointer
+                    // points to the beginning of the properly-aligned
+                    // excess block
                     let next = unsafe {
                         ptr.cast::<u8>()
                             .add(needed_size)
                             .add(mem::size_of::<usize>())
+                            .cast::<FreeNode>()
                     };
-                    let end_pad = next.align_offset(mem::align_of::<FreeNode>());
-                    let next = unsafe { next.add(end_pad).cast::<FreeNode>() };
 
-                    let needed_size = needed_size + end_pad;
                     let next_size = node_size - needed_size;
 
+                    // SAFETY: We have exclusive access to all free
+                    // nodes, by our invariants. Additionally, this
+                    // ptr is valid and aligned.
                     let node = unsafe { &mut *ptr };
 
                     node.size_tag = needed_size;
 
+                    // SAFETY: Ibid.
                     unsafe {
                         addr_of_mut!((*next).size_tag).write(next_size | (1 << 63));
                         addr_of_mut!((*next).prev).write(node.prev);
@@ -321,14 +410,21 @@ unsafe impl Allocator for LinkedListAlloc {
                     if node.prev.is_null() {
                         alloc.free_list = next;
                     } else {
+                        // SAFETY: Exclusive access by invariants &
+                        // null check above.
                         unsafe { (*node.prev).next = next };
                     }
 
                     if !node.next.is_null() {
+                        // SAFETY: Exclusive access by invariants &
+                        // null check above.
                         unsafe { (*node.next).prev = next };
                     }
 
                     debug_assert_ne!(n_bytes_padding, 0);
+                    // SAFETY: Again with the trickery, past me! See
+                    // the long comment marked with `[REF 1]`
+                    // above. The same argument applies.
                     unsafe {
                         ptr.cast::<u8>()
                             .add(n_bytes_padding)
@@ -336,32 +432,44 @@ unsafe impl Allocator for LinkedListAlloc {
                             .write(n_bytes_padding);
                     }
 
+                    // SAFETY: The base ptr is valid and we properly
+                    // offset to the data.
                     unsafe {
                         ptr.cast::<u8>()
                             .add(n_bytes_padding)
                             .add(mem::size_of::<usize>())
                     }
                 } else {
+                    // SAFETY: We have exclusive access to all free
+                    // nodes by our invariants. Additionally, this
+                    // pointer is valid and aligned.
                     let node = unsafe { &mut *ptr };
                     node.size_tag = node_size;
                     // N.B. null prev == node is at head of free-list
                     if node.prev.is_null() {
                         alloc.free_list = node.next;
                     } else {
+                        // SAFETY: Exclusive access by invariants & null check above.
                         unsafe { (*node.prev).next = node.next };
                     }
                     // Don't need to do anything here if this is at the tail of the
                     // free-list.
                     if !node.next.is_null() {
+                        // SAFETY: Exclusive access by invariants & null check above.
                         unsafe { (*node.next).prev = node.prev };
                     }
                     debug_assert_ne!(n_bytes_padding, 0);
+                    // SAFETY: Again with the trickery, past me! See
+                    // the long comment marked with `[REF 1]`
+                    // above. The same argument applies.
                     unsafe {
                         ptr.cast::<u8>()
                             .add(n_bytes_padding)
                             .cast::<usize>()
                             .write(n_bytes_padding);
                     };
+                    // SAFETY: The base ptr is valid and we properly
+                    // offset to the data.
                     unsafe {
                         ptr.cast::<u8>()
                             .add(n_bytes_padding)
@@ -377,7 +485,10 @@ unsafe impl Allocator for LinkedListAlloc {
             "kalloc::linked_list: allocator allocated unaligned block"
         );
 
-        // TODO: split blocks
+        // SAFETY: Our pointer is non-null (unless something got
+        // seriously clobbered, in which case we have bigger
+        // problems). It is also properly aligned and of the proper
+        // size.
         Ok(unsafe { NonNull::new_unchecked(slice::from_raw_parts_mut(ptr, layout.size())) })
     }
 
@@ -388,11 +499,16 @@ unsafe impl Allocator for LinkedListAlloc {
             alloc.init,
             "LinkedListAlloc::deallocate: kalloc not initialized"
         );
-        // SAFETY: This pointer is safe to use as it refers to data within the
-        // same linked list allocator node (specifically, the node's metadata).
+        // SAFETY: This pointer is safe to use as it refers to data
+        // within the same linked list allocator node (specifically,
+        // the node's metadata). Additionally, the base pointer is
+        // properly-aligned for usize as our minimum alignment is 8.
         let padding_size_ptr = unsafe { ptr.as_ptr().cast::<usize>().sub(1) };
+        // SAFETY: We have exclusive access to this node by our invariants.
         let padding_size = unsafe { *padding_size_ptr };
-        // SAFETY: Same as above.
+        // SAFETY: We have still not left the boundary of our node's
+        // metadata, making this valid. (This pointer now points to
+        // the size tag).
         let node_ptr = unsafe {
             ptr.as_ptr()
                 .sub(padding_size)
@@ -400,6 +516,8 @@ unsafe impl Allocator for LinkedListAlloc {
                 .cast::<FreeNode>()
         };
 
+        // SAFETY: The pointer is valid and we have exclusive access
+        // to this node by our invariants.
         let node_size = unsafe { node_ptr.cast::<usize>().read() };
         debug_assert_eq!(
             node_size & (1 << 63),
@@ -415,6 +533,8 @@ unsafe impl Allocator for LinkedListAlloc {
         // if the free list is null, then we need to start the list here
         if prev.is_null() {
             alloc.free_list = node_ptr;
+            // SAFETY: We have exclusive access to this node by our
+            // invariants. The base pointer is valid.
             unsafe {
                 addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
                 addr_of_mut!((*node_ptr).prev).write(ptr::null_mut());
@@ -424,9 +544,15 @@ unsafe impl Allocator for LinkedListAlloc {
         }
         let mut next;
         loop {
+            // SAFETY: We have exclusive access to all freed nodes by
+            // our invariants.
             next = unsafe { &*prev }.next;
-            // if next is null, we need to add this node to the end of the list.
+            // if next is null, we need to add this node to the end of
+            // the list.
             if next.is_null() {
+                // SAFETY: Exclusive access by
+                // invariants. Short-circuiting null check for `prev`
+                // on initial conditions above.
                 unsafe {
                     (*prev).next = node_ptr;
                     addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
@@ -437,10 +563,14 @@ unsafe impl Allocator for LinkedListAlloc {
                 return;
             }
 
-            // if next > node_ptr, then we've found the right spot (because of our
-            // address-ordering invariant), so we ned to splice the block into
-            // the list here.
+            // if next > node_ptr, then we've found the right spot
+            // (because of our address-ordering invariant), so we ned
+            // to splice the block into the list here.
             if next > node_ptr {
+                // SAFETY: Exclusive access by
+                // invariants. Short-circuiting null check for `prev`
+                // on initial conditions and `next` on iteration
+                // above.
                 unsafe {
                     (*prev).next = node_ptr;
                     (*next).prev = node_ptr;
