@@ -407,11 +407,12 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             let id = hart.ids().first();
             println!("found FDT node for hart {id}");
             // Allocate a 4 MiB stack
-            let sp_phys = {
+            let stack_base_phys = {
                 let mut pma = PMAlloc::get();
                 pma.allocate(kalloc::phys::what_order(4.mib()))
                     .expect("Could not allocate stack for hart")
             };
+            let sp_phys = stack_base_phys.add(4.mib());
 
             let boot_data = Box::into_raw(Box::new(HartBootData {
                 // We're both in the kernel--this hart will use the same SATP as us.
@@ -473,7 +474,7 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
 
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
-    PLIC.set_priority(uart_irq, 1);
+    //PLIC.set_priority(uart_irq, 1);
     PLIC.hart_senable(uart_irq);
     PLIC.hart_set_spriority(0);
     // SAFETY: The address provided is valid.
@@ -485,6 +486,19 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
 
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
+
+    LOCAL_HART.with(|hart| {
+        let timebase_freq = fdt
+            .cpus()
+            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
+            .expect("Could not find hart in FDT")
+            .timebase_frequency() as u64;
+
+        // About 1/10 sec.
+        hart.timer_interval.set(timebase_freq / 10);
+        let interval = hart.timer_interval.get();
+        sbi::timer::set_timer(asm::read_time() + interval).unwrap();
+    });
 
     // SAFETY: The scheduler is only started once on the main hart.
     unsafe { Scheduler::start() }
