@@ -3,7 +3,11 @@ use color_eyre::eyre;
 use tokio::process::Command;
 use xshell::cmd;
 
-use std::{env, process::Stdio};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 pub enum BuildMode {
     Build,
@@ -40,9 +44,9 @@ impl BuildCtx {
     }
 
     pub fn clean(&mut self) -> eyre::Result<()> {
-        {
+        for dir in Self::get_build_dirs()? {
             let cargo = &self.cargo_cmd;
-            let _cwd = self.shell.push_dir("kernel/");
+            let _cwd = self.shell.push_dir(dir);
 
             cmd!(self.shell, "{cargo} clean").run()?;
         }
@@ -56,14 +60,24 @@ impl BuildCtx {
         Ok(())
     }
 
+    pub fn get_build_dirs() -> eyre::Result<Vec<PathBuf>> {
+        let mut dirs = vec![PathBuf::from("rille/")];
+        for dir in glob::glob("user/*")? {
+            dirs.push(dir?);
+        }
+        dirs.push(PathBuf::from("kernel/"));
+        Ok(dirs)
+    }
+
     pub fn build(
         &mut self,
         opts: super::BuildOptions,
         mode: BuildMode,
         allow_extra: bool,
     ) -> eyre::Result<()> {
-        {
-            let _cwd = self.shell.push_dir("kernel/");
+        for dir in Self::get_build_dirs()? {
+            let is_last = dir.as_path() == Path::new("kernel/");
+            let _cwd = self.shell.push_dir(dir);
 
             let subcommand = match mode {
                 BuildMode::Build => "build",
@@ -77,8 +91,13 @@ impl BuildCtx {
             let cargo = &self.cargo_cmd;
             let extra = if allow_extra { &*opts.extra } else { &[] };
             let mode_extra: &[&str] = match mode {
-                BuildMode::Doc(false) => &["--document-private-items"],
-                BuildMode::Doc(true) => &["--document-private-items", "--open"],
+                BuildMode::Doc(true) if is_last => &["--document-private-items", "--open"],
+                BuildMode::Doc(_) => &[
+                    "--document-private-items",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "-Zbuild-std=core,alloc,compiler_builtins",
+                    "--target=riscv64gc-unknown-none-elf",
+                ],
                 _ => &[],
             };
 

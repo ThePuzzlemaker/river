@@ -15,3 +15,4 @@
 - [X] work on serial driver--cleanup & U-mode integration
 - [ ] solidify capability interface
 - [ ] don't panic! (so much)
+- [ ] priority-based round robin (PBRR) scheduler

@@ -257,6 +257,13 @@ pub enum SegmentType {
     Note = 4,
     Shlib = 5,
     Phdr = 6,
+    /// "Last PT_GNU_STACK program header defines userspace stack
+    /// executability (since Linux 2.6.6). Other PT_GNU_STACK headers
+    /// are ignored." [1] We need to parse this so it doesn't crash,
+    /// but otherwise we don't worry about it!
+    ///
+    /// [1]: https://docs.kernel.org/next/userspace-api/ELF.html
+    GNUStack = 0x6474_E551,
     RVAttributes = 0x7000_0003,
 }
 
@@ -316,7 +323,8 @@ impl Segment {
         seg.align = prog_hdr.align as usize;
 
         if !prog_hdr.align.is_power_of_two()
-            && (prog_hdr.align != 0 || seg.seg_type != SegmentType::Null)
+            && (prog_hdr.align != 0
+                || (seg.seg_type != SegmentType::Null && seg.seg_type != SegmentType::GNUStack))
         {
             return Err(ParseError);
         }

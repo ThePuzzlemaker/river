@@ -110,8 +110,8 @@ user_code_woo.loop:
 
     ecall
 
-    // li a0, 1
-    // ecall
+    //li a0, 1
+    //ecall
 
     j user_code_woo.loop
 
@@ -122,7 +122,7 @@ user_code_woo.loop:
 
 //.section .rodata
 hello:
-    .byte 0x48,0x65,0x6c,0x6c,0x6f,0x2c,0x20,0x77,0x6f,0x72,0x6c,0x64,0x21,0x0a
+    .byte 0x48,0x61,0x69,0x69,0x69,0x20,0x77,0x6f,0x72,0x6c,0x64,0x21,0x21,0x0a
 hello_end:
 
 
@@ -143,7 +143,8 @@ user_code_woo2.loop:
 "
 );
 
-pub static BASIC_ELF: &[u8] = include_bytes!("../tmp");
+pub static BASIC_ELF: &[u8] =
+    include_bytes!("../../target/riscv64gc-unknown-none-elf/debug/userspace_testing");
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -244,13 +245,14 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
         for seg in &elf.segments {
             if seg.seg_type == SegmentType::Load {
-                let start_addr =
-                    VirtualConst::<u8, Identity>::from_usize(seg.virt_addr).page_align();
+                let start_addr = VirtualConst::<u8, Identity>::from_usize(seg.virt_addr);
+                let start_addr_pgalign = start_addr.page_align();
+                let offset_from_pg = start_addr.into_usize() - start_addr_pgalign.into_usize();
                 let end_addr =
                     VirtualConst::<u8, Identity>::from_usize(seg.virt_addr + seg.mem_size)
                         .add(4.kib())
                         .page_align();
-                let n_pages = (end_addr.into_usize() - start_addr.into_usize()) / 4.kib();
+                let n_pages = (end_addr.into_usize() - start_addr_pgalign.into_usize()) / 4.kib();
                 // println!("seg.virt_addr = {:#x}, seg.virt_addr + seg.mem_size = {:#x}, start_addr={:#x}, end_addr={:#x}",
                 //     seg.virt_addr,
                 //     seg.virt_addr + seg.mem_size,
@@ -279,34 +281,59 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                             flags,
                             purpose: RegionPurpose::Unknown,
                         },
-                        Some(start_addr),
+                        Some(start_addr_pgalign),
                     )
                     .unwrap();
 
                 cursor.seek(SeekFrom::Start(seg.offset as u64)).unwrap();
                 let mut len = seg.file_size;
-                for page in 0..n_pages {
+                let mut addr = start_addr;
+                // TODO: WHAT THE FUCK IS THIS????????
+                // TODO: WHAT WHAT WHAT WHAT WHAT
+                // TODO: I HAVE NO IDEA WHY THIS WORKS
+                // TODO: THIS IS ALMOST CERTAINLY BUGRIDDEN
+                loop {
                     if len == 0 {
                         break;
                     }
-                    let n = cmp::min(4.kib(), len);
+                    let n = cmp::min(4.kib() - offset_from_pg, len);
 
-                    let phys_addr = private
-                        .mman
-                        .get_table()
-                        .walk(start_addr.add(page * 4.kib()))
-                        .unwrap()
-                        .0;
+                    let phys_addr = private.mman.get_table().walk(addr).unwrap().0;
                     let virt_addr = phys_addr.into_virt();
 
                     // SAFETY: This page was allocated by the
                     // UserMemoryManager and is 4 KiB long, and len <=
-                    // n <= 4 KiB.
+                    // n <= min(4KiB, len_remaining).
                     let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
                     cursor.read(buf).unwrap();
+                    addr = addr.add(n);
 
                     len -= n;
                 }
+                // for page in 0..n_pages {
+                //     if len == 0 {
+                //         break;
+                //     }
+                //     let n = cmp::min(4.kib(), len);
+
+                //     let phys_addr = private
+                //         .mman
+                //         .get_table()
+                //         .walk(start_addr_pgalign.add(page * 4.kib()))
+                //         .unwrap()
+                //         .0;
+                //     let virt_addr = phys_addr.into_virt();
+
+                //     // SAFETY: This page was allocated by the
+                //     // UserMemoryManager and is 4 KiB long, and len <=
+                //     // n <= 4 KiB.
+                //     let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
+                //     cursor.read(buf).unwrap();
+                //     crate::println!("n={n:x?}, len={len:x?}, phys_addr={phys_addr:x?}, virt_addr={virt_addr:x?}");
+                //     crate::println!("buf={buf:x?}");
+
+                //     len -= n;
+                // }
             }
         }
 
@@ -470,7 +497,9 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
     // the code that locked the UART device.
     //
     // FIXME: Deadlock in the panic handler somehow causes traps. Not
-    // sure why.
+    // sure why. MAYBEDONTFIXME: I know why. It's cause the deadlock
+    // detector panics if it fails. So if we panic here we trap, for
+    // some reason. That needs fixing, potentially. Or maybe not.
     unsafe { UART.force_unlock() };
 
     if paging::enabled() {

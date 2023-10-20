@@ -11,6 +11,7 @@ fdt = "0.1.3"
 sbi = "0.2.0"
 bitflags = "1.3.2"
 memoffset = "0.7.1"
+rille = { path = "../rille" }
 
 [dependencies.num_enum]
 version = "0.5.7"

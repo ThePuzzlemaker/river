@@ -40,8 +40,9 @@ impl Scheduler {
     ///
     /// This function will panic if the scheduler is not initialized.
     pub unsafe fn start() -> ! {
-        LOCAL_HART.with(|hart| {
+        let hartid = LOCAL_HART.with(|hart| {
             *hart.proc.borrow_mut() = None;
+            hart.hartid.get()
         });
         // Avoid deadlock, make sure this core can interrupt. N.B. the
         // scheduler/interrupt code will never put this scheduler on a
@@ -52,30 +53,34 @@ impl Scheduler {
             let mut scheduler = SCHED
                 .per_hart
                 .expect("Scheduler::per_hart")
-                .get(&asm::hartid())
+                .get(&hartid)
                 .unwrap()
                 .lock();
             // crate::println!("{:#?}", scheduler);
             loop {
-                let (_pid, proc) = match scheduler.procs.front() {
-                    Some(&pid) => {
-                        scheduler.procs.rotate_left(1);
-                        (pid, Arc::clone(scheduler.run_queue.get(&pid).unwrap()))
-                    }
-                    None => {
+                let (_pid, proc) = if let Some(&pid) = scheduler.procs.front() {
+                    scheduler.procs.rotate_left(1);
+                    (pid, Arc::clone(scheduler.run_queue.get(&pid).unwrap()))
+                } else {
+                    //continue 'outer;
+                    let mut wait_queue = SCHED.wait_queue.lock();
+                    if wait_queue.is_empty() {
                         continue 'outer;
-                        // let mut wait_queue = SCHED.wait_queue.lock();
-                        // if !wait_queue.is_empty() {
-                        //     let v = (asm::read_time() as usize * 717) % wait_queue.len();
-                        //     if let Some(entry) = wait_queue.values().cloned().nth(v) {
-                        //         let (pid, proc) = wait_queue.remove_entry(&entry.pid).unwrap();
-                        //         (pid, proc)
-                        //     } else {
-                        //         continue 'outer;
-                        //     }
-                        // } else {
-                        //     continue 'outer;
-                        // }
+                    }
+
+                    let v = (asm::read_time() as usize * 717) % wait_queue.len();
+                    if let Some(entry) = wait_queue.values().nth(v).cloned() {
+                        crate::println!(
+                            "[hart {}]: adopting process {} from the wait queue",
+                            asm::hartid(),
+                            entry.pid
+                        );
+                        let (pid, proc) = wait_queue.remove_entry(&entry.pid).unwrap();
+                        scheduler.run_queue.insert(pid, Arc::clone(&proc));
+                        scheduler.procs.push_back(pid);
+                        (pid, proc)
+                    } else {
+                        continue 'outer;
                     }
                 };
 

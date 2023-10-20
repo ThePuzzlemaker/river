@@ -10,3 +10,4 @@ color-eyre = "0.6.2"
 clap = { version = "4.1.8", features = ["derive"] }
 xshell = "0.2.3"
 tokio = { version = "1.26.0", features = ["rt-multi-thread", "sync", "process", "macros", "parking_lot"] }
+glob = "0.3.1"

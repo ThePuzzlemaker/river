@@ -16,8 +16,8 @@ _start:
 
     ecall
 
-    //li a0, 1
-    //ecall
+    li a0, 1
+    ecall
 
     j .loop
 //    beq s0, x0, .loop
