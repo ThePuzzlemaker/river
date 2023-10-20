@@ -23,8 +23,8 @@ context_switch:
     sd s10,  96(a0)
     sd s11, 104(a0)
 
-    sd zero, 0(a2)
-    fence
+    fence rw,w
+    sd zero, 0(a2) # Unlock old_lock
 
     ld ra,    0(a1)
     ld sp,    8(a1)
@@ -41,8 +41,8 @@ context_switch:
     ld s10,  96(a1)
     ld s11, 104(a1)
 
-    sd zero, 0(a3)
-    fence
+    fence rw,w
+    sd zero, 0(a3) # Unlock new_lock
 
     ret
 .popsection
