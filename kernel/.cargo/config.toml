@@ -1,6 +1,6 @@
 [build]
 target = "riscv64gc-unknown-none-elf"
-rustflags = ["-Ccode-model=medium", "-Cpanic=abort"]
+rustflags = ["-Ccode-model=medium", "-Cpanic=abort", "-Ctarget-feature=+zihintpause"]
 
 # not sure if this ever worked.
 [unstable]
