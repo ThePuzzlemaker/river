@@ -4,7 +4,7 @@ use core::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::addr_of,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{self, AtomicBool, AtomicU64, Ordering},
 };
 
 use alloc::fmt;
@@ -38,26 +38,27 @@ use crate::{
 /// which are undesirable.
 // TODO: SpinRwLock?
 pub struct SpinMutex<T> {
+    /// We store hartid+1 in this field, 0 for unlocked. (It's fine to
+    /// use hartid+1 as we definitely won't have 18 quintillion and a
+    /// bit (2^64-1) cores available.)
     locked: AtomicU64,
     data: UnsafeCell<T>,
-    held_by: Cell<Option<u64>>,
 }
 
 // SAFETY: `SpinMutex`es only provide mutually exclusive access to their data,
 // and their locking state is atomic and thus does not provide simultaneous
-// mutable access due to race conditions. (TODO: properly verify atomics--I
-// *think* they're right...(?) (famous last words))
-unsafe impl<T: Sync + Send> Send for SpinMutex<T> {}
-// SAFETY: See above.
-unsafe impl<T: Sync + Send> Sync for SpinMutex<T> {}
+// mutable access due to race conditions.
+unsafe impl<T: Send> Send for SpinMutex<T> {}
+// SAFETY: We only need to have T: Send because we may be able to send
+// the T between threads through a `&mut T`, but we can't use the
+// Mutex to get a `&T`.
+unsafe impl<T: Send> Sync for SpinMutex<T> {}
 
 impl<T> SpinMutex<T> {
     pub const fn new(data: T) -> Self {
         Self {
             locked: AtomicU64::new(0),
             data: UnsafeCell::new(data),
-            // TODO: is this safe? doubt so tbh
-            held_by: Cell::new(None),
         }
     }
 
@@ -85,7 +86,7 @@ impl<T> SpinMutex<T> {
     /// This function will panic if it detects a deadlock.
     #[track_caller]
     pub fn try_lock(&'_ self) -> Option<SpinMutexGuard<'_, T>> {
-        // Disable interrupts to prevent deadlocks.  Interrupts will
+        // Disable interrupts to prevent deadlocks. Interrupts will
         // always be disabled before TLS is enabled, as it's enabled
         // very early (before paging, even).
         let hartid = if hart_local::enabled() {
@@ -96,22 +97,36 @@ impl<T> SpinMutex<T> {
         } else {
             hartid()
         };
-        assert!(
-            self.locked.load(Ordering::Relaxed) == 0 || self.held_by.get() != Some(hartid),
-            "SpinMutex::lock: deadlock detected"
-        );
 
+        // Try to set the locked flag to our hartid, if it was
+        // unlocked.
+        //
+        // The Acquire success ordering ensures that a Release-store
+        // happens-before a successful Acquire-load. We don't need
+        // anything special for the failure ordering, as we don't
+        // synchronize over anything with that.
+        //
         // N.B. We don't use `compare_exchange_weak` which can
         // spuriously fail, which we don't want this function to do.
-        if self
-            .locked
-            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
+        // We also don't want to use atomic swap as that would stack
+        // mutable borrows if this hart was already holding the lock,
+        // which is mega-unsound. Thus we need to ensure it was
+        // **definitely** unlocked when we swap, not just lock it
+        // anyway.
+        if let Err(held_by) =
+            self.locked
+                .compare_exchange(0, hartid + 1, Ordering::Acquire, Ordering::Relaxed)
         {
+            assert!(
+                held_by != hartid + 1,
+                "SpinMutex::try_lock: deadlock detected"
+            );
+            // Make sure we re-enable interrupts if we didn't lock.
+            if hart_local::enabled() {
+                LOCAL_HART.with(hart_local::HartCtx::pop_off);
+            }
             return None;
         }
-
-        self.held_by.set(Some(hartid));
 
         Some(SpinMutexGuard {
             mutex: self,
@@ -137,28 +152,29 @@ impl<T> SpinMutex<T> {
         } else {
             hartid()
         };
-        assert!(
-            self.locked.load(Ordering::Relaxed) == 0 || self.held_by.get() != Some(hartid),
-            "SpinMutex::lock: deadlock detected"
-        );
 
-        // Try to set the locked flag to `true` if it was `false`.
-        // We loop if it could not be done, or if the previous value was
-        // somehow `true`.
-        // The Acquire success ordering ensures that any other loops will
-        // see this acquisition before they load the locked flag.
-        // The Relaxed failure ordering means that it's okay to reorder loads
-        // and stores across failed iterations--as no synchronization is
-        // necessary there as we do not have access to the data.
-        while self
-            .locked
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
+        // Try to set the locked flag to our hartid, if it was
+        // unlocked. Spin if we can't.
+        //
+        // The Acquire success ordering ensures that a Release-store
+        // happens-before a successful Acquire-load. We don't need
+        // anything special for the failure ordering, as we don't
+        // synchronize over anything with that.
+        //
+        // N.B. We don't use `compare_exchange_weak` which can
+        // spuriously fail, which may cause misdetection of deadlock.
+        // We also don't want to use atomic swap as that would stack
+        // mutable borrows if this hart was already holding the lock,
+        // which is mega-unsound. Thus we need to ensure it was
+        // **definitely** unlocked when we swap, not just lock it
+        // anyway.
+        while let Err(held_by) =
+            self.locked
+                .compare_exchange(0, hartid + 1, Ordering::Acquire, Ordering::Relaxed)
         {
+            assert!(held_by != hartid + 1, "SpinMutex::lock: deadlock detected");
             hint::spin_loop();
         }
-
-        self.held_by.set(Some(hartid));
 
         SpinMutexGuard {
             mutex: self,
@@ -180,7 +196,10 @@ impl<T: fmt::Debug> fmt::Debug for SpinMutex<T> {
             None => f
                 .debug_struct("SpinMutex")
                 .field("data", &"<locked>")
-                .field("held_by", &self.held_by)
+                .field(
+                    "held_by",
+                    &self.locked.load(Ordering::Relaxed).saturating_sub(1),
+                )
                 .finish_non_exhaustive(),
         }
     }
@@ -214,13 +233,8 @@ impl<'a, T> Drop for SpinMutexGuard<'a, T> {
         // Make sure, just in case, that interrupts are still off.
         asm::intr_off();
 
-        // The held_by field is non-normative with respect to lock status, so
-        // it's fine to mutate it before we've released the lock.
-        self.mutex.held_by.set(None);
-
-        // Set the locked flag to false.
-        // The Release ordering ensures that the acquisition of this guard
-        // cannot occur after its release.
+        // Set the locked flag to false. The Release ordering ensures
+        // that this unlock happens-before any Acquire-load locks.
         self.mutex.locked.store(0, Ordering::Release);
 
         // If interrupts were previously enabled, re-enable them.
