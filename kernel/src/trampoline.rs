@@ -54,8 +54,8 @@ trampoline:
     sd x30, 232(t0)
     sd x31, 240(t0)
 
-    // Save the user's x1 (that we stored in sscratch) into the trapframe,
-    // ensuring we don't clobber the x1 address we need (we can use x2, as we
+    // Save the user's t0 (that we stored in sscratch) into the trapframe,
+    // ensuring we don't clobber the t0 address we need (we can use t1, as we
     // already saved it).
     csrr t1, sscratch
     sd t1, 32(t0)

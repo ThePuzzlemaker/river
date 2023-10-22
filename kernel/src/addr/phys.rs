@@ -7,14 +7,14 @@ use super::{Identity, Mapping, Mutability, PgOff, Virtual};
 ///
 /// # Internal Structure
 ///
-/// With the Sv39[^1] paging strategy, a physical address is 55 bits long and is
+/// With the Sv39[^1] paging strategy, a physical address is 56 bits long and is
 /// structured as follows:
 /// ```plaintext
 /// |<-55                      12->|<-11     0->| bit index
 /// |------------------------------|------------|
 /// |     physical page number     | pg. offset |
 /// |------------------------------|------------|
-/// |               26             |     12     | bit size
+/// |               44             |     12     | bit size
 /// ```
 ///
 /// The physical page number (also called a "PPN") is a unique 44-bit

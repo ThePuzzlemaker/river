@@ -1,3 +1,21 @@
+//! This module contains an opinionated parser for RISC-V ELF64
+//! files. The structures contained in this file are intended to be
+//! consumed idiomatically, and do not necessarily represent ELF files
+//! one-to-one, though this may change in the future.
+//!
+//! # References
+//!
+//! This module's documentation will make heavy uses of the following
+//! references:
+//!
+//! - [RISC-V ABIs Specification
+//! v1.0](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/releases/download/v1.0/riscv-abi.pdf).
+//! - [ELF-64 Object File Format v1.5 Draft
+//! 2](https://uclibc.org/docs/elf-64-gen.pdf).
+//!
+//! However, to prevent the documentation source from being too
+//! cluttered, links to these sources will only be present in the
+//! module-level documentation.
 use core::mem;
 
 use alloc::vec;
@@ -8,25 +26,6 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::io_traits::{Read, Seek, SeekFrom};
 
 use self::raw::FileIdent;
-
-/// This module contains an opinionated parser for RISC-V ELF64
-/// files. The structures contained in this file are intended to be
-/// consumed idiomatically, and do not necessarily represent ELF files
-/// one-to-one, though this may change in the future.
-///
-/// # References
-///
-/// This module's documentation will make heavy uses of the following
-/// references:
-///
-/// - [RISC-V ABIs Specification
-/// v1.0](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/releases/download/v1.0/riscv-abi.pdf).
-/// - [ELF-64 Object File Format v1.5 Draft
-/// 2](https://uclibc.org/docs/elf-64-gen.pdf).
-///
-/// However, to prevent the documentation source from being too
-/// cluttered, links to these sources will only be present in the
-/// module-level documentation.
 
 /// The `e_machine` type for RISC-V. **All** RISC-V executables use
 /// this value.[^1]
