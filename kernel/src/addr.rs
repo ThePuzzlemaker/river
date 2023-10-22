@@ -12,7 +12,7 @@ pub use mappings::{
     KERNEL_PHYS_OFFSET, PHYSICAL_OFFSET,
 };
 pub use phys::{Physical, Ppn};
-pub use virt::{Virtual, Vpn};
+pub use virt::{Virtual, Vpn, Vpns};
 
 pub type VirtualConst<T, Map> = Virtual<T, Map, Const>;
 pub type VirtualMut<T, Map> = Virtual<T, Map, Mut>;

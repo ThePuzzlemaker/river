@@ -1,4 +1,8 @@
-use core::{fmt, marker::PhantomData};
+use core::{
+    fmt,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+};
 
 use super::{Identity, Mapping, Mutability, PgOff, Physical, PGOFF_MASK};
 
@@ -278,6 +282,30 @@ impl<T, Map: Mapping, Mut: Mutability<T>> fmt::Pointer for Virtual<T, Map, Mut> 
     }
 }
 
+impl<T, Map: Mapping, Mut: Mutability<T>> From<u64> for Virtual<T, Map, Mut> {
+    fn from(x: u64) -> Virtual<T, Map, Mut> {
+        Self::from_usize(x as usize)
+    }
+}
+
+impl<T, Map: Mapping, Mut: Mutability<T>> From<usize> for Virtual<T, Map, Mut> {
+    fn from(x: usize) -> Virtual<T, Map, Mut> {
+        Self::from_usize(x)
+    }
+}
+
+impl<T, Map: Mapping, Mut: Mutability<T>> From<Virtual<T, Map, Mut>> for u64 {
+    fn from(x: Virtual<T, Map, Mut>) -> u64 {
+        x.into_usize() as u64
+    }
+}
+
+impl<T, Map: Mapping, Mut: Mutability<T>> From<Virtual<T, Map, Mut>> for usize {
+    fn from(x: Virtual<T, Map, Mut>) -> usize {
+        x.into_usize()
+    }
+}
+
 /// A virtual page number. See [`Virtual`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -297,6 +325,57 @@ impl Vpn {
 
     pub fn into_u16(self) -> u16 {
         self.0
+    }
+}
+
+impl From<Vpn> for u16 {
+    fn from(x: Vpn) -> u16 {
+        x.into_u16()
+    }
+}
+
+impl From<u16> for Vpn {
+    fn from(x: u16) -> Vpn {
+        Vpn::from_usize_truncate(x as usize)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Vpns(pub [Vpn; 3]);
+
+impl Deref for Vpns {
+    type Target = [Vpn; 3];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Vpns {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<Vpns> for u32 {
+    fn from(x: Vpns) -> u32 {
+        let [vpn0, vpn1, vpn2] = &*x;
+        let vpn2 = vpn2.into_u16() as u32;
+        let vpn1 = vpn1.into_u16() as u32;
+        let vpn0 = vpn0.into_u16() as u32;
+        (vpn2 << (9 * 2)) | (vpn1 << 9) | vpn0
+    }
+}
+
+impl From<u32> for Vpns {
+    fn from(x: u32) -> Vpns {
+        let x = x as usize;
+        Vpns([
+            Vpn::from_usize_truncate(x),
+            Vpn::from_usize_truncate(x >> 9),
+            Vpn::from_usize_truncate(x >> (9 * 2)),
+        ])
     }
 }
 

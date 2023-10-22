@@ -270,3 +270,27 @@ impl Ppn {
         self.0
     }
 }
+
+impl From<u64> for Ppn {
+    fn from(x: u64) -> Ppn {
+        Ppn::from_usize_truncate(x as usize)
+    }
+}
+
+impl From<Ppn> for u64 {
+    fn from(x: Ppn) -> u64 {
+        x.into_usize() as u64
+    }
+}
+
+impl From<usize> for Ppn {
+    fn from(x: usize) -> Ppn {
+        Ppn::from_usize_truncate(x)
+    }
+}
+
+impl From<Ppn> for usize {
+    fn from(x: Ppn) -> usize {
+        x.into_usize()
+    }
+}
