@@ -13,8 +13,8 @@ use crate::{
     kalloc::phys::{self, PMAlloc},
     paging,
     proc::{Context, Proc},
-    spin::SpinMutex,
     symbol::{self, tdata_end, tdata_start},
+    sync::spin::SpinMutex,
 };
 
 #[macro_export]

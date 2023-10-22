@@ -3,7 +3,7 @@ use core::marker::PhantomData;
 use crate::{
     addr::{DirectMapped, VirtualMut},
     proc::Context,
-    spin::SpinMutex,
+    sync::spin::SpinMutex,
     trampoline::Trapframe,
 };
 

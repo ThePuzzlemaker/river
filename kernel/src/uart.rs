@@ -7,7 +7,7 @@ use bitflags::bitflags;
 
 use crate::{
     paging,
-    spin::{SpinMutex, SpinMutexGuard},
+    sync::spin::{SpinMutex, SpinMutexGuard},
 };
 
 #[macro_export]

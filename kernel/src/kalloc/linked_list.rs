@@ -61,7 +61,7 @@ use crate::{
     addr::{Identity, Virtual, VirtualMut},
     kalloc::phys::{self, PMAlloc},
     paging::{root_page_table, PageTableFlags},
-    spin::SpinMutex,
+    sync::spin::SpinMutex,
     units::StorageUnits,
 };
 

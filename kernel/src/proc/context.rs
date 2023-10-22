@@ -1,6 +1,6 @@
 use core::{arch::global_asm, mem, sync::atomic::AtomicU64};
 
-use crate::spin::SpinMutex;
+use crate::sync::spin::SpinMutex;
 
 global_asm!(
     "

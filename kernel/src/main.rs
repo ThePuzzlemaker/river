@@ -35,12 +35,11 @@ pub mod elf;
 pub mod hart_local;
 pub mod io_traits;
 pub mod kalloc;
-pub mod once_cell;
 pub mod paging;
 pub mod plic;
 pub mod proc;
-pub mod spin;
 pub mod symbol;
+pub mod sync;
 pub mod trampoline;
 pub mod trap;
 pub mod uart;
@@ -78,8 +77,8 @@ use crate::{
         mman::{RegionPurpose, RegionRequest},
         Proc, ProcState, Scheduler, SchedulerInner,
     },
-    spin::SpinMutex,
     symbol::fn_user_code_woo,
+    sync::spin::SpinMutex,
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
     units::StorageUnits,

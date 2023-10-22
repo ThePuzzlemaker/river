@@ -17,8 +17,8 @@ use crate::{
     },
     asm::{self, get_satp},
     kalloc::phys::PMAlloc,
-    once_cell::OnceCell,
-    spin::SpinMutex,
+    sync::once_cell::OnceCell,
+    sync::spin::SpinMutex,
     units::StorageUnits,
 };
 

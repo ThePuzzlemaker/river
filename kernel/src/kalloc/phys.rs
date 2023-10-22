@@ -3,7 +3,7 @@ use core::{fmt, mem};
 use crate::{
     addr::{DirectMapped, Physical, PhysicalMut},
     paging,
-    spin::{SpinMutex, SpinMutexGuard},
+    sync::spin::{SpinMutex, SpinMutexGuard},
     util,
 };
 
