@@ -19,6 +19,9 @@ struct DocOptions {
 
     #[clap(long)]
     open: bool,
+
+    #[clap(long)]
+    show_coverage: bool,
 }
 
 mod build;
@@ -38,7 +41,11 @@ async fn main() -> eyre::Result<()> {
         Arguments::Check(opts) => ctx.build(opts, BuildMode::Check, true)?,
         Arguments::Clippy(opts) => ctx.build(opts, BuildMode::Clippy, true)?,
         Arguments::Clean => ctx.clean()?,
-        Arguments::Doc(opts) => ctx.build(opts.inner, BuildMode::Doc(opts.open), true)?,
+        Arguments::Doc(opts) => ctx.build(
+            opts.inner,
+            BuildMode::Doc(opts.open, opts.show_coverage),
+            true,
+        )?,
         Arguments::Run(opts) => ctx.run(opts).await?,
     }
 

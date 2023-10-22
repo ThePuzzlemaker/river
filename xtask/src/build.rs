@@ -13,7 +13,7 @@ pub enum BuildMode {
     Build,
     Check,
     Clippy,
-    Doc(bool),
+    Doc(bool, bool),
 }
 
 pub struct BuildCtx {
@@ -44,11 +44,11 @@ impl BuildCtx {
     }
 
     pub fn clean(&mut self) -> eyre::Result<()> {
-        for dir in Self::get_build_dirs()? {
+        for (package, dir) in Self::get_build_dirs()? {
             let cargo = &self.cargo_cmd;
             let _cwd = self.shell.push_dir(dir);
 
-            cmd!(self.shell, "{cargo} clean").run()?;
+            cmd!(self.shell, "{cargo} clean -p{package}").run()?;
         }
 
         {
@@ -56,16 +56,26 @@ impl BuildCtx {
 
             cmd!(self.shell, "make clean").run()?;
         }
+        cmd!(self.shell, "cargo clean").run()?;
 
         Ok(())
     }
 
-    pub fn get_build_dirs() -> eyre::Result<Vec<PathBuf>> {
-        let mut dirs = vec![PathBuf::from("rille/")];
+    pub fn get_build_dirs() -> eyre::Result<Vec<(String, PathBuf)>> {
+        let mut dirs = vec![(String::from("rille"), PathBuf::from("rille/"))];
         for dir in glob::glob("user/*")? {
-            dirs.push(dir?);
+            let dir = dir?;
+            let basename = dir
+                .as_path()
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
+            dirs.push((basename, dir));
         }
-        dirs.push(PathBuf::from("kernel/"));
+        dirs.push((String::from("river"), PathBuf::from("kernel/")));
         Ok(dirs)
     }
 
@@ -75,30 +85,45 @@ impl BuildCtx {
         mode: BuildMode,
         allow_extra: bool,
     ) -> eyre::Result<()> {
-        for dir in Self::get_build_dirs()? {
+        if let BuildMode::Doc(open, coverage) = mode {
+            let profile = if opts.release { "release" } else { "dev" };
+            let verbose: &[&str] = if opts.verbose { &["-vv"] } else { &[] };
+            let cargo = &self.cargo_cmd;
+            let extra = if allow_extra { &*opts.extra } else { &[] };
+            let open: &[&str] = if open { &["--open"] } else { &[] };
+            if coverage {
+                std::env::set_var("RUSTDOCFLAGS", "-Zunstable-options --show-coverage")
+            }
+
+            cmd!(
+                self.shell,
+                "{cargo} doc --profile {profile}
+                {verbose...} {extra...} --document-private-items
+                --target riscv64gc-unknown-none-elf --workspace
+                --exclude xtask {open...}"
+            )
+            .run()?;
+
+            return Ok(());
+        }
+
+        for (package, dir) in Self::get_build_dirs()? {
             let is_last = dir.as_path() == Path::new("kernel/");
-            let _cwd = self.shell.push_dir(dir);
+            let _cwd = self.shell.push_dir(dir.clone());
 
             let subcommand = match mode {
                 BuildMode::Build => "build",
                 BuildMode::Check => "check",
                 BuildMode::Clippy => "clippy",
-                BuildMode::Doc(..) => "doc",
+                BuildMode::Doc(..) => unreachable!(),
             };
 
             let profile = if opts.release { "release" } else { "dev" };
             let verbose: &[&str] = if opts.verbose { &["-vv"] } else { &[] };
             let cargo = &self.cargo_cmd;
             let extra = if allow_extra { &*opts.extra } else { &[] };
-            let mode_extra: &[&str] = match mode {
-                BuildMode::Doc(true) if is_last => &["--document-private-items", "--open"],
-                BuildMode::Doc(_) => &[
-                    "--document-private-items",
-                    "-Zbuild-std-features=compiler-builtins-mem",
-                    "-Zbuild-std=core,alloc,compiler_builtins",
-                    "--target=riscv64gc-unknown-none-elf",
-                ],
-                _ => &[],
+            let mode_extra: Vec<&str> = match mode {
+                _ => vec![],
             };
 
             cmd!(
@@ -108,7 +133,7 @@ impl BuildCtx {
             .run()?;
         }
 
-        if !matches!(mode, BuildMode::Doc(..)) {
+        {
             let _cwd = self.shell.push_dir("opensbi/");
 
             let target_profile_path = if opts.release { "release" } else { "debug" };
