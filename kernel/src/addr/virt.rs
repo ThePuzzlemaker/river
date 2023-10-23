@@ -390,10 +390,7 @@ fn canonicalize(mut addr: usize) -> usize {
     // is the top bit set?
     if addr & TOP_BIT != 0 {
         // set topmost bits
-        // usize::MAX = 0b111111[...], shifting it left 38 bits puts 38 zeros
-        // at the end which will leave our address otherwise unmodified (and we
-        // know the 38th bit is set so ORing it won't do anything)
-        addr |= usize::MAX << 38;
+        addr |= 0xFFFF_FFC0_0000_0000;
     }
 
     addr
