@@ -13,7 +13,11 @@ pub enum BuildMode {
     Build,
     Check,
     Clippy,
-    Doc(bool, bool),
+    Doc {
+        open: bool,
+        coverage: bool,
+        private: bool,
+    },
 }
 
 pub struct BuildCtx {
@@ -23,12 +27,15 @@ pub struct BuildCtx {
 
 #[derive(Clone, Debug, Parser)]
 pub struct BuildOptions {
+    /// Show more information
     #[clap(short, long)]
     verbose: bool,
 
+    /// Build in release mode
     #[clap(long)]
     release: bool,
 
+    /// Extra options to pass to the underlying command
     #[clap(last = true, required = false)]
     extra: Vec<String>,
 }
@@ -85,20 +92,36 @@ impl BuildCtx {
         mode: BuildMode,
         allow_extra: bool,
     ) -> eyre::Result<()> {
-        if let BuildMode::Doc(open, coverage) = mode {
+        if let BuildMode::Doc {
+            open,
+            coverage,
+            private,
+        } = mode
+        {
             let profile = if opts.release { "release" } else { "dev" };
             let verbose: &[&str] = if opts.verbose { &["-vv"] } else { &[] };
             let cargo = &self.cargo_cmd;
             let extra = if allow_extra { &*opts.extra } else { &[] };
             let open: &[&str] = if open { &["--open"] } else { &[] };
+            let private: &[&str] = if private {
+                &["--document-private-items"]
+            } else {
+                &[]
+            };
             if coverage {
-                std::env::set_var("RUSTDOCFLAGS", "-Zunstable-options --show-coverage")
+                std::env::set_var(
+                    "RUSTDOCFLAGS",
+                    &format!(
+                        "-Zunstable-options --show-coverage {}",
+                        std::env::var("RUSTDOCFLAGS").unwrap_or_default()
+                    ),
+                )
             }
 
             cmd!(
                 self.shell,
                 "{cargo} doc --profile {profile}
-                {verbose...} {extra...} --document-private-items
+                {verbose...} {extra...} {private...}
                 --target riscv64gc-unknown-none-elf --workspace
                 --exclude xtask {open...}"
             )
@@ -115,7 +138,7 @@ impl BuildCtx {
                 BuildMode::Build => "build",
                 BuildMode::Check => "check",
                 BuildMode::Clippy => "clippy",
-                BuildMode::Doc(..) => unreachable!(),
+                BuildMode::Doc { .. } => unreachable!(),
             };
 
             let profile = if opts.release { "release" } else { "dev" };
@@ -246,21 +269,28 @@ pub struct RunOptions {
     #[clap(flatten)]
     build_opts: BuildOptions,
 
+    /// How much memory to provision for the emulator
     #[clap(short, long, default_value = "256M")]
     memory: String,
 
+    /// How many processors to allocate for the emulator, default is
+    /// 1.
     #[clap(long)]
     smp: Option<usize>,
 
+    /// Disable QEMU debug window
     #[clap(long, default_value_t = false)]
     no_graphic: bool,
 
+    /// Enable debugger
     #[clap(short, long, default_value_t = false)]
     debugger: bool,
 
+    /// Set path to debugger
     #[clap(long, default_value = "riscv64-linux-gnu-gdb")]
     debugger_path: String,
 
+    /// Log all traps to the serial console.
     #[clap(long, default_value_t = false)]
     dump_traps: bool,
 }
