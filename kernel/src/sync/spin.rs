@@ -1,10 +1,10 @@
 use core::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     hint,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::addr_of,
-    sync::atomic::{self, AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use alloc::fmt;

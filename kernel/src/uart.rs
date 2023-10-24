@@ -27,9 +27,9 @@ pub struct Ns16650Inner {
     serial_base: *mut u8,
     serial_base_backup: *mut u8,
     init: bool,
-    tx_buffer: [u8; 1024],
-    tx_buffer_r: usize,
-    tx_buffer_w: usize,
+    _tx_buffer: [u8; 1024],
+    _tx_buffer_r: usize,
+    _tx_buffer_w: usize,
 }
 
 const LCR: usize = 0b011;
@@ -204,9 +204,9 @@ pub static UART: Ns16650 = Ns16650 {
         serial_base: ptr::null_mut(),
         serial_base_backup: ptr::null_mut(),
         init: false,
-        tx_buffer: [0; 1024],
-        tx_buffer_r: 0,
-        tx_buffer_w: 0,
+        _tx_buffer: [0; 1024],
+        _tx_buffer_r: 0,
+        _tx_buffer_w: 0,
     }),
 };
 
