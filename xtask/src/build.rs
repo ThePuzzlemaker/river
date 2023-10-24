@@ -151,7 +151,9 @@ impl BuildCtx {
 
             cmd!(
                 self.shell,
-                "{cargo} {subcommand} --profile {profile} {verbose...} {extra...} {mode_extra...}"
+                "{cargo} {subcommand} --profile
+                {profile} {verbose...} {extra...} {mode_extra...}
+                --target riscv64gc-unknown-none-elf"
             )
             .run()?;
         }
