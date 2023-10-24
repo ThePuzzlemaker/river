@@ -36,11 +36,6 @@ pub struct Physical<T, Map: Mapping, Mut: Mutability<T>> {
 }
 
 impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
-    pub const NULL: Self = Self {
-        addr: 0,
-        phantom: PhantomData,
-    };
-
     /// Create a [`Physical`] address from a [`usize`].
     ///
     /// # Panics
@@ -112,12 +107,15 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Convert a [`Physical`] address into a [`usize`].
     #[inline(always)]
     pub fn into_usize(self) -> usize {
         self.addr
     }
 
+    /// Create a null [`Physical`] address.
     #[inline(always)]
+    #[must_use]
     pub const fn null() -> Self {
         Self {
             addr: 0,
@@ -125,11 +123,13 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Returns `true` if this [`Physical`] address is null.
     #[inline]
     pub fn is_null(self) -> bool {
         self.addr == 0
     }
 
+    /// Cast a [`Physical`] address into an address of a different type.
     #[inline(always)]
     pub fn cast<U>(self) -> Physical<U, Map, Mut>
     where
@@ -157,13 +157,15 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Increment an address `by` bytes, returning [`None`] if the
+    /// resulting address is outside of the [`Mapping`]'s range.
     pub fn checked_add(self, by: usize) -> Option<Self> {
         let paddr = self.into_usize();
         let paddr = paddr.checked_add(by)?;
         Self::try_from_usize(paddr)
     }
 
-    /// Convert this address into a physical address using its [`Mapping`].
+    /// Convert this address into a [`Virtual`] address using its [`Mapping`].
     ///
     /// # Panics
     ///
@@ -182,21 +184,28 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Try to convert this address into a [`Virtual`] address,
+    /// returning [`None`] if the address is outside of the
+    /// [`Mapping`]'s range.
     pub fn try_into_virt(self) -> Option<Virtual<T, Map, Mut>> {
         Map::phys2virt(self)
     }
 
+    /// Returns true if this [`Physical`] address is page-aligned,
+    /// i.e. its page offset is 0.
     #[inline]
     pub fn is_page_aligned(self) -> bool {
         self.page_offset().into_usize() == 0
     }
 
+    /// Returns the physical page number of a [`Physical`] address.
     #[inline]
     pub fn ppn(self) -> Ppn {
         // Shift out the page offset, then put mask out the PPN
         Ppn::from_usize_truncate(self.addr >> 12)
     }
 
+    /// Returns the page offset of a [`Physical`] address.
     #[inline]
     pub fn page_offset(self) -> PgOff {
         PgOff::from_usize_truncate(self.addr)
@@ -217,12 +226,17 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Try to create an address from a physical page number and,
+    /// optionally, an offset into the page. This function will return
+    /// [`None`] if the address is outside of the [`Mapping`]'s range.
     pub fn try_from_components(ppn: Ppn, pgoff: Option<PgOff>) -> Option<Self> {
         let ppn = ppn.into_usize() << 12;
         let pgoff = pgoff.unwrap_or_default().into_usize();
         Self::try_from_usize(ppn | pgoff)
     }
 
+    /// Cast this [`Physical`] address into an identity-mapped
+    /// address.
     #[inline]
     pub fn into_identity(self) -> Physical<T, Identity, Mut> {
         Physical {
@@ -231,6 +245,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Cast this [`Physical`] address into a mutable address.
     #[inline]
     pub fn into_mut(self) -> Physical<T, Map, super::Mut> {
         Physical {
@@ -239,6 +254,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
         }
     }
 
+    /// Cast this [`Physical`] address into a constant address.
     #[inline]
     pub fn into_const(self) -> Physical<T, Map, super::Const> {
         Physical {
@@ -262,10 +278,13 @@ pub struct Ppn(usize);
 const PPN_MASK: usize = 0x0FFF_FFFF_FFFF;
 
 impl Ppn {
+    /// Convert a usize into a [`Ppn`], truncating extraneous bits as
+    /// necessary.
     pub const fn from_usize_truncate(ppn: usize) -> Self {
         Self(ppn & PPN_MASK)
     }
 
+    /// Convert a [`Ppn`] into a [`usize`].
     pub fn into_usize(self) -> usize {
         self.0
     }

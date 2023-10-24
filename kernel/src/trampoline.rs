@@ -1,6 +1,8 @@
 use core::arch::global_asm;
 
-use crate::{symbol, units::StorageUnits};
+use rille::units::StorageUnits;
+
+use crate::symbol;
 
 global_asm!(
     "

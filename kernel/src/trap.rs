@@ -2,8 +2,9 @@ use core::{arch::global_asm, mem};
 
 use alloc::boxed::Box;
 
+use rille::{addr::VirtualConst, units::StorageUnits};
+
 use crate::{
-    addr::VirtualConst,
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
     hart_local::LOCAL_HART,
     paging::Satp,
@@ -13,7 +14,6 @@ use crate::{
     sync::once_cell::OnceCell,
     trampoline::{self, trampoline},
     uart,
-    units::StorageUnits,
 };
 
 pub struct Irqs {

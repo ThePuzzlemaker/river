@@ -31,14 +31,17 @@ impl Scheduler {
     ///
     /// # Safety
     ///
-    /// This function must be run only ONCE on the current hart. To switch
-    /// to the scheduler kernel thread, use [`goto_scheduler`] or [`proc_yield`].
+    /// This function must be run only ONCE on the current hart. To
+    /// switch to the scheduler kernel thread, use
+    /// [`ProcToken::yield_to_scheduler`][1].
     ///
     /// Additionally, process contexts must be valid.
     ///
     /// # Panics
     ///
     /// This function will panic if the scheduler is not initialized.
+    ///
+    /// [1]: crate::proc::ProcToken::yield_to_scheduler
     pub unsafe fn start() -> ! {
         let hartid = LOCAL_HART.with(|hart| {
             *hart.proc.borrow_mut() = None;

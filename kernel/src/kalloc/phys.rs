@@ -1,7 +1,8 @@
 use core::{fmt, mem};
 
+use rille::addr::{DirectMapped, Physical, PhysicalMut};
+
 use crate::{
-    addr::{DirectMapped, Physical, PhysicalMut},
     paging,
     sync::spin::{SpinMutex, SpinMutexGuard},
     util,

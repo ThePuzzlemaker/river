@@ -1,21 +1,35 @@
-use core::{
-    fmt,
-    ops::Range,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{fmt, ops::Range};
 
-use crate::symbol::{kernel_end, kernel_start};
-use crate::units::StorageUnits;
+#[cfg(feature = "kernel")]
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(feature = "kernel")]
+use crate::{
+    symbol::{kernel_end, kernel_start},
+    units::StorageUnits,
+};
 
 use super::{Mutability, Physical, Virtual};
 
+/// The offset of kernel data in virtual memory.
+#[cfg(any(doc, feature = "kernel"))]
 pub const KERNEL_OFFSET: usize = 0xFFFF_FFD0_0000_0000;
+/// The offset of direct-mapped memory after paging has been enabled.
+#[cfg(any(doc, feature = "kernel"))]
 pub const ACTUAL_PHYSICAL_OFFSET: usize = 0xFFFF_FFC0_0000_0000;
+/// The offset of the kernel in physical memory.
+#[cfg(any(doc, feature = "kernel"))]
 pub const KERNEL_PHYS_OFFSET: usize = 0x8020_0000;
 
 #[doc(hidden)]
+#[cfg(any(doc, feature = "kernel"))]
 pub static PHYSICAL_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
+/// This returns the "current" offset of direct-mapped physical
+/// memory, used for some early-boot stuff. I honestly don't remember
+/// why I did this and I can't be bothered to change it since I don't
+/// want to deal with pre-paging debugging.
+#[cfg(any(doc, feature = "kernel"))]
 fn physical_offset() -> usize {
     PHYSICAL_OFFSET.load(Ordering::Relaxed)
 }
@@ -37,6 +51,7 @@ fn physical_offset() -> usize {
 /// invalidated** once paging is enabled. Instead, if you must store a pointer
 /// across the paging boundary, store it as a [`DirectMapped`] [`Physical`]
 /// pointer and convert when accessing it.
+#[cfg(any(doc, feature = "kernel"))]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DirectMapped;
 
@@ -45,6 +60,7 @@ pub struct DirectMapped;
 /// different parts of the kernel have different privileges (e.g. `.text` has
 /// execute permissions, but `.data` does not). If you need to store a code
 /// address or a pointer to a static, use this mapping type.
+#[cfg(any(doc, feature = "kernel"))]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Kernel;
 
@@ -55,7 +71,8 @@ pub struct Kernel;
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Identity;
 
-pub trait Mapping: super::_private::Sealed + Default + fmt::Debug
+/// A definition of an invertible mapping over address spaces.
+pub trait Mapping: Default + fmt::Debug
 where
     Self: Sized,
 {
@@ -101,6 +118,7 @@ where
     ) -> Physical<T, Self, M>;
 }
 
+#[cfg(any(doc, feature = "kernel"))]
 impl Mapping for DirectMapped {
     fn vaddr_space() -> Range<usize> {
         let poff = physical_offset();
@@ -152,6 +170,7 @@ impl Mapping for DirectMapped {
     }
 }
 
+#[cfg(any(doc, feature = "kernel"))]
 impl Mapping for Kernel {
     fn vaddr_space() -> Range<usize> {
         let kernel_size = kernel_end().into_usize() - kernel_start().into_usize() + 4.kib();

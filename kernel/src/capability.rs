@@ -1,11 +1,8 @@
 use core::marker::PhantomData;
 
-use crate::{
-    addr::{DirectMapped, VirtualMut},
-    proc::Context,
-    sync::spin::SpinMutex,
-    trampoline::Trapframe,
-};
+use rille::addr::{DirectMapped, VirtualMut};
+
+use crate::{proc::Context, sync::spin::SpinMutex, trampoline::Trapframe};
 
 pub struct Captbl {
     radix: usize,

@@ -57,12 +57,15 @@ use core::{
 
 use alloc::slice;
 
-use crate::{
+use rille::{
     addr::{Identity, Virtual, VirtualMut},
+    units::StorageUnits,
+};
+
+use crate::{
     kalloc::phys::{self, PMAlloc},
     paging::{root_page_table, PageTableFlags},
     sync::spin::SpinMutex,
-    units::StorageUnits,
 };
 
 #[derive(Debug)]
@@ -81,7 +84,7 @@ impl LinkedListAlloc {
             inner: SpinMutex::new(LinkedListAllocInner {
                 init: false,
                 mapped_size: 0,
-                base: VirtualMut::NULL,
+                base: VirtualMut::null(),
                 unmanaged_ptr: ptr::null_mut(),
                 free_list: ptr::null_mut(),
             }),

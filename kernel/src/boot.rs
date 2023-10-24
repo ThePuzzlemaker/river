@@ -16,18 +16,21 @@ use core::{
 
 use fdt::Fdt;
 
-use crate::{
+use rille::{
     addr::{
         DirectMapped, Kernel, PhysicalConst, PhysicalMut, VirtualConst, ACTUAL_PHYSICAL_OFFSET,
         PHYSICAL_OFFSET,
     },
+    units::StorageUnits,
+};
+
+use crate::{
     asm::{self, hartid, tp},
     hart_local,
     kalloc::phys::PMAlloc,
     paging::{PageTable, PageTableFlags, RawSatp, Satp},
     symbol,
     uart::UART,
-    units::StorageUnits,
     util::round_up_pow2,
 };
 

@@ -21,10 +21,11 @@ use super::{Identity, Mapping, Mutability, PgOff, Physical, PGOFF_MASK};
 /// |    9    |    9    |    9    |     12     | bit size
 /// ```
 ///
-/// Each "VPN" is a virtual page number--a 9-bit index (i.e. `0` to `511`)
-/// index into a [`paging::PageTable`](crate::paging::PageTable) tree, where
-/// level 2 is the root page table, level 1 is the next level, and level 0 is
-/// the final level.
+/// Each "VPN" is a virtual page number--a 9-bit index (i.e. `0` to
+/// `511`) index into a
+/// [`PageTable`](crate::capability::paging::PageTable) tree, where
+/// level 2 is the root page table, level 1 is the next level, and
+/// level 0 is the final level.
 ///
 /// The "page offset" is the remaining 12 bits, indexing into each 4 KiB
 /// (`4096` bytes) page.
@@ -45,10 +46,15 @@ pub struct Virtual<T, Map: Mapping, Mut: Mutability<T>> {
 }
 
 impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
-    pub const NULL: Self = Self {
-        addr: 0,
-        phantom: PhantomData,
-    };
+    /// Create a null [`Virtual`] address.
+    #[inline]
+    #[must_use]
+    pub const fn null() -> Self {
+        Self {
+            addr: 0,
+            phantom: PhantomData,
+        }
+    }
 
     /// Create a [`Virtual`] address from a [`usize`].
     ///
@@ -121,11 +127,17 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    /// Convert a [`Virtual`] address into a [`usize`].
     #[inline(always)]
     pub fn into_usize(self) -> usize {
         self.addr
     }
 
+    /// Get the physical page numbers associated with this [`Virtual`]
+    /// address. Note that these are in the order defined by the spec,
+    /// i.e. the 0th is most significant, and the 2nd is least
+    /// significant.
+    // TODO: make this use Vpns
     pub fn vpns(self) -> [Vpn; 3] {
         // Remove the page offset by shifting 12 bits out.
         let addr_no_pgoff = self.addr >> 12;
@@ -154,6 +166,9 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    /// Create an address from virtual page numbers, and optionally,
+    /// an offset into the page. This function will return [`None`] if
+    /// the resulting address is outside of the [`Mapping`]'s range.
     pub fn try_from_components(vpns: [Vpn; 3], pgoff: Option<PgOff>) -> Option<Self> {
         let [vpn_0, vpn_1, vpn_2] = vpns;
         let vpn_2 = vpn_2.into_usize() << (9 * 2);
@@ -175,26 +190,32 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         unsafe { Self::from_usize_unchecked(self.into_usize() & !PGOFF_MASK) }
     }
 
+    /// Returns the page offset of the address.
     #[inline]
     pub fn page_offset(self) -> PgOff {
         PgOff::from_usize_truncate(self.addr)
     }
 
+    /// Convert a [`Virtual`] address into a [`*const T`].
     #[inline]
     pub fn into_ptr(self) -> *const T {
         self.addr as *const _
     }
 
+    /// Convert a [`Virtual`] address into a [`*mut T`].
     #[inline]
     pub const fn into_ptr_mut(self) -> *mut T {
         self.addr as *mut _
     }
 
+    /// Returns true if the address is page-aligned, i.e. if the page
+    /// offset is 0.
     #[inline]
     pub fn is_page_aligned(self) -> bool {
         self.page_offset().into_usize() == 0
     }
 
+    /// Cast a [`Virtual`] address to another type.
     #[inline]
     pub fn cast<U>(self) -> Virtual<U, Map, Mut>
     where
@@ -206,6 +227,8 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    /// Cast this [`Virtual`] address into an [`Identity`]-mapped
+    /// address.
     #[inline]
     pub fn into_identity(self) -> Virtual<T, Identity, Mut> {
         Virtual {
@@ -233,10 +256,14 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    /// Try to convert a virtual address into a physical address,
+    /// returning [`None`] if the address is outside of the
+    /// [`Mapping`]'s range.
     pub fn try_into_phys(self) -> Option<Physical<T, Map, Mut>> {
         Map::virt2phys(self)
     }
 
+    /// Convert this [`Virtual`] address into a constant address.
     #[inline]
     pub fn into_const(self) -> Virtual<T, Map, super::Const> {
         Virtual {
@@ -245,6 +272,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    /// Convert this [`Virtual`] address into a mutable address.
     #[inline]
     pub fn into_mut(self) -> Virtual<T, Map, super::Mut> {
         Virtual {
@@ -269,6 +297,8 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Virtual<T, Map, Mut> {
         }
     }
 
+    /// Increment an address `by` bytes, returning [`None`] if the
+    /// resulting address is outside of the [`Mapping`]'s range.
     pub fn checked_add(self, by: usize) -> Option<Self> {
         let vaddr = self.into_usize();
         let vaddr = vaddr.checked_add(by)?;
@@ -315,14 +345,18 @@ pub struct Vpn(u16);
 const VPN_MASK: usize = 0b1_1111_1111;
 
 impl Vpn {
+    /// Convert a [`usize`] into a `Vpn`, truncating any extraneous
+    /// bits as necessary.
     pub fn from_usize_truncate(vpn: usize) -> Self {
         Self((vpn & VPN_MASK) as u16)
     }
 
+    /// Convert a Vpn into a [`usize`].
     pub fn into_usize(self) -> usize {
         self.0 as usize
     }
 
+    /// Convert a Vpn into a [`u16`].
     pub fn into_u16(self) -> u16 {
         self.0
     }
@@ -340,6 +374,10 @@ impl From<u16> for Vpn {
     }
 }
 
+/// A collection of virtual page numbers ([`Vpn`]s) that fully define
+/// the virtual address of some page in memory. Note that these are in
+/// the order defined in the spec, meaning that the 0th [`Vpn`] is
+/// most significant, and the 2nd [`Vpn`] is the least significant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Vpns(pub [Vpn; 3]);

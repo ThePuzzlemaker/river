@@ -7,8 +7,9 @@ use core::{
 
 use alloc::sync::Arc;
 
+use rille::addr::{Kernel, VirtualConst, KERNEL_PHYS_OFFSET};
+
 use crate::{
-    addr::{Kernel, VirtualConst, KERNEL_PHYS_OFFSET},
     asm::{self, intr_off, intr_on},
     kalloc::phys::{self, PMAlloc},
     paging,

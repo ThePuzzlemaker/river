@@ -27,7 +27,6 @@
 
 extern crate alloc;
 
-pub mod addr;
 pub mod asm;
 pub mod boot;
 pub mod capability;
@@ -43,7 +42,6 @@ pub mod sync;
 pub mod trampoline;
 pub mod trap;
 pub mod uart;
-pub mod units;
 pub mod util;
 
 // Make sure the entry point is linked in
@@ -58,15 +56,17 @@ use core::{
     panic::PanicInfo,
 };
 
-use addr::{Physical, Virtual};
 use alloc::{boxed::Box, collections::BTreeMap, slice, string::String};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
+use rille::{
+    addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
+    units::StorageUnits,
+};
 use uart::UART;
 
 use crate::{
-    addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst},
     boot::HartBootData,
     elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
@@ -81,7 +81,6 @@ use crate::{
     sync::spin::SpinMutex,
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
-    units::StorageUnits,
 };
 
 #[global_allocator]
@@ -89,7 +88,7 @@ static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
 
 // It's unlikely the kernel itself is 64GiB in size, so we use this space.
 pub const KHEAP_VMEM_OFFSET: usize = 0xFFFF_FFE0_0000_0000;
-pub const KHEAP_VMEM_SIZE: usize = 64 * units::GIB;
+pub const KHEAP_VMEM_SIZE: usize = 64 * rille::units::GIB;
 
 global_asm!(
     "
