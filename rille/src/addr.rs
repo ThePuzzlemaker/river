@@ -44,30 +44,27 @@ pub struct Mut;
 
 /// Trait for type tags for pointer mutability. You should not need to
 /// worry about using this, unless you're doing weird type stuff.
-pub trait Mutability<T>: _private::Sealed + Default + fmt::Debug {
+pub trait Mutability: _private::Sealed + Default + fmt::Debug {
     /// What type of pointer is T, with this mutability?
-    // TODO: I could probably convert this to GATs now...
-    type RawPointer: fmt::Pointer + Copy + Clone;
+    type RawPointer<T>: fmt::Pointer + Copy + Clone;
 
-    /// Convert a value of [`Self::RawPointer`] into a `usize`.
-    fn into_usize(ptr: Self::RawPointer) -> usize;
+    /// Convert [`Self::RawPointer`] to a [`usize`].
+    fn into_usize<T>(x: Self::RawPointer<T>) -> usize;
 }
 
-impl<T> Mutability<T> for Const {
-    type RawPointer = *const T;
+impl Mutability for Const {
+    type RawPointer<T> = *const T;
 
-    #[inline(always)]
-    fn into_usize(ptr: Self::RawPointer) -> usize {
-        ptr as usize
+    fn into_usize<T>(x: Self::RawPointer<T>) -> usize {
+        x.cast::<u8>() as usize
     }
 }
 
-impl<T> Mutability<T> for Mut {
-    type RawPointer = *mut T;
+impl Mutability for Mut {
+    type RawPointer<T> = *mut T;
 
-    #[inline(always)]
-    fn into_usize(ptr: Self::RawPointer) -> usize {
-        ptr as usize
+    fn into_usize<T>(x: Self::RawPointer<T>) -> usize {
+        x.cast::<u8>() as usize
     }
 }
 

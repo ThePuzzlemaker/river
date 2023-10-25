@@ -30,12 +30,12 @@ use super::{Identity, Mapping, Mutability, PgOff, Virtual};
 ///  [the RISCV privileged ISA spec](https://github.com/riscv/riscv-isa-manual/releases/download/draft-20220604-4a01cbb/riscv-privileged.pdf),
 ///  section 4.4
 #[repr(transparent)]
-pub struct Physical<T, Map: Mapping, Mut: Mutability<T>> {
+pub struct Physical<T, Map: Mapping, Mut: Mutability> {
     pub(super) addr: usize,
-    pub(super) phantom: PhantomData<(Map, Mut, Mut::RawPointer)>,
+    pub(super) phantom: PhantomData<(Map, Mut, Mut::RawPointer<T>)>,
 }
 
-impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
+impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     /// Create a [`Physical`] address from a [`usize`].
     ///
     /// # Panics
@@ -68,7 +68,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
 
     /// Create a [`Physical`] address from a pointer, checking whether it is in
     /// the correct address space.
-    pub fn try_from_ptr(ptr: Mut::RawPointer) -> Option<Self> {
+    pub fn try_from_ptr(ptr: Mut::RawPointer<T>) -> Option<Self> {
         let addr = Mut::into_usize(ptr);
         Self::try_from_usize(addr)
     }
@@ -80,7 +80,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     /// This function will panic if the address is not in the correct address
     /// space.
     #[track_caller]
-    pub fn from_ptr(ptr: Mut::RawPointer) -> Self {
+    pub fn from_ptr(ptr: Mut::RawPointer<T>) -> Self {
         match Self::try_from_ptr(ptr) {
             Some(paddr) => paddr,
             None => panic!(
@@ -131,10 +131,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
 
     /// Cast a [`Physical`] address into an address of a different type.
     #[inline(always)]
-    pub fn cast<U>(self) -> Physical<U, Map, Mut>
-    where
-        Mut: Mutability<U>,
-    {
+    pub fn cast<U>(self) -> Physical<U, Map, Mut> {
         Physical {
             addr: self.addr,
             phantom: PhantomData,
@@ -264,7 +261,7 @@ impl<T, Map: Mapping, Mut: Mutability<T>> Physical<T, Map, Mut> {
     }
 }
 
-impl<T, Map: Mapping, Mut: Mutability<T>> fmt::Pointer for Physical<T, Map, Mut> {
+impl<T, Map: Mapping, Mut: Mutability> fmt::Pointer for Physical<T, Map, Mut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#p}", self.addr as *mut u8)
     }
