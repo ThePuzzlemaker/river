@@ -35,4 +35,5 @@
 pub mod addr;
 pub mod capability;
 pub mod symbol;
+pub mod syscalls;
 pub mod units;

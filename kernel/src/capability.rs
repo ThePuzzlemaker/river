@@ -1,131 +1,96 @@
-use core::marker::PhantomData;
+use bitfield::bitfield;
+use rille::capability::CapabilityType;
 
-use rille::addr::{DirectMapped, VirtualMut};
-
-use crate::{proc::Context, sync::spin::SpinMutex, trampoline::Trapframe};
-
-pub struct Captbl {
-    radix: usize,
-    data: *mut Capability,
-    _phantom: PhantomData<Capability>,
-}
-
-pub enum Capability {
-    Null,
-    Captbl(*mut Captbl),
-    Thread(*mut Thread),
-    PgTbl(*mut PgTbl),
-    Untyped(Untyped),
-}
-
-pub enum CapabilityType {
-    Captbl,
-    Thread,
-    PgTbl,
-    Untyped,
-}
-
-impl Default for Capability {
-    fn default() -> Self {
-        Self::Null
-    }
-}
+use rille::addr::{DirectMapped, Ppn, VirtualMut, Vpns};
 
 #[repr(C)]
-pub struct Thread {
-    trapframe: Trapframe,
-    captbl: *mut Captbl,
-    vspace: *mut PgTbl,
-    kernel_stack: VirtualMut<u8, DirectMapped>,
-    context: SpinMutex<Context>,
+#[derive(Copy, Clone)]
+pub union CapabilitySlot {
+    empty: EmptySlot,
+    captbl: CaptblSlot,
+    untyped: UntypedSlot,
+    pgtbl: PgTblSlot,
+    page: PageSlot,
 }
 
-pub struct PgTbl {}
-
-pub struct Untyped {
-    len: usize,
-    next: usize,
-    data: *mut u8,
+bitfield! {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    pub struct EmptySlot(u128);
+    pub u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
 }
 
-impl Untyped {
-    #[must_use]
-    pub fn retype_untyped(&mut self, size: usize) -> Untyped {
-        assert!(
-            size.is_power_of_two(),
-            "Untyped::retype_untyped: size must be a power of two"
-        );
-
-        let unaligned_offset = self.next % size;
-        let until_next_align = size - unaligned_offset;
-        let new_next = self.next + until_next_align;
-        debug_assert_eq!(new_next % size, 0);
-
-        assert!(
-            self.len - self.next >= new_next,
-            "Untyped::retype_untyped: not enough space"
-        );
-
-        self.next = new_next + size;
-
-        Untyped {
-            len: size,
-            next: new_next,
-            data: unsafe { self.data.add(new_next) },
-        }
+impl Default for EmptySlot {
+    fn default() -> Self {
+        let mut x = Self(0);
+        x.set_cap_type(CapabilityType::Empty);
+        x
     }
-    // pub fn retype(
-    //     &mut self,
-    //     ty: CapabilityType,
-    //     size: usize,
-    //     offset: usize,
-    //     num: usize,
-    // ) {
-    //     match ty {
-    //         CapabilityType::Untyped => {
-    //             todo!()
-    //         }
-    //         _ => todo!(),
-    //     }
-    // }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct Captr(u64);
+bitfield! {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    pub struct PageSlot(u128);
+    pub u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
+    pub u64, from into Ppn, phys_addr, set_phys_addr: 48, 5;
+    pub u8, size_bits, set_size_bits: 53, 49;
+}
 
-impl Captbl {
-    #[inline(always)]
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        1 << self.radix
+impl Default for PageSlot {
+    fn default() -> Self {
+        let mut x = Self(0);
+        x.set_cap_type(CapabilityType::Page);
+        x
     }
+}
 
-    pub fn get_mut(&mut self, index: usize) -> &mut Capability {
-        assert!(index < self.len());
-        unsafe { &mut *self.data.add(index) }
+bitfield! {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    pub struct PgTblSlot(u128);
+    pub u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
+    pub u32, from into Vpns, virt_addr, set_virt_addr: 31, 5;
+}
+
+impl Default for PgTblSlot {
+    fn default() -> Self {
+        let mut x = Self(0);
+        x.set_cap_type(CapabilityType::PgTbl);
+        x
     }
+}
 
-    pub fn get(&self, index: usize) -> &Capability {
-        assert!(index < self.len());
-        unsafe { &*self.data.add(index) }
+bitfield! {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    pub struct CaptblSlot(u128);
+    pub u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
+    pub u64, from into VirtualMut<[u8; 32], DirectMapped>, virt_addr, set_virt_addr: 43, 5;
+    pub u8, size_bits, set_size_bits: 48, 44;
+}
+
+impl Default for CaptblSlot {
+    fn default() -> Self {
+        let mut x = Self(0);
+        x.set_cap_type(CapabilityType::Captbl);
+        x
     }
+}
 
-    pub unsafe fn walk_mut(&mut self, captr: Captr, depth_limit: u8) -> &mut Capability {
-        let captr = captr.0;
-        let mut captbl: &mut Self = self;
-        let radix = captbl.radix;
-        let mut bits_left = depth_limit;
-        loop {
-            let current_idx = captr >> (64 - radix);
-            let ptr = unsafe { captbl.data.add(current_idx as usize) };
-            match unsafe { &mut *ptr } {
-                Capability::Captbl(tbl) if bits_left > 0 => {
-                    captbl = unsafe { &mut **tbl };
-                }
-                cap => return cap,
-            }
-            bits_left -= radix as u8;
-        }
+bitfield! {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    pub struct UntypedSlot(u128);
+    pub u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
+    pub u64, from into VirtualMut<u8, DirectMapped>, base_virt_addr, set_base_virt_addr: 43, 5;
+    pub u64, from into VirtualMut<u8, DirectMapped>, free_virt_addr, set_free_virt_addr: 82, 44;
+}
+
+impl Default for UntypedSlot {
+    fn default() -> Self {
+        let mut x = Self(0);
+        x.set_cap_type(CapabilityType::Untyped);
+        x
     }
 }

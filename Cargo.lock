@@ -87,6 +87,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitfield"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -400,6 +406,7 @@ dependencies = [
 name = "rille"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "num_enum",
 ]
 
@@ -407,6 +414,7 @@ dependencies = [
 name = "river"
 version = "0.1.0"
 dependencies = [
+ "bitfield",
  "bitflags",
  "cc",
  "fdt",
