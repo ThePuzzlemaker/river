@@ -78,7 +78,7 @@ use crate::{
         Proc, ProcState, Scheduler, SchedulerInner,
     },
     symbol::fn_user_code_woo,
-    sync::spin::SpinMutex,
+    sync::SpinMutex,
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
 };

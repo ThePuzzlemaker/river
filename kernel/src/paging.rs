@@ -21,8 +21,7 @@ use rille::{
 use crate::{
     asm::{self, get_satp},
     kalloc::phys::PMAlloc,
-    sync::once_cell::OnceCell,
-    sync::spin::SpinMutex,
+    sync::{OnceCell, SpinMutex},
 };
 
 static ROOT_PAGE_TABLE: OnceCell<SpinMutex<PageTable>> = OnceCell::new();

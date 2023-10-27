@@ -11,7 +11,7 @@ use crate::{
     plic::PLIC,
     println,
     proc::{ProcState, Scheduler},
-    sync::once_cell::OnceCell,
+    sync::OnceCell,
     trampoline::{self, trampoline},
     uart,
 };

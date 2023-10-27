@@ -15,7 +15,7 @@ use crate::{
     paging,
     proc::{Context, Proc},
     symbol::{self, tdata_end, tdata_start},
-    sync::spin::SpinMutex,
+    sync::SpinMutex,
 };
 
 #[macro_export]

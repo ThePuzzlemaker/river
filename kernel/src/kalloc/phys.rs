@@ -4,7 +4,7 @@ use rille::addr::{DirectMapped, Physical, PhysicalMut};
 
 use crate::{
     paging,
-    sync::spin::{SpinMutex, SpinMutexGuard},
+    sync::{SpinMutex, SpinMutexGuard},
     util,
 };
 

@@ -16,7 +16,7 @@ use crate::{
     kalloc::phys::{self, PMAlloc},
     paging::PageTableFlags,
     symbol,
-    sync::spin::SpinMutex,
+    sync::SpinMutex,
     trampoline::Trapframe,
     trap::user_trap_ret,
 };

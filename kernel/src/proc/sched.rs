@@ -3,7 +3,11 @@ use alloc::{
     sync::Arc,
 };
 
-use crate::{asm, hart_local::LOCAL_HART, sync::once_cell::OnceCell, sync::spin::SpinMutex};
+use crate::{
+    asm,
+    hart_local::LOCAL_HART,
+    sync::{OnceCell, SpinMutex},
+};
 
 use super::{Context, Proc, ProcState};
 

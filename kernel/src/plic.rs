@@ -1,6 +1,6 @@
 use core::ptr;
 
-use crate::{asm, sync::spin::SpinMutex};
+use crate::{asm, sync::SpinMutex};
 
 pub struct Plic {
     inner: SpinMutex<PlicInner>,

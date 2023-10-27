@@ -65,7 +65,7 @@ use rille::{
 use crate::{
     kalloc::phys::{self, PMAlloc},
     paging::{root_page_table, PageTableFlags},
-    sync::spin::SpinMutex,
+    sync::SpinMutex,
 };
 
 #[derive(Debug)]
