@@ -1,9 +1,9 @@
 use core::{fmt, ops::Range};
 
-#[cfg(feature = "kernel")]
+#[cfg(any(doc, feature = "kernel"))]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "kernel")]
+#[cfg(any(doc, feature = "kernel"))]
 use crate::{
     symbol::{kernel_end, kernel_start},
     units::StorageUnits,

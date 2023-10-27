@@ -57,13 +57,13 @@ pub type PgTblCaptr<L> = Captr<PageTable<L>>;
 /// page/page table corresponds to.
 ///
 /// On RISC-V, with the Sv39 paging strategy, there are three levels:
-/// - [`BasePage`]: Level 0, 4KiB (`2 << 12` bytes) in size
-/// - [`MegaPage`]: Level 1, 2MiB (`2 << 21` bytes) in size
-/// - [`GigaPage`]: Level 2, 1GiB (`2 << 30` bytes) in size
+/// - [`BasePage`]: Level 0, 4KiB (`1 << 12` bytes) in size
+/// - [`MegaPage`]: Level 1, 2MiB (`1 << 21` bytes) in size
+/// - [`GigaPage`]: Level 2, 1GiB (`1 << 30` bytes) in size
 ///
 /// The paging level determines the smallest unit of memory that a
 /// given page table can map. Each level can address a maximum of 512
-/// (`2 << 9`) pages.
+/// (`1 << 9`) pages.
 ///
 /// Note that the upper half of memory (`0xFFFF_FFC0_0000_0000` to
 /// `0xFFFF_FFFF_FFFF_FFFF`, inclusive)[^1] is reserved for kernel
@@ -88,7 +88,7 @@ pub trait PagingLevel: Copy + Clone + Debug + super::private::Sealed {
     const PAGE_SIZE_LOG2: usize;
 }
 
-/// Gigapages are 1GiB (`2 << 30` bytes) in size. This is the base
+/// Gigapages are 1GiB (`1 << 30` bytes) in size. This is the base
 /// unit of the level 0 page table.
 #[derive(Copy, Clone, Debug)]
 pub struct GigaPage(#[doc(hidden)] Infallible);
@@ -96,7 +96,7 @@ impl PagingLevel for GigaPage {
     const PAGE_SIZE_LOG2: usize = MegaPage::PAGE_SIZE_LOG2 + 9;
 }
 
-/// Megapages are 2MiB (`2 << 21` bytes) in size. This is the base
+/// Megapages are 2MiB (`1 << 21` bytes) in size. This is the base
 /// unit of the level 1 page table.
 #[derive(Copy, Clone, Debug)]
 pub struct MegaPage(#[doc(hidden)] Infallible);
@@ -104,7 +104,7 @@ impl PagingLevel for MegaPage {
     const PAGE_SIZE_LOG2: usize = BasePage::PAGE_SIZE_LOG2 + 9;
 }
 
-/// Base pages are 4KiB (`2 << 12` bytes) in size. This is the base
+/// Base pages are 4KiB (`1 << 12` bytes) in size. This is the base
 /// unit of the level 2 page table.
 #[derive(Copy, Clone, Debug)]
 pub struct BasePage(#[doc(hidden)] Infallible);
