@@ -19,6 +19,14 @@ macro_rules! println {
     }}
 }
 
+#[macro_export]
+macro_rules! print {
+    ($fmt:literal$(, $($tt:tt)*)?) => {{
+	let mut uart = $crate::uart::UART.lock();
+        ::core::fmt::write(&mut *uart, ::core::format_args!($fmt$(, $($tt)*)?)).expect("UART write");
+    }}
+}
+
 pub struct Ns16650 {
     inner: SpinMutex<Ns16650Inner>,
 }
