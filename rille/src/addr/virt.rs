@@ -78,6 +78,7 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     /// Create a [`Virtual`] address from a [`usize`], checking whether it is in
     /// the correct address space.
     pub fn try_from_usize(addr: usize) -> Option<Self> {
+        let addr = canonicalize(addr);
         if !Map::vaddr_space().contains(&addr) {
             return None;
         }
@@ -417,10 +418,11 @@ impl From<u32> for Vpns {
 /// The top bit of a 39-bit address
 const TOP_BIT: usize = 1 << 38;
 
-/// Some implementations may require that the topmost bits of an address be
-/// equal, up to and including the topmost bit used by the paging algorithm.
-/// This function performs this transformation (sometimes called
-/// "canonical addresses")
+/// Some implementations may require that the topmost bits of an
+/// address be equal, up to and including the topmost bit used by the
+/// paging algorithm.  This function performs this transformation
+/// (sometimes called "canonical addresses")
+#[inline]
 fn canonicalize(mut addr: usize) -> usize {
     // is the top bit set?
     if addr & TOP_BIT != 0 {
@@ -430,3 +432,10 @@ fn canonicalize(mut addr: usize) -> usize {
 
     addr
 }
+
+// #[inline]
+// fn decanonicalize(addr: usize) -> usize {
+//     // clear bits 40 to 63 by shifting them out and back in (we're a
+//     // usize so there's no change we sign-extend here)
+//     (addr << (64 - 39)) >> (64 - 39)
+// }
