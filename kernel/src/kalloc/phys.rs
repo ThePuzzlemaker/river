@@ -138,6 +138,7 @@ impl PMAllocInner {
 
     fn set_above(&mut self, ix: usize) {
         let mut loop_ix = self.bitree.parent(ix);
+
         // Set the bit of all the orders above the provided order
         while let Some(ix) = loop_ix {
             // Break if the bit was already set
@@ -145,6 +146,22 @@ impl PMAllocInner {
                 break;
             }
             loop_ix = self.bitree.parent(ix);
+        }
+    }
+
+    fn set_below(&mut self, ix: usize, val: bool) {
+        // Set the bit of the left child and right child, then
+        // recurse. It's fine to recurse here as we will be at a max
+        // of TOTAL_MAX_ORDER, which is 36, and if we don't have
+        // enough stack on the kernel for a depth of 36, we have a
+        // bigger problem.
+        if let Some(left) = self.bitree.left_child(ix) {
+            self.bitree.set(left, val);
+            self.set_below(left, val);
+        }
+        if let Some(right) = self.bitree.right_child(ix) {
+            self.bitree.set(right, val);
+            self.set_below(right, val);
         }
     }
 
@@ -170,7 +187,13 @@ impl PMAllocInner {
             }
             // The bit was not already set, so we have our chunk.
             // We need to make sure the blocks above are split, iff necessary.
+            // The bit was not already set, so we have our chunk.  We
+            // need to make sure the blocks above are split, iff
+            // necessary.
             self.set_above(ix);
+            // We also need to make sure we mark the blocks below us
+            // as used.
+            self.set_below(ix, true);
 
             let alloc_off = self.bitree.alloc_off_of(ix).unwrap();
             let offset_addr = alloc_off * 4096 * (1 << order);
@@ -246,6 +269,9 @@ impl PMAllocInner {
             self.bitree.set(ix, false),
             "PMAlloc::deallocate: double free: chunk={chunk:?}, order={order:?}",
         );
+
+        // Set all blocks below us as unused.
+        self.set_below(ix, false);
 
         let mut loop_sibling = self.bitree.sibling(ix);
         while let Some(sibling) = loop_sibling {

@@ -81,6 +81,10 @@ impl PageTable {
         }
     }
 
+    pub fn as_raw(&self) -> &RawPageTable {
+        &*self.root
+    }
+
     pub fn as_physical(&mut self) -> PhysicalMut<RawPageTable, DirectMapped> {
         Virtual::from_ptr(core::ptr::addr_of_mut!(*self.root)).into_phys()
     }
@@ -320,6 +324,7 @@ pub struct PageTableEntry {
     pub flags: PageTableFlags,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PTEKind {
     Leaf,
     Branch(PhysicalMut<RawPageTable, DirectMapped>),
@@ -386,13 +391,13 @@ unsafe impl Allocator for PagingAllocator {
         let page = PMAlloc::get().allocate(0).ok_or(AllocError)?;
         let page = page.into_virt();
 
+        let ptr = ptr::slice_from_raw_parts_mut(page.into_ptr_mut().cast(), 4096);
+
         // SAFETY: The pointer is valid for 4096 bytes
-        Ok(unsafe {
-            NonNull::new_unchecked(ptr::slice_from_raw_parts_mut(
-                page.into_ptr_mut().cast(),
-                4096,
-            ))
-        })
+        unsafe { &mut *ptr }.fill(0);
+
+        // SAFETY: See above
+        Ok(unsafe { NonNull::new_unchecked(ptr) })
     }
 
     #[track_caller]
