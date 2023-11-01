@@ -1,19 +1,22 @@
-use core::{arch::global_asm, mem};
-
-use alloc::boxed::Box;
-
-use rille::{addr::VirtualConst, units::StorageUnits};
+use core::{arch::global_asm, mem, slice};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
+    capability::{captbl::Captbl, AnyCap, EmptySlot},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
-    println,
-    proc::{ProcState, Scheduler},
-    sync::OnceCell,
+    print, println,
+    proc::ProcState,
+    sync::{OnceCell, SpinRwLockReadGuard},
     trampoline::{self, trampoline},
     uart,
+};
+use rille::{
+    addr::{Virtual, VirtualConst},
+    capability::CapabilityType,
+    syscalls::SyscallNumber,
+    units::StorageUnits,
 };
 
 pub struct Irqs {
@@ -292,39 +295,139 @@ unsafe extern "C" fn user_trap() -> ! {
             // `ecall` instrs are 4 bytes, skip to the instruction after
             trapframe.user_epc += 4;
 
-            match trapframe.a0 {
-                0 => {
+            match trapframe.a0.into() {
+                SyscallNumber::DebugPrint => {
                     let str_ptr = trapframe.a1 as usize;
                     let str_len = trapframe.a2 as usize;
 
                     assert!(str_ptr + str_len < private.mem_size, "too long");
 
-                    let mut slice = Box::new_uninit_slice(str_len);
                     // SAFETY: All values are valid for u8 and process
                     // memory is zeroed and is thus never
                     // uninitialized.
-                    unsafe {
-                        private
-                            .mman
-                            .get_table()
-                            .copy_from_user(&mut slice, VirtualConst::from_usize(str_ptr))
+                    let slice = unsafe {
+                        slice::from_raw_parts(
+                            private
+                                .mman
+                                .get_table()
+                                .walk(Virtual::from(str_ptr))
+                                .unwrap()
+                                .0
+                                .into_virt()
+                                .into_ptr(),
+                            str_len,
+                        )
+                    };
+                    let s = core::str::from_utf8(slice).unwrap();
+                    print!("{}", s);
+
+                    trapframe.a0 = 0;
+                }
+                SyscallNumber::CopyDeep => {
+                    let from_tbl_ref = trapframe.a1 as usize;
+                    let from_tbl_index = trapframe.a2 as usize;
+                    let from_index = trapframe.a3 as usize;
+                    let into_tbl_ref = trapframe.a4 as usize;
+                    let into_tbl_index = trapframe.a5 as usize;
+                    let into_index = trapframe.a6 as usize;
+
+                    let root_hdr = &private.captbl;
+
+                    let from_tbl_index: Captbl = {
+                        let from_tbl_ref = if from_tbl_ref == 0 {
+                            root_hdr.clone()
+                        } else {
+                            let root_lock = root_hdr.read();
+                            root_lock
+                                .get::<Captbl>(from_tbl_ref)
+                                .map(Captbl::from)
+                                .unwrap()
+                        };
+                        let from_tbl_ref = from_tbl_ref.read();
+
+                        from_tbl_ref.get::<Captbl>(from_tbl_index).unwrap().into()
+                    };
+
+                    let from_tbl_index_lock = from_tbl_index.read();
+
+                    let into_tbl_index = {
+                        let into_tbl_ref = if into_tbl_ref == 0 {
+                            root_hdr.clone()
+                        } else {
+                            let root_lock = root_hdr.read();
+                            root_lock
+                                .get::<Captbl>(into_tbl_ref)
+                                .map(Captbl::from)
+                                .unwrap()
+                        };
+                        let into_tbl_ref = into_tbl_ref.read();
+
+                        into_tbl_ref.get::<Captbl>(into_tbl_index).unwrap().clone()
+                    };
+
+                    if from_tbl_index == into_tbl_index {
+                        let mut into_tbl_index = from_tbl_index_lock.upgrade();
+
+                        let (mut into_index, mut from_index) = into_tbl_index
+                            .get2_mut::<EmptySlot, AnyCap>(into_index, from_index)
                             .unwrap();
+
+                        let mut into_index = into_index.replace(AnyCap::from(&mut from_index));
+                        from_index.add_child(&mut into_index);
+                    } else {
+                        let mut from_tbl_index = from_tbl_index_lock.upgrade();
+                        let mut into_tbl_index = into_tbl_index.write();
+
+                        let mut into_index =
+                            into_tbl_index.get_mut::<EmptySlot>(into_index).unwrap();
+                        let mut from_index = from_tbl_index.get_mut::<AnyCap>(from_index).unwrap();
+
+                        let mut into_index = into_index.replace(AnyCap::from(&mut from_index));
+                        from_index.add_child(&mut into_index);
                     }
-                    // SAFETY: The above call fully initialize the slice.
-                    let slice = unsafe { slice.assume_init() };
-                    let s = core::str::from_utf8(&slice).unwrap();
-                    println!(
-                        "[{}] [info] from user proc {}: {:?}",
-                        hart.hartid.get(),
-                        proc.pid,
-                        s
-                    );
+
+                    trapframe.a0 = 0;
                 }
-                1 => {
-                    Scheduler::current_proc_wait();
-                    println!("Moving current process ({}) to the wait queue", proc.pid);
-                    token.yield_to_scheduler();
+                SyscallNumber::DebugCapSlot => {
+                    let tbl = trapframe.a1 as usize;
+                    let index = trapframe.a2 as usize;
+                    // SAFETY: By invariants.
+                    let root_hdr = &private.captbl;
+                    let root_lock = root_hdr.read();
+                    let tbl = if tbl == 0 {
+                        root_hdr.clone()
+                    } else {
+                        root_lock.get(tbl).unwrap().clone()
+                    };
+                    let tbl = tbl.read();
+
+                    let slot = tbl.get::<AnyCap>(index).unwrap();
+                    println!("{:#?}", slot);
+
+                    trapframe.a0 = 0;
                 }
+                SyscallNumber::DebugDumpRoot => {
+                    // SAFETY: By invariants.
+                    println!("{:#x?}", private.captbl);
+
+                    // let inner = private.captbl_ptr.as_virt_addr().cast::<u8>();
+                    // println!("size: {:?}", private.captbl_ptr.size_bytes());
+                    // let slice = unsafe {
+                    //     core::slice::from_raw_parts(
+                    //         inner.into_ptr(),
+                    //         private.captbl_ptr.size_bytes(),
+                    //     )
+                    // };
+                    // //println!("{:?}", slice);
+
+                    // println!(
+                    //     "run in qemu console: dump-guest-memory captbl.bin {:#x} {}",
+                    //     inner.into_phys().into_usize(),
+                    //     slice.len()
+                    // );
+                    trapframe.a0 = 0;
+                }
+                // dump-guest-memory captbl.bin 0x84402000
                 _ => todo!("invalid syscall number"),
             }
 

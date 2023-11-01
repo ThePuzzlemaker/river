@@ -1,9 +1,9 @@
 //! Low-level types and constants for syscalls in river.
 
-use num_enum::IntoPrimitive;
+use num_enum::{FromPrimitive, IntoPrimitive};
 
 /// Syscall numbers as provided to `ecall`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, IntoPrimitive)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, FromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum SyscallNumber {
     /// [`Captr::<Untyped>::retype_many`][crate::capability::Captr::<Untyped>::retype_many]
@@ -20,6 +20,15 @@ pub enum SyscallNumber {
     PageTableMap = 5,
     /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap`]
     PageTableUnmap = 6,
+    /// TODO
+    DebugCapSlot = 7,
+    /// TODO
+    DebugDumpRoot = 8,
+    /// TODO
+    DebugPrint = 9,
+    /// TODO
+    #[num_enum(default)]
+    Nop = u64::MAX,
 }
 
 macro_rules! impl_ecall {

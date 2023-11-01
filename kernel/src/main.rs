@@ -8,7 +8,8 @@
     int_roundings,
     ptr_as_uninit,
     core_intrinsics,
-    slice_ptr_get
+    slice_ptr_get,
+    get_many_mut
 )]
 #![no_std]
 #![no_main]
@@ -50,13 +51,14 @@ extern "C" {
 }
 
 use core::{
-    alloc::Layout,
+    alloc::{GlobalAlloc, Layout},
     arch::{asm, global_asm},
     cmp,
     panic::PanicInfo,
+    slice,
 };
 
-use alloc::{boxed::Box, collections::BTreeMap, slice, string::String};
+use alloc::{boxed::Box, collections::BTreeMap};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
@@ -68,6 +70,7 @@ use uart::UART;
 
 use crate::{
     boot::HartBootData,
+    capability::{captbl::Captbl, EmptySlot, Untyped},
     elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
     io_traits::{Cursor, Read, Seek, SeekFrom},
@@ -77,7 +80,6 @@ use crate::{
         mman::{RegionPurpose, RegionRequest},
         Proc, ProcState, Scheduler, SchedulerInner,
     },
-    symbol::fn_user_code_woo,
     sync::SpinMutex,
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
@@ -85,6 +87,21 @@ use crate::{
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
+//static HEAP_ALLOCATOR: NoAlloc = NoAlloc;
+
+struct NoAlloc;
+
+unsafe impl GlobalAlloc for NoAlloc {
+    #[track_caller]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unimplemented!()
+    }
+
+    #[track_caller]
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unimplemented!()
+    }
+}
 
 // It's unlikely the kernel itself is 64GiB in size, so we use this space.
 pub const KHEAP_VMEM_OFFSET: usize = 0xFFFF_FFE0_0000_0000;
@@ -214,7 +231,43 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    let mut proc = Proc::new(String::from("basic_elf"));
+    let captbl_mem = {
+        let mut pma = PMAlloc::get();
+        let page = pma
+            .allocate(kalloc::phys::what_order(1 << (16 + 6)))
+            .unwrap();
+        let page_virt = page.into_virt();
+        {
+            // SAFETY: PMAlloc guarantees this is safe
+            let slice =
+                unsafe { slice::from_raw_parts_mut(page_virt.into_ptr_mut(), 1 << (16 + 6)) };
+            slice.fill(0);
+        }
+        page_virt
+    };
+    println!("{:#p}", captbl_mem);
+    assert_eq!(captbl_mem.into_usize() & ((1 << 9) - 1), 0, "oops!");
+
+    let (ut_sz_log2, ut_mem) = {
+        let mut pma = PMAlloc::get();
+        let order = pma.num_free_pages().ilog2();
+        (order + 4096u64.ilog2(), pma.allocate(order).unwrap())
+    };
+    // SAFETY: This memory is valid.
+    let captbl = unsafe { Captbl::new(captbl_mem, 16) };
+
+    {
+        let mut lock = captbl.write();
+        let mut slot = lock.get_mut::<EmptySlot>(1).unwrap();
+        slot.replace(Captbl::clone(&captbl));
+        let mut slot = lock.get_mut::<EmptySlot>(4).unwrap();
+        // SAFETY: This memory is valid.
+        slot.replace(unsafe { Untyped::new(ut_mem, ut_sz_log2 as u8) });
+    }
+
+    println!("captbl: {:#x?}", captbl);
+
+    let mut proc = Proc::new("basic_elf", captbl);
     {
         let private = proc.private_mut();
         // TODO: what does xv6 even use this for
@@ -301,7 +354,9 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                     }
                     let n = cmp::min(4.kib() - offset_from_pg, len);
 
-                    let phys_addr = private.mman.get_table().walk(addr).unwrap().0;
+                    let table = private.mman.get_table();
+
+                    let phys_addr = table.walk(addr).unwrap().0;
                     let virt_addr = phys_addr.into_virt();
 
                     // SAFETY: This page was allocated by the
@@ -361,24 +416,24 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     //     );
     //     proc.set_state(ProcState::Runnable);
     // };
-    let mut proc2 = Proc::new(String::from("user_mode_woo2"));
-    #[allow(clippy::undocumented_unsafe_blocks)]
-    {
-        let private = proc2.private_mut();
-        private.mem_size = 4.kib();
-        let trapframe = unsafe { &mut *private.trapframe };
-        let trapframe = trapframe.write(Trapframe::default());
-        trapframe.user_epc = 0x00;
-        trapframe.sp = 4.kib();
-        private.mman.map_direct(
-            VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
-                .into_phys()
-                .into_identity(),
-            VirtualConst::from_usize(0),
-            PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
-        );
-        proc2.set_state(ProcState::Runnable);
-    }
+    // let mut proc2 = Proc::new(String::from("user_mode_woo2"));
+    // #[allow(clippy::undocumented_unsafe_blocks)]
+    // {
+    //     let private = proc2.private_mut();
+    //     private.mem_size = 4.kib();
+    //     let trapframe = unsafe { &mut *private.trapframe };
+    //     let trapframe = trapframe.write(Trapframe::default());
+    //     trapframe.user_epc = 0x00;
+    //     trapframe.sp = 4.kib();
+    //     private.mman.map_direct(
+    //         VirtualConst::<u8, Kernel>::from_usize(fn_user_code_woo().into_usize())
+    //             .into_phys()
+    //             .into_identity(),
+    //         VirtualConst::from_usize(0),
+    //         PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RX,
+    //     );
+    //     proc2.set_state(ProcState::Runnable);
+    // }
 
     LOCAL_HART.with(|hart| {
         //hart.push_off();
@@ -450,7 +505,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
         Scheduler::init(scheduler_map);
         Scheduler::enqueue(proc);
-        Scheduler::enqueue(proc2);
+        // Scheduler::enqueue(proc2);
         // hart.pop_off();
 
         let timebase_freq = fdt
@@ -497,20 +552,23 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     asm::intr_on();
 
     LOCAL_HART.with(|hart| {
-        let timebase_freq = fdt
+        let _timebase_freq = fdt
             .cpus()
             .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
             .expect("Could not find hart in FDT")
             .timebase_frequency() as u64;
 
-        // About 1/10 sec.
-        hart.timer_interval.set(timebase_freq / 10);
-        let interval = hart.timer_interval.get();
-        sbi::timer::set_timer(asm::read_time() + interval).unwrap();
+        // // About 1/10 sec.
+        // hart.timer_interval.set(timebase_freq / 10);
+        // let interval = hart.timer_interval.get();
+        // sbi::timer::set_timer(asm::read_time() + interval).unwrap();
     });
 
+    loop {
+        asm::nop();
+    }
     // SAFETY: The scheduler is only started once on the main hart.
-    unsafe { Scheduler::start() }
+    // unsafe { Scheduler::start() }
 }
 
 #[panic_handler]

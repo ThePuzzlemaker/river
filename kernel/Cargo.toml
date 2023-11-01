@@ -21,5 +21,9 @@ default-features = false
 path = "../rille"
 features = ["kernel"]
 
+[dependencies.itertools]
+version = "0.11.0"
+default-features = false
+
 [build-dependencies]
 cc = "1.0.73"

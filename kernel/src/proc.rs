@@ -12,6 +12,7 @@ use rille::{
 };
 
 use crate::{
+    capability::captbl::Captbl,
     hart_local::HartCtx,
     kalloc::phys::{self, PMAlloc},
     paging::PageTableFlags,
@@ -53,7 +54,8 @@ pub struct ProcPrivate {
     pub mem_size: usize,
     pub mman: UserMemoryManager,
     pub trapframe: *mut MaybeUninit<Trapframe>,
-    pub name: String,
+    pub name: &'static str,
+    pub captbl: Captbl,
 }
 
 static NEXTPID: AtomicUsize = AtomicUsize::new(0);
@@ -61,7 +63,7 @@ static NEXTPID: AtomicUsize = AtomicUsize::new(0);
 impl Proc {
     /// # Panics
     /// TODO
-    pub fn new(name: String) -> Proc {
+    pub fn new(name: &'static str, captbl: Captbl) -> Proc {
         let (kernel_stack, trapframe) = {
             let mut pma = PMAlloc::get();
             let kernel_stack = pma.allocate(phys::what_order(4.mib())).unwrap();
@@ -106,6 +108,7 @@ impl Proc {
                 mman,
                 trapframe: trapframe.into_virt().cast().into_ptr_mut(),
                 name,
+                captbl,
             }),
             context,
         }
