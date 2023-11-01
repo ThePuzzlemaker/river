@@ -24,6 +24,7 @@ pub use mappings::{
 };
 pub use mappings::{Identity, Mapping};
 pub use phys::{Physical, Ppn};
+pub use virt::{canonicalize, decanonicalize};
 pub use virt::{Virtual, Vpn, Vpns};
 
 /// A virtual `*const T`, with the given mapping.

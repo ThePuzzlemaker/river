@@ -423,7 +423,7 @@ const TOP_BIT: usize = 1 << 38;
 /// paging algorithm.  This function performs this transformation
 /// (sometimes called "canonical addresses")
 #[inline]
-fn canonicalize(mut addr: usize) -> usize {
+pub fn canonicalize(mut addr: usize) -> usize {
     // is the top bit set?
     if addr & TOP_BIT != 0 {
         // set topmost bits
@@ -433,9 +433,9 @@ fn canonicalize(mut addr: usize) -> usize {
     addr
 }
 
-// #[inline]
-// fn decanonicalize(addr: usize) -> usize {
-//     // clear bits 40 to 63 by shifting them out and back in (we're a
-//     // usize so there's no change we sign-extend here)
-//     (addr << (64 - 39)) >> (64 - 39)
-// }
+#[inline]
+pub fn decanonicalize(addr: usize) -> usize {
+    // clear bits 40 to 63 by shifting them out and back in (we're a
+    // usize so there's no change we sign-extend here)
+    (addr << (64 - 39)) >> (64 - 39)
+}
