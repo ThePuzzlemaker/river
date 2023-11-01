@@ -1,13 +1,11 @@
 use core::{
     cell::UnsafeCell,
-    hint,
+    fmt, hint,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::addr_of,
     sync::atomic::{AtomicU64, Ordering},
 };
-
-use alloc::fmt;
 
 use crate::{
     asm::{self, hartid},

@@ -208,8 +208,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     let mut cursor = Cursor::new(BASIC_ELF);
     let mut elf = Elf::parse_header(&mut cursor).unwrap();
-    elf.parse_sections(&mut cursor).unwrap();
-    elf.parse_segments(&mut cursor).unwrap();
+    // elf.parse_sections(&mut cursor).unwrap();
+    // elf.parse_segments(&mut cursor).unwrap();
 
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
@@ -241,7 +241,12 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .end
             .into_usize() as u64;
 
-        for seg in &elf.segments {
+        let mut cursor2 = Cursor::new(BASIC_ELF);
+        cursor2
+            .seek(SeekFrom::Start(cursor.seek(SeekFrom::Current(0)).unwrap()))
+            .unwrap();
+        for seg in elf.parse_segments(&mut cursor2).unwrap() {
+            let seg = seg.unwrap();
             if seg.seg_type == SegmentType::Load {
                 let start_addr = VirtualConst::<u8, Identity>::from_usize(seg.virt_addr);
                 let start_addr_pgalign = start_addr.page_align();

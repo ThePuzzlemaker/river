@@ -18,8 +18,6 @@
 //! module-level documentation.
 use core::mem;
 
-use alloc::vec;
-use alloc::vec::Vec;
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
@@ -38,8 +36,6 @@ pub const MACHINE_TYPE_RISCV: u16 = 243;
 pub struct Elf {
     pub filety: FileType,
     pub entry_addr: usize,
-    pub sections: Vec<Section>,
-    pub segments: Vec<Segment>,
     sec_hdr_offset: usize,
     sec_hdr_count: u16,
     sec_strtab_index: u16,
@@ -57,8 +53,6 @@ impl Elf {
         let mut elf = Self {
             filety: FileType::None,
             entry_addr: 0,
-            sections: vec![],
-            segments: vec![],
             sec_hdr_offset: 0,
             sec_hdr_count: 0,
             sec_strtab_index: 0,
@@ -109,17 +103,17 @@ impl Elf {
     /// # Errors
     ///
     /// TODO
-    pub fn parse_sections<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), ParseError> {
+    pub fn parse_sections<'r, R: Read + Seek>(
+        &mut self,
+        reader: &'r mut R,
+    ) -> Result<impl Iterator<Item = Result<Section, ParseError>> + 'r, ParseError> {
         reader
             .seek(SeekFrom::Start(self.sec_hdr_offset as u64))
             .map_err(|_| ParseError)?;
 
-        for _ in 0..self.sec_hdr_count {
-            let section = Section::parse(reader)?;
-            self.sections.push(section);
-        }
-
-        Ok(())
+        Ok((0..self.sec_hdr_count)
+            .into_iter()
+            .map(|_| Section::parse(reader)))
     }
 
     /// TODO
@@ -127,17 +121,17 @@ impl Elf {
     /// # Errors
     ///
     /// TODO
-    pub fn parse_segments<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), ParseError> {
+    pub fn parse_segments<'r, R: Read + Seek>(
+        &mut self,
+        reader: &'r mut R,
+    ) -> Result<impl Iterator<Item = Result<Segment, ParseError>> + 'r, ParseError> {
         reader
             .seek(SeekFrom::Start(self.prog_hdr_offset as u64))
             .map_err(|_| ParseError)?;
 
-        for _ in 0..self.prog_hdr_count {
-            let segment = Segment::parse(reader)?;
-            self.segments.push(segment);
-        }
-
-        Ok(())
+        Ok((0..self.prog_hdr_count)
+            .into_iter()
+            .map(|_| Segment::parse(reader)))
     }
 }
 

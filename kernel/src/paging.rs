@@ -1,13 +1,13 @@
 use core::{
     alloc::{AllocError, Allocator, Layout},
-    cmp,
+    cmp, fmt,
     intrinsics::likely,
     mem::MaybeUninit,
     ptr::{self, NonNull},
     slice,
 };
 
-use alloc::{boxed::Box, fmt};
+use alloc::boxed::Box;
 use bitflags::bitflags;
 
 use rille::{
@@ -82,7 +82,7 @@ impl PageTable {
     }
 
     pub fn as_raw(&self) -> &RawPageTable {
-        &*self.root
+        &self.root
     }
 
     pub fn as_physical(&mut self) -> PhysicalMut<RawPageTable, DirectMapped> {

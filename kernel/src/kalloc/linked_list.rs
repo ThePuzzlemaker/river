@@ -53,9 +53,8 @@ use core::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
     cmp, intrinsics, mem,
     ptr::{self, addr_of_mut, NonNull},
+    slice,
 };
-
-use alloc::slice;
 
 use rille::{
     addr::{Identity, Virtual, VirtualMut},
