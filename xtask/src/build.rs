@@ -222,7 +222,7 @@ impl BuildCtx {
             })
             .spawn()?;
 
-        let mut gdb_child = if opts.debugger {
+        let mut gdb_child = if opts.debugger && !opts.no_run_debugger {
             Some(
                 Command::new(opts.debugger_path)
                     .arg(&format!(
@@ -241,7 +241,7 @@ impl BuildCtx {
 		let code = status.code().unwrap_or_else(|| if status.success() { 0 } else { 1 });
 		println!(
 		    "QEMU exited with status: {code}{}.",
-		    if opts.debugger { ", now killing GDB" } else { "" }
+		    if opts.debugger && !opts.no_run_debugger { ", now killing GDB" } else { "" }
 		);
 		if let Some(mut gdb_child) = gdb_child {
 		    gdb_child.kill().await?;
@@ -287,6 +287,9 @@ pub struct RunOptions {
     /// Enable debugger
     #[clap(short, long, default_value_t = false)]
     debugger: bool,
+
+    #[clap(short('n'), long, default_value_t = false)]
+    no_run_debugger: bool,
 
     /// Set path to debugger
     #[clap(long, default_value = "riscv64-linux-gnu-gdb")]

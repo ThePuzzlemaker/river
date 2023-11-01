@@ -1,7 +1,11 @@
+#symbol-file target/riscv64gc-unknown-none-elf/debug/river
+add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/debug/userspace_testing
 # disable this if you'd like
 source ~/.gdbinit-gef.py
 pi reset_architecture("RISCV")
-target remote :1234
+# use this if not using gef
+#target remote :1234
+gef-remote --qemu-user localhost 1234
 
 define hook-stop
 # enable these if you'd like, I prefer gef
