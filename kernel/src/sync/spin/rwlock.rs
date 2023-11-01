@@ -1,13 +1,10 @@
 use core::{
     cell::UnsafeCell,
-    hint,
+    fmt, hint,
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    ptr::addr_of,
-    sync::atomic::{self, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
-
-use alloc::fmt;
 
 use crate::{
     asm::{self, hartid},
@@ -395,7 +392,50 @@ pub struct SpinRwLockReadGuard<'a, T> {
     _phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T> Deref for SpinRwLockReadGuard<'a, T> {
+impl<'a, T: 'a> SpinRwLockReadGuard<'a, T> {
+    pub fn map<U: ?Sized + 'a>(
+        self,
+        f: impl FnOnce(&T) -> &U,
+    ) -> MappedSpinRwLockReadGuard<'a, T, U> {
+        let mapped = f(&*self) as *const _;
+        MappedSpinRwLockReadGuard {
+            guard: self,
+            mapped,
+        }
+    }
+
+    /// Try to atomically upgrade this guard to a writable guard,
+    /// blocking until it can.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if it detects a deadlock.
+    pub fn upgrade(self) -> SpinRwLockWriteGuard<'a, T> {
+        // Interrupts are already disabled by way of holding this lock.
+        let hartid = hartid();
+
+        // Try to acquire-store the locked guard into the state, if
+        // there was only 1 reader (us). Spin if we can't.
+        if let Err(e) = self.rwlock.state.compare_exchange(
+            1,
+            u32::MAX as u64 + hartid,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            assert!(
+                e < u32::MAX as u64 || e != u32::MAX as u64 + hartid,
+                "SpinRwLockReadGuard::upgrade: deadlock detected"
+            );
+            hint::spin_loop();
+        }
+        SpinRwLockWriteGuard {
+            rwlock: self.rwlock,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, T: 'a> Deref for SpinRwLockReadGuard<'a, T> {
     type Target = T;
 
     fn deref(&'_ self) -> &'_ Self::Target {
@@ -406,7 +446,7 @@ impl<'a, T> Deref for SpinRwLockReadGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for SpinRwLockReadGuard<'a, T> {
+impl<'a, T: 'a> Drop for SpinRwLockReadGuard<'a, T> {
     fn drop(&mut self) {
         // Make sure, just in case, that interrupts are still off.
         asm::intr_off();
@@ -425,9 +465,57 @@ impl<'a, T> Drop for SpinRwLockReadGuard<'a, T> {
     }
 }
 
-impl<'a, T: fmt::Debug> fmt::Debug for SpinRwLockReadGuard<'a, T> {
+impl<'a, T: fmt::Debug + 'a> fmt::Debug for SpinRwLockReadGuard<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let v: &T = self;
+        v.fmt(f)
+    }
+}
+
+pub struct MappedSpinRwLockReadGuard<'a, T, U: ?Sized> {
+    guard: SpinRwLockReadGuard<'a, T>,
+    mapped: *const U,
+}
+
+impl<'a, T: 'a, U: ?Sized + 'a> MappedSpinRwLockReadGuard<'a, T, U> {
+    pub fn map<V: 'a>(self, f: impl FnOnce(&U) -> &V) -> MappedSpinRwLockReadGuard<'a, T, V> {
+        MappedSpinRwLockReadGuard {
+            guard: self.guard,
+            // SAFETY: By invariants
+            mapped: f(unsafe { &*self.mapped }) as *const _,
+        }
+    }
+
+    /// Try to atomically upgrade this guard to a writable guard,
+    /// blocking until it can.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if it detects a deadlock.
+    pub fn upgrade(self) -> MappedSpinRwLockWriteGuard<'a, T, U> {
+        let guard = self.guard.upgrade();
+        MappedSpinRwLockWriteGuard {
+            guard,
+            // This pointer is valid, as we have just upgraded the
+            // guard to mutable, and doing so will not allow the
+            // underlying data to be moved or invalidated.
+            mapped: self.mapped as *mut _,
+        }
+    }
+}
+
+impl<'a, T: 'a, U: ?Sized + 'a> Deref for MappedSpinRwLockReadGuard<'a, T, U> {
+    type Target = U;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: By invariants
+        unsafe { &*self.mapped }
+    }
+}
+
+impl<'a, T: 'a, U: ?Sized + fmt::Debug + 'a> fmt::Debug for MappedSpinRwLockReadGuard<'a, T, U> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v: &U = self;
         v.fmt(f)
     }
 }
@@ -437,7 +525,20 @@ pub struct SpinRwLockWriteGuard<'a, T> {
     _phantom: PhantomData<&'a mut T>,
 }
 
-impl<'a, T> Deref for SpinRwLockWriteGuard<'a, T> {
+impl<'a, T: 'a> SpinRwLockWriteGuard<'a, T> {
+    pub fn map<U: ?Sized + 'a>(
+        mut self,
+        f: impl FnOnce(&mut T) -> &mut U,
+    ) -> MappedSpinRwLockWriteGuard<'a, T, U> {
+        let mapped = f(&mut *self) as *mut _;
+        MappedSpinRwLockWriteGuard {
+            guard: self,
+            mapped,
+        }
+    }
+}
+
+impl<'a, T: 'a> Deref for SpinRwLockWriteGuard<'a, T> {
     type Target = T;
 
     fn deref(&'_ self) -> &'_ Self::Target {
@@ -447,7 +548,7 @@ impl<'a, T> Deref for SpinRwLockWriteGuard<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for SpinRwLockWriteGuard<'a, T> {
+impl<'a, T: 'a> DerefMut for SpinRwLockWriteGuard<'a, T> {
     fn deref_mut(&'_ mut self) -> &'_ mut Self::Target {
         // SAFETY: The data is valid due to our invariants.
         // Additionally, we can return a &'_ mut T as we have a &'_ mut Self.
@@ -455,7 +556,7 @@ impl<'a, T> DerefMut for SpinRwLockWriteGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for SpinRwLockWriteGuard<'a, T> {
+impl<'a, T: 'a> Drop for SpinRwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         // Make sure, just in case, that interrupts are still off.
         asm::intr_off();
@@ -474,9 +575,50 @@ impl<'a, T> Drop for SpinRwLockWriteGuard<'a, T> {
     }
 }
 
-impl<'a, T: fmt::Debug> fmt::Debug for SpinRwLockWriteGuard<'a, T> {
+impl<'a, T: fmt::Debug + 'a> fmt::Debug for SpinRwLockWriteGuard<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let v: &T = self;
+        v.fmt(f)
+    }
+}
+
+pub struct MappedSpinRwLockWriteGuard<'a, T, U: ?Sized> {
+    guard: SpinRwLockWriteGuard<'a, T>,
+    mapped: *mut U,
+}
+
+impl<'a, T: 'a, U: ?Sized + 'a> MappedSpinRwLockWriteGuard<'a, T, U> {
+    pub fn map<V: 'a>(
+        self,
+        f: impl FnOnce(&mut U) -> &mut V,
+    ) -> MappedSpinRwLockWriteGuard<'a, T, V> {
+        MappedSpinRwLockWriteGuard {
+            guard: self.guard,
+            // SAFETY: By invariants
+            mapped: f(unsafe { &mut *self.mapped }) as *mut _,
+        }
+    }
+}
+
+impl<'a, T: 'a, U: ?Sized + 'a> Deref for MappedSpinRwLockWriteGuard<'a, T, U> {
+    type Target = U;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: By invariants
+        unsafe { &*self.mapped }
+    }
+}
+
+impl<'a, T: 'a, U: ?Sized + 'a> DerefMut for MappedSpinRwLockWriteGuard<'a, T, U> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: By invariants
+        unsafe { &mut *self.mapped }
+    }
+}
+
+impl<'a, T: 'a, U: ?Sized + fmt::Debug + 'a> fmt::Debug for MappedSpinRwLockWriteGuard<'a, T, U> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v: &U = self;
         v.fmt(f)
     }
 }
