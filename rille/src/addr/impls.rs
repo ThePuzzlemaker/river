@@ -20,11 +20,13 @@ impl<T, Map: Mapping, Mut: Mutability> Eq for Physical<T, Map, Mut> {}
 
 impl<T, Map: Mapping, Mut: Mutability> fmt::Debug for Physical<T, Map, Mut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Physical")
-            .field("_map", &Map::default())
-            .field("_mut", &Mut::default())
-            .field("addr", &self.addr)
-            .finish()
+        write!(
+            f,
+            "Physical{:?}::{:?}({:#p})",
+            Mut::default(),
+            Map::default(),
+            self.addr as *const ()
+        )
     }
 }
 
@@ -39,7 +41,6 @@ impl<T, Map: Mapping, Mut: Mutability> Ord for Physical<T, Map, Mut> {
         self.addr.cmp(&other.addr)
     }
 }
-
 
 impl<T, Map: Mapping, Mut: Mutability> hash::Hash for Physical<T, Map, Mut> {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
@@ -65,11 +66,13 @@ impl<T, Map: Mapping, Mut: Mutability> Eq for Virtual<T, Map, Mut> {}
 
 impl<T, Map: Mapping, Mut: Mutability> fmt::Debug for Virtual<T, Map, Mut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Virtual")
-            .field("addr", &self.addr)
-            .field("_map", &Map::default())
-            .field("_mut", &Mut::default())
-            .finish()
+        write!(
+            f,
+            "Virtual{:?}::{:?}({:#p})",
+            Mut::default(),
+            Map::default(),
+            self.addr as *const ()
+        )
     }
 }
 
