@@ -70,7 +70,7 @@ use uart::UART;
 
 use crate::{
     boot::HartBootData,
-    capability::{captbl::Captbl, EmptySlot, Untyped},
+    capability::{captbl::Captbl, untyped::Untyped, EmptySlot, SlotPtrWithTable},
     elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
     io_traits::{Cursor, Read, Seek, SeekFrom},
@@ -254,7 +254,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         (order + 4096u64.ilog2(), pma.allocate(order).unwrap())
     };
     // SAFETY: This memory is valid.
-    let captbl = unsafe { Captbl::new(captbl_mem, 16) };
+    let captbl = unsafe { Captbl::new(captbl_mem, 16, SlotPtrWithTable::null()) };
 
     {
         let mut lock = captbl.write();

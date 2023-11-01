@@ -14,7 +14,9 @@ use rille::{
 
 use crate::sync::{arc_like::ArcLike, SpinRwLock};
 
-use super::{Capability, CaptblHeader, RawCapability, SlotRef, SlotRefMut};
+use super::{
+    CapToOwned, Capability, CaptblHeader, RawCapability, SlotPtrWithTable, SlotRef, SlotRefMut,
+};
 
 pub struct Captbl {
     pub(super) hdr: NonNull<CaptblHeader>,
@@ -50,12 +52,16 @@ impl Captbl {
     /// `2.pow(n_slots_log2) * 32` bytes.
     ///
     /// - `n_slots_log2` must not be 0.
-    pub unsafe fn new(base: VirtualMut<u8, DirectMapped>, n_slots_log2: u8) -> Self {
+    pub unsafe fn new(
+        base: VirtualMut<u8, DirectMapped>,
+        n_slots_log2: u8,
+        untyped: SlotPtrWithTable,
+    ) -> Self {
         let header = CaptblHeader {
             refcount: AtomicU64::new(1),
             captbl_lock: SpinRwLock::new(()),
             n_slots_log2,
-            untyped: 0,
+            untyped,
         };
 
         let captbl: *mut MaybeUninit<CaptblHeader> = base.cast().into_ptr_mut();
@@ -80,6 +86,7 @@ impl Captbl {
             hdr: unsafe { NonNull::new_unchecked(ptr.into_ptr_mut()) },
         };
 
+        // SAFETY: By invariants.
         unsafe { x.increase_refcount() };
 
         x
@@ -148,9 +155,19 @@ impl Capability for Captbl {
     }
 }
 
-impl<'a> From<SlotRef<'a, Captbl>> for Captbl {
-    fn from(x: SlotRef<'a, Captbl>) -> Self {
-        (*x).clone()
+impl<'a> CapToOwned for SlotRef<'a, Captbl> {
+    type Target = Captbl;
+
+    fn to_owned_cap(&self) -> Self::Target {
+        (*self).clone()
+    }
+}
+
+impl<'a> CapToOwned for SlotRefMut<'a, Captbl> {
+    type Target = Captbl;
+
+    fn to_owned_cap(&self) -> Self::Target {
+        (*self).clone()
     }
 }
 

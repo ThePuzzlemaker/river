@@ -4,13 +4,16 @@
 use core::{arch::asm, fmt, panic::PanicInfo};
 
 use rille::{
-    capability::{Capability, Captbl, Captr, RemoteCaptr},
+    capability::{
+        Capability, Captbl, CaptblSizeSpec, Captr, RemoteCaptr, Untyped, UntypedSizeSpec,
+    },
     syscalls::{ecall0, ecall2, SyscallNumber},
 };
 
 #[no_mangle]
 unsafe fn _start() -> ! {
     let root_captbl: RemoteCaptr<Captbl> = RemoteCaptr::local(Captr::from_raw_unchecked(1));
+    let untyped: Captr<Untyped> = Captr::from_raw_unchecked(4);
 
     let new_captr = root_captbl
         .copy_deep(
@@ -19,23 +22,34 @@ unsafe fn _start() -> ! {
             Captr::from_raw_unchecked(2),
         )
         .unwrap();
-    debug_print("captr 1:\n");
-    debug_capslot(root_captbl);
-    debug_print("captr 2:\n");
-    debug_capslot(RemoteCaptr::local(new_captr));
+
+    ecall0(SyscallNumber::DebugDumpRoot).unwrap();
+    let new_captbl: Captr<Captbl> = untyped
+        .retype(
+            RemoteCaptr::remote(root_captbl.local_index(), new_captr),
+            Captr::from_raw_unchecked(5),
+            CaptblSizeSpec { n_slots_log2: 6 },
+        )
+        .unwrap();
+
+    // debug_print("captr 1:\n");
+    // debug_capslot(root_captbl);
+    // debug_print("captr 2:\n");
+    // debug_capslot(RemoteCaptr::local(new_captr));
 
     let captr3 = RemoteCaptr::remote(root_captbl.local_index(), new_captr)
         .copy_deep(
             root_captbl.local_index(),
-            RemoteCaptr::remote(root_captbl.local_index(), new_captr),
-            Captr::from_raw_unchecked(3),
+            RemoteCaptr::remote(root_captbl.local_index(), new_captbl),
+            Captr::from_raw_unchecked(1),
         )
         .unwrap();
-    debug_print("captr 3:\n");
-    debug_capslot(RemoteCaptr::local(captr3));
+    // debug_print("captr 3:\n");
+    // debug_capslot(RemoteCaptr::local(captr3));
 
-    debug_print("final cap table: \n");
+    // debug_print("final cap table: \n");
     ecall0(SyscallNumber::DebugDumpRoot).unwrap();
+    debug_capslot(RemoteCaptr::local(new_captbl));
 
     loop {
         asm!("nop");

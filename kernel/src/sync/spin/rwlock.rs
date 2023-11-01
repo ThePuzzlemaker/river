@@ -159,7 +159,7 @@ li {error}, 1
                 // Lock failed: locked mutable
                 // Let's see if we're deadlocked.
                 assert!(
-                    old < u32::MAX as u64 || old != hartid + u32::MAX as u64,
+                    !(old >= u32::MAX as u64 && old == hartid + u32::MAX as u64),
                     "SpinRwLock::try_read: deadlock detected"
                 );
                 // Make sure we re-enable interrupts
@@ -195,7 +195,7 @@ li {error}, 1
 
         let state = self.state.load(Ordering::Acquire);
         assert!(
-            state < u32::MAX as u64 || state != hartid + u32::MAX as u64,
+            !(state >= u32::MAX as u64 && state == hartid + u32::MAX as u64),
             "SpinRwLock::read: deadlock detected"
         );
         //crate::println!("{:#x?}", state);
@@ -298,7 +298,7 @@ bnez t1, 2b
             Ordering::Relaxed,
         ) {
             assert!(
-                e < u32::MAX as u64 || e != hartid + u32::MAX as u64,
+                !(e >= u32::MAX as u64 && e == hartid + u32::MAX as u64),
                 "SpinRwLock::try_write: deadlock detected"
             );
             // Make sure we re-enable interrupts if we didn't lock.
@@ -355,7 +355,7 @@ bnez t1, 2b
             Ordering::Relaxed,
         ) {
             assert!(
-                e < u32::MAX as u64 || e != hartid + u32::MAX as u64,
+                !(e >= u32::MAX as u64 && e == hartid + u32::MAX as u64),
                 "SpinRwLock::write: deadlock detected"
             );
             hint::spin_loop();
@@ -423,7 +423,7 @@ impl<'a, T: 'a> SpinRwLockReadGuard<'a, T> {
             Ordering::Relaxed,
         ) {
             assert!(
-                e < u32::MAX as u64 || e != u32::MAX as u64 + hartid,
+                !(e >= u32::MAX as u64 && e == hartid + u32::MAX as u64),
                 "SpinRwLockReadGuard::upgrade: deadlock detected"
             );
             hint::spin_loop();

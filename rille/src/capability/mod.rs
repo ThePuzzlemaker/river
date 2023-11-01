@@ -87,6 +87,18 @@ pub enum CapabilityType {
     Unknown = 32,
 }
 
+impl From<u64> for CapabilityType {
+    fn from(value: u64) -> Self {
+        (value as u8).into()
+    }
+}
+
+impl From<CapabilityType> for u64 {
+    fn from(value: CapabilityType) -> Self {
+        u8::from(value) as u64
+    }
+}
+
 /// This enum defines some errors that may arise from capability
 /// interface syscalls.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
@@ -94,6 +106,23 @@ pub enum CapabilityType {
 pub enum CapError {
     /// This is not an error.
     NoError = 0,
+
+    /// The requested resource was not present.
+    NotPresent = 1,
+
+    /// The requested resource was of an invalid type for this
+    /// operation.
+    InvalidType = 2,
+
+    /// Not enough memory was available in an [`Untyped`] or
+    /// [`Captbl`] capability to hold a given resource.
+    NotEnoughResources = 3,
+
+    /// The provided size was invalid.
+    InvalidSize = 4,
+
+    /// The requested operation could not be performed.
+    InvalidOperation = 5,
 
     /// The error provided to us by the syscall interface was unknown.
     #[num_enum(default)]

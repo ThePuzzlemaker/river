@@ -1,23 +1,27 @@
-use core::{arch::global_asm, mem, slice};
+use core::{arch::global_asm, cmp, mem, slice};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{captbl::Captbl, AnyCap, EmptySlot},
+    capability::{
+        captbl::Captbl, untyped::Untyped, AnyCap, CapToOwned, EmptySlot, SlotPtrWithTable,
+    },
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
     print, println,
-    proc::ProcState,
+    proc::{ProcPrivate, ProcState},
     sync::{OnceCell, SpinRwLockReadGuard},
-    trampoline::{self, trampoline},
+    trampoline::{self, trampoline, Trapframe},
     uart,
 };
 use rille::{
     addr::{Virtual, VirtualConst},
-    capability::CapabilityType,
+    capability::{CapError, CapabilityType},
     syscalls::SyscallNumber,
     units::StorageUnits,
 };
+
+mod syscalls;
 
 pub struct Irqs {
     pub uart: u32,
@@ -296,138 +300,11 @@ unsafe extern "C" fn user_trap() -> ! {
             trapframe.user_epc += 4;
 
             match trapframe.a0.into() {
-                SyscallNumber::DebugPrint => {
-                    let str_ptr = trapframe.a1 as usize;
-                    let str_len = trapframe.a2 as usize;
-
-                    assert!(str_ptr + str_len < private.mem_size, "too long");
-
-                    // SAFETY: All values are valid for u8 and process
-                    // memory is zeroed and is thus never
-                    // uninitialized.
-                    let slice = unsafe {
-                        slice::from_raw_parts(
-                            private
-                                .mman
-                                .get_table()
-                                .walk(Virtual::from(str_ptr))
-                                .unwrap()
-                                .0
-                                .into_virt()
-                                .into_ptr(),
-                            str_len,
-                        )
-                    };
-                    let s = core::str::from_utf8(slice).unwrap();
-                    print!("{}", s);
-
-                    trapframe.a0 = 0;
-                }
-                SyscallNumber::CopyDeep => {
-                    let from_tbl_ref = trapframe.a1 as usize;
-                    let from_tbl_index = trapframe.a2 as usize;
-                    let from_index = trapframe.a3 as usize;
-                    let into_tbl_ref = trapframe.a4 as usize;
-                    let into_tbl_index = trapframe.a5 as usize;
-                    let into_index = trapframe.a6 as usize;
-
-                    let root_hdr = &private.captbl;
-
-                    let from_tbl_index: Captbl = {
-                        let from_tbl_ref = if from_tbl_ref == 0 {
-                            root_hdr.clone()
-                        } else {
-                            let root_lock = root_hdr.read();
-                            root_lock
-                                .get::<Captbl>(from_tbl_ref)
-                                .map(Captbl::from)
-                                .unwrap()
-                        };
-                        let from_tbl_ref = from_tbl_ref.read();
-
-                        from_tbl_ref.get::<Captbl>(from_tbl_index).unwrap().into()
-                    };
-
-                    let from_tbl_index_lock = from_tbl_index.read();
-
-                    let into_tbl_index = {
-                        let into_tbl_ref = if into_tbl_ref == 0 {
-                            root_hdr.clone()
-                        } else {
-                            let root_lock = root_hdr.read();
-                            root_lock
-                                .get::<Captbl>(into_tbl_ref)
-                                .map(Captbl::from)
-                                .unwrap()
-                        };
-                        let into_tbl_ref = into_tbl_ref.read();
-
-                        into_tbl_ref.get::<Captbl>(into_tbl_index).unwrap().clone()
-                    };
-
-                    if from_tbl_index == into_tbl_index {
-                        let mut into_tbl_index = from_tbl_index_lock.upgrade();
-
-                        let (mut into_index, mut from_index) = into_tbl_index
-                            .get2_mut::<EmptySlot, AnyCap>(into_index, from_index)
-                            .unwrap();
-
-                        let mut into_index = into_index.replace(AnyCap::from(&mut from_index));
-                        from_index.add_child(&mut into_index);
-                    } else {
-                        let mut from_tbl_index = from_tbl_index_lock.upgrade();
-                        let mut into_tbl_index = into_tbl_index.write();
-
-                        let mut into_index =
-                            into_tbl_index.get_mut::<EmptySlot>(into_index).unwrap();
-                        let mut from_index = from_tbl_index.get_mut::<AnyCap>(from_index).unwrap();
-
-                        let mut into_index = into_index.replace(AnyCap::from(&mut from_index));
-                        from_index.add_child(&mut into_index);
-                    }
-
-                    trapframe.a0 = 0;
-                }
-                SyscallNumber::DebugCapSlot => {
-                    let tbl = trapframe.a1 as usize;
-                    let index = trapframe.a2 as usize;
-                    // SAFETY: By invariants.
-                    let root_hdr = &private.captbl;
-                    let root_lock = root_hdr.read();
-                    let tbl = if tbl == 0 {
-                        root_hdr.clone()
-                    } else {
-                        root_lock.get(tbl).unwrap().clone()
-                    };
-                    let tbl = tbl.read();
-
-                    let slot = tbl.get::<AnyCap>(index).unwrap();
-                    println!("{:#?}", slot);
-
-                    trapframe.a0 = 0;
-                }
-                SyscallNumber::DebugDumpRoot => {
-                    // SAFETY: By invariants.
-                    println!("{:#x?}", private.captbl);
-
-                    // let inner = private.captbl_ptr.as_virt_addr().cast::<u8>();
-                    // println!("size: {:?}", private.captbl_ptr.size_bytes());
-                    // let slice = unsafe {
-                    //     core::slice::from_raw_parts(
-                    //         inner.into_ptr(),
-                    //         private.captbl_ptr.size_bytes(),
-                    //     )
-                    // };
-                    // //println!("{:?}", slice);
-
-                    // println!(
-                    //     "run in qemu console: dump-guest-memory captbl.bin {:#x} {}",
-                    //     inner.into_phys().into_usize(),
-                    //     slice.len()
-                    // );
-                    trapframe.a0 = 0;
-                }
-                // dump-guest-memory captbl.bin 0x84402000
+                SyscallNumber::CopyDeep => sys_copy_deep(&mut private, trapframe),
+                SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
+                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, trapframe),
+                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, trapframe),
+                SyscallNumber::DebugPrint => sys_debug_print(&mut private, trapframe),
                 _ => todo!("invalid syscall number"),
             }
 
@@ -510,3 +387,200 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
     // SAFETY: The function address is valid and we have provided it with the proper values.
     unsafe { (ret_user)(satp) }
 }
+
+trait FromTrapframe
+where
+    Self: Sized,
+{
+    fn from_trapframe(frame: &Trapframe) -> Self;
+}
+macro_rules! impl_from_trapframe {
+    ($($($ty:ident: $reg:ident),+);*) => {
+	$(
+	    impl<$($ty: From<u64>,)+> FromTrapframe for ($($ty,)+) {
+		fn from_trapframe(frame: &Trapframe) -> Self {
+		    ($($ty::from(frame.$reg),)+)
+		}
+	    }
+	)*
+    }
+}
+
+impl_from_trapframe! {
+    T1: a1;
+    T1: a1, T2: a2;
+    T1: a1, T2: a2, T3: a3;
+    T1: a1, T2: a2, T3: a3, T4: a4;
+    T1: a1, T2: a2, T3: a3, T4: a4, T5: a5;
+    T1: a1, T2: a2, T3: a3, T4: a4, T5: a5, T6: a6;
+    T1: a1, T2: a2, T3: a3, T4: a4, T5: a5, T6: a6, T7: a7
+}
+
+trait IntoTrapframe
+where
+    Self: Sized,
+{
+    fn into_trapframe(self) -> (u64, u64);
+}
+
+impl<T: IntoTrapframe, E: IntoTrapframe> IntoTrapframe for Result<T, E> {
+    fn into_trapframe(self) -> (u64, u64) {
+        match self {
+            Ok(v) => (0, v.into_trapframe().0),
+            Err(e) => (e.into_trapframe().0, 0),
+        }
+    }
+}
+
+impl IntoTrapframe for () {
+    fn into_trapframe(self) -> (u64, u64) {
+        (0, 0)
+    }
+}
+
+impl IntoTrapframe for u64 {
+    fn into_trapframe(self) -> (u64, u64) {
+        (self, 0)
+    }
+}
+
+impl IntoTrapframe for CapError {
+    fn into_trapframe(self) -> (u64, u64) {
+        (self.into(), 0)
+    }
+}
+
+macro_rules! define_syscall {
+    ($ident:ident, $arity:tt) => {
+	fn $ident(private: &mut $crate::proc::ProcPrivate, trapframe: &mut $crate::trampoline::Trapframe) {
+	    define_syscall!(@arity private, trapframe, $ident, $arity);
+	}
+    };
+
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 7) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	    arg5,
+	    arg6,
+	    arg7,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $private,
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	    arg5,
+	    arg6,
+	    arg7,
+	).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 6) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	    arg5,
+	    arg6,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $private,
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	    arg5,
+	    arg6,
+	).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 5) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	    arg5,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $private,
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	    arg5,
+	).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 4) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $private,
+	    arg1,
+	    arg2,
+	    arg3,
+	    arg4,
+	).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 3) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (arg1, arg2, arg3) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $private,
+	    arg1,
+	    arg2,
+	    arg3,
+	).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 2) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (arg1,arg2) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $private,
+	    arg1,
+	    arg2,
+	).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 1) => {{
+	use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (arg1,) = FromTrapframe::from_trapframe(&$trapframe);
+	let (a0, a1) = syscalls::$ident($private, arg1).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+    (@arity $private:ident, $trapframe:ident, $ident:ident, 0) => {{
+	use $crate::trap::IntoTrapframe;
+	let (a0, a1) = syscalls::$ident($private).into_trapframe();
+	$trapframe.a0 = a0;
+	$trapframe.a1 = a1;
+    }};
+}
+
+define_syscall!(sys_debug_dump_root, 0);
+define_syscall!(sys_debug_cap_slot, 2);
+define_syscall!(sys_debug_print, 2);
+define_syscall!(sys_copy_deep, 6);
+define_syscall!(sys_retype_many, 7);
