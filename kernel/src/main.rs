@@ -383,7 +383,13 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     LOCAL_HART.with(|hart| {
         //hart.push_off();
         println!(
-            "=== river v0.0.-Inf ===\n- boot hart id: {0}\n",
+            r#"
+   ___   .  _  _ __   ___
+  /  /  /  /  / /__| /  /
+ /   \_/\__\_/_/\___/   \"#
+        );
+        println!(
+            "===== river v0.0.-Inf ====\n- boot hart id: {0}\n",
             hart.hartid.get()
         );
 
