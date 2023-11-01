@@ -99,11 +99,10 @@ impl UserMemoryManager {
         };
 
         for page in 0..req.n_pages {
-            self.table.map(
-                backing_mem.add(page * 4.kib()).into_identity().into_const(),
-                addr.add(page * 4.kib()),
-                req.flags,
-            );
+            let from = backing_mem.add(page * 4.kib()).into_identity().into_const();
+            let to = addr.add(page * 4.kib());
+            let flags = req.flags;
+            self.table.map(from, to, flags);
         }
 
         let range = addr..addr.add(req.n_pages * 4.kib());
