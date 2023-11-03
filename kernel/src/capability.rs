@@ -1,22 +1,16 @@
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::AtomicU64;
 
 use bitfield::bitfield;
 use itertools::Itertools;
-use num_enum::{FromPrimitive, IntoPrimitive};
-use rille::capability::{CapError, CapabilityType};
+use rille::capability::{CapError, CapResult, CapabilityType};
 
-use rille::addr::{
-    canonicalize, DirectMapped, Physical, PhysicalMut, Ppn, Virtual, VirtualConst, Vpns,
-};
-use rille::units::{self};
+use rille::addr::{canonicalize, Ppn, Vpns};
 
-use crate::proc::Context;
-use crate::sync::{MappedSpinRwLockReadGuard, MappedSpinRwLockWriteGuard, SpinRwLock};
-use crate::trampoline::Trapframe;
+use crate::sync::SpinRwLock;
 
 use self::captbl::{Captbl, CaptblSlot};
 use self::derivation::DerivationTreeNode;
@@ -40,6 +34,12 @@ pub union RawCapability {
 
 #[repr(C)]
 #[derive(Debug)]
+pub struct CapabilitySlot {
+    lock: SpinRwLock<RawCapabilitySlot>,
+}
+
+#[repr(C)]
+#[derive(Debug, PartialEq)]
 pub struct RawCapabilitySlot {
     pub cap: RawCapability,
     pub dtnode: DerivationTreeNode,
@@ -49,171 +49,124 @@ pub struct RawCapabilitySlot {
 #[repr(align(64))]
 pub struct CaptblHeader {
     refcount: AtomicU64,
-    captbl_lock: SpinRwLock<()>,
+    //captbl_lock: SpinRwLock<()>,
     n_slots_log2: u8,
-    untyped: SlotPtrWithTable,
+    untyped: Option<NonNull<CapabilitySlot>>,
 }
 
-const _ASSERT_NULLCAPSLOT_SIZE_EQ_64: () = assert!(
+const _ASSERT_CAPTBLHEADER_SIZE_EQ_64: () = assert!(
     core::mem::size_of::<CaptblHeader>() == 64,
-    "NullCapSlot size was not 64 bytes"
+    "CaptblHeader size was not 64 bytes"
 );
 
-pub type CaptblReadGuard<'a> = MappedSpinRwLockReadGuard<'a, (), CaptblSlots>;
-pub type CaptblWriteGuard<'a> = MappedSpinRwLockWriteGuard<'a, (), CaptblSlots>;
-
-impl CaptblHeader {
-    #[inline]
-    pub fn try_read(&self) -> Option<CaptblReadGuard<'_>> {
-        Some(self.captbl_lock.try_read()?.map(|_| {
-            let slots_base_ptr = ptr::addr_of!(*self)
-                .wrapping_add(1)
-                .cast::<RawCapabilitySlot>();
-            let slots_slice_ptr =
-                ptr::slice_from_raw_parts(slots_base_ptr, (1 << self.n_slots_log2) - 1);
-            // SAFETY: Our invariants ensure this is
-            // valid. Additionally, `map` ensures that this reference
-            // only lives when we have the lock.
-            unsafe { &*CaptblSlots::ptr_from_raw(slots_slice_ptr) }
-        }))
-    }
-
-    #[inline]
-    pub fn read(&self) -> CaptblReadGuard<'_> {
-        self.captbl_lock.read().map(|_| {
-            let slots_base_ptr = ptr::addr_of!(*self)
-                .wrapping_add(1)
-                .cast::<RawCapabilitySlot>();
-            let slots_slice_ptr =
-                ptr::slice_from_raw_parts(slots_base_ptr, (1 << self.n_slots_log2) - 1);
-            // SAFETY: Our invariants ensure this is
-            // valid. Additionally, `map` ensures that this reference
-            // only lives when we have the lock.
-            unsafe { &*CaptblSlots::ptr_from_raw(slots_slice_ptr) }
-        })
-    }
-
-    #[inline]
-    pub fn write(&self) -> MappedSpinRwLockWriteGuard<'_, (), CaptblSlots> {
-        self.captbl_lock.write().map(|_| {
-            let slots_base_ptr = ptr::addr_of!(*self)
-                .wrapping_add(1)
-                .cast::<RawCapabilitySlot>()
-                .cast_mut();
-            let slots_slice_ptr =
-                ptr::slice_from_raw_parts_mut(slots_base_ptr, (1 << self.n_slots_log2) - 1);
-            // SAFETY: Our invariants ensure this is
-            // valid. Additionally, `map` ensures that this reference
-            // only lives when we have the lock.
-            unsafe { &mut *CaptblSlots::ptr_from_raw_mut(slots_slice_ptr) }
-        })
-    }
-}
+const _ASSERT_RAWCAPSLOT_SIZE_EQ_64: () = assert!(
+    core::mem::size_of::<CapabilitySlot>() == 64,
+    "RawCapabilitySlot size was not 64 bytes"
+);
 
 #[repr(transparent)]
 pub struct CaptblSlots {
-    inner_no_meta: [RawCapabilitySlot],
+    inner_no_meta: [CapabilitySlot],
 }
 
 impl CaptblSlots {
-    fn ptr_from_raw(ptr: *const [RawCapabilitySlot]) -> *const Self {
+    fn ptr_from_raw(ptr: *const [CapabilitySlot]) -> *const Self {
         ptr as *const Self
     }
+}
 
-    fn ptr_from_raw_mut(ptr: *mut [RawCapabilitySlot]) -> *mut Self {
-        ptr as *mut Self
+impl Captbl {
+    fn slots(&self) -> &CaptblSlots {
+        let slots_base_ptr = self
+            .hdr
+            .as_ptr()
+            .wrapping_add(1)
+            .cast::<CapabilitySlot>()
+            .cast_const();
+        let slots_slice_ptr =
+            ptr::slice_from_raw_parts(slots_base_ptr, (1 << self.n_slots_log2) - 1);
+
+        // SAFETY: Our invariants ensure this is valid.
+        unsafe { &*CaptblSlots::ptr_from_raw(slots_slice_ptr) }
     }
 
-    fn table_addr(&self) -> VirtualConst<CaptblHeader, DirectMapped> {
-        VirtualConst::from_ptr(
-            (self as *const Self)
-                .cast::<RawCapabilitySlot>()
-                .wrapping_sub(1)
-                .cast(),
-        )
+    unsafe fn slots_uninit(&mut self) -> &mut [MaybeUninit<CapabilitySlot>] {
+        let slots_base_ptr = self
+            .hdr
+            .as_ptr()
+            .wrapping_add(1)
+            .cast::<MaybeUninit<CapabilitySlot>>();
+        let slots_slice_ptr =
+            ptr::slice_from_raw_parts_mut(slots_base_ptr, (1 << self.n_slots_log2) - 1);
+
+        // SAFETY: By invariants.
+        unsafe { &mut *slots_slice_ptr }
     }
 
-    pub fn type_of(&self, ix: usize) -> Option<CapabilityType> {
-        if ix == 0 {
-            return None;
-        }
-        Some(self.inner_no_meta.get(ix - 1)?.cap.cap_type())
-    }
-
-    pub fn get<C: Capability>(&'_ self, ix: usize) -> Result<SlotRef<C>, CapError> {
-        if ix == 0 {
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// If the capability at this slot was out of bounds,
+    /// [`CapError::NotPresent`] will be returned. If the capability
+    /// was of the wrong type, [`CapError::InvalidType`] is returned.
+    pub fn get<C: Capability>(&self, index: usize) -> CapResult<SlotRef<'_, C>> {
+        if index == 0 {
             return Err(CapError::NotPresent);
         }
-        let slot = self.inner_no_meta.get(ix - 1).ok_or(CapError::NotPresent)?;
-        if !C::is_slot_valid_type(&slot.cap) {
-            return Err(CapError::InvalidType);
-        }
 
-        let meta = C::metadata_from_slot(&slot.cap);
-        Ok(SlotRef {
-            slot,
-            meta,
-            tbl_addr: self.table_addr(),
-            _phantom: PhantomData,
-        })
-    }
-
-    pub fn get_mut<C: Capability>(&'_ mut self, ix: usize) -> Result<SlotRefMut<'_, C>, CapError> {
-        if ix == 0 {
-            return Err(CapError::NotPresent);
-        }
-        let tbl_addr = self.table_addr();
         let slot = self
+            .slots()
             .inner_no_meta
-            .get_mut(ix - 1)
+            .get(index - 1)
             .ok_or(CapError::NotPresent)?;
-        if !C::is_slot_valid_type(&slot.cap) {
+        let guard = slot.lock.read();
+
+        if !C::is_slot_valid_type(&guard.cap) {
             return Err(CapError::InvalidType);
         }
 
-        let meta = C::metadata_from_slot(&slot.cap);
-        Ok(SlotRefMut {
-            slot,
+        let meta = C::metadata_from_slot(&guard.cap);
+        Ok(SlotRef {
+            slot: guard,
             meta,
-            tbl_addr,
             _phantom: PhantomData,
         })
     }
 
-    pub fn get2_mut<C1: Capability, C2: Capability>(
-        &'_ mut self,
-        ix1: usize,
-        ix2: usize,
-    ) -> Result<(SlotRefMut<'_, C1>, SlotRefMut<'_, C2>), CapError> {
-        if ix1 == 0 || ix2 == 0 || ix1 == ix2 {
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// If the capability at this slot was out of bounds,
+    /// [`CapError::NotPresent`] will be returned. If the capability
+    /// was of the wrong type, [`CapError::InvalidType`] is returned.
+    pub fn get_mut<C: Capability>(&self, index: usize) -> CapResult<SlotRefMut<'_, C>> {
+        if index == 0 {
             return Err(CapError::NotPresent);
         }
-        let tbl_addr = self.table_addr();
-        let [slot1, slot2] = self
+
+        let slot = self
+            .slots()
             .inner_no_meta
-            .get_many_mut([ix1 - 1, ix2 - 1])
-            .map_err(|_| CapError::NotPresent)?;
-        if !C1::is_slot_valid_type(&slot1.cap) || !C2::is_slot_valid_type(&slot2.cap) {
+            .get(index - 1)
+            .ok_or(CapError::NotPresent)?;
+        let guard = slot.lock.write();
+
+        if !C::is_slot_valid_type(&guard.cap) {
             return Err(CapError::InvalidType);
         }
 
-        let meta1 = C1::metadata_from_slot(&slot1.cap);
-        let meta2 = C2::metadata_from_slot(&slot2.cap);
-        Ok((
-            SlotRefMut {
-                slot: slot1,
-                meta: meta1,
-                tbl_addr,
-                _phantom: PhantomData,
-            },
-            SlotRefMut {
-                slot: slot2,
-                meta: meta2,
-                tbl_addr,
-                _phantom: PhantomData,
-            },
-        ))
+        let meta = C::metadata_from_slot(&guard.cap);
+        Ok(SlotRefMut {
+            slot: guard,
+            meta,
+            _phantom: PhantomData,
+        })
     }
+
+    // pub fn get_mut<C: Capability>(&self, index: usize) -> CapResult<SlotRefMut<'_, C>> {
+    // }
 }
 
 pub trait CapToOwned {
@@ -236,6 +189,12 @@ where
 
     fn metadata_to_slot(meta: &Self::Metadata) -> RawCapability;
 
+    /// Perform any potential deallocation and refcounting when this
+    /// capability slot is deleted.
+    ///
+    /// # Safety
+    ///
+    /// This function must be called only once per slot.
     unsafe fn do_delete(slot: SlotRefMut<'_, Self>);
 }
 
@@ -362,11 +321,10 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
 }
 
 impl<'a> SlotRefMut<'a, EmptySlot> {
-    pub fn replace<C: Capability>(&'_ mut self, val: C) -> SlotRefMut<'_, C> {
-        let slot = SlotRefMut {
+    pub fn replace<C: Capability>(self, val: C) -> SlotRefMut<'a, C> {
+        let mut slot = SlotRefMut {
             slot: self.slot,
             meta: val.into_meta(),
-            tbl_addr: self.tbl_addr,
             _phantom: PhantomData,
         };
         slot.slot.cap = C::metadata_to_slot(&slot.meta);
@@ -507,7 +465,7 @@ impl fmt::Debug for RawCapability {
     }
 }
 
-struct DebugAdapterCoalesce<'a>(u64, &'a RawCapabilitySlot);
+struct DebugAdapterCoalesce<'a>(u64, &'a CapabilitySlot);
 
 impl<'a> fmt::Debug for DebugAdapterCoalesce<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -527,7 +485,7 @@ impl fmt::Debug for CaptblSlots {
                     .iter()
                     .map(|x| DebugAdapterCoalesce(0, x))
                     .coalesce(|l, r| {
-                        if l.1.cap == r.1.cap && l.1.dtnode == r.1.dtnode {
+                        if *l.1.lock.read() == *r.1.lock.read() {
                             Ok(DebugAdapterCoalesce(l.0 + 1, l.1))
                         } else {
                             Err((l, r))
@@ -569,16 +527,16 @@ impl SlotPtrWithTable {
         Self(0)
     }
 
-    pub fn new(slot: *const RawCapabilitySlot, captbl: *const CaptblHeader) -> Self {
+    pub fn new(slot: *const CapabilitySlot, captbl: *const CaptblHeader) -> Self {
         Self(0).with_slot(slot).with_captbl(captbl)
     }
 
-    pub fn slot(&self) -> *const RawCapabilitySlot {
+    pub fn slot(&self) -> *const CapabilitySlot {
         canonicalize((self.slot_addr() << 6) as usize) as *const _
     }
 
     #[must_use]
-    pub fn with_slot(mut self, slot: *const RawCapabilitySlot) -> Self {
+    pub fn with_slot(mut self, slot: *const CapabilitySlot) -> Self {
         self.set_slot_addr((slot as usize >> 6) as u64);
         self
     }
@@ -609,9 +567,10 @@ impl SlotPtrWithTable {
 // pub enum ThreadState {
 //     #[num_enum(default)]
 //     Uninit = 0,
-//     Sleeping = 1,
-//     Runnable = 2,
-//     Running = 3,
+//     Suspended = 1,
+//     Blocking = 2,
+//     Runnable = 3,
+//     Running = 4,
 // }
 
 // #[repr(C, align(4096))]

@@ -433,6 +433,9 @@ pub fn canonicalize(mut addr: usize) -> usize {
     addr
 }
 
+/// Inverse of [`canonicalize`]. This function will not recover lost
+/// data, but will simply zero out the top bits, allowing tagged
+/// pointers to work.
 #[inline]
 pub fn decanonicalize(addr: usize) -> usize {
     // clear bits 40 to 63 by shifting them out and back in (we're a

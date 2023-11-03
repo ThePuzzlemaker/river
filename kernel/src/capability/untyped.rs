@@ -1,6 +1,6 @@
 use bitfield::bitfield;
 use rille::{
-    addr::{DirectMapped, Physical, PhysicalMut, Ppn, VirtualConst, VirtualMut},
+    addr::{DirectMapped, Physical, PhysicalMut, Ppn},
     capability::CapabilityType,
 };
 

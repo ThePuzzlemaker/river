@@ -19,7 +19,12 @@
 //! [1]: https://doc.rust-lang.org/stable/std/os/index.html
 
 #![no_std]
-#![warn(clippy::undocumented_unsafe_blocks, clippy::pedantic, missing_docs)]
+#![warn(
+    clippy::undocumented_unsafe_blocks,
+    clippy::pedantic,
+    missing_docs,
+//  clippy::todo
+)]
 #![allow(
     clippy::inline_always,
     clippy::must_use_candidate,

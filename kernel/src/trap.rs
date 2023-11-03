@@ -1,25 +1,16 @@
-use core::{arch::global_asm, cmp, mem, slice};
+use core::{arch::global_asm, mem};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{
-        captbl::Captbl, untyped::Untyped, AnyCap, CapToOwned, EmptySlot, SlotPtrWithTable,
-    },
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
-    print, println,
-    proc::{ProcPrivate, ProcState},
-    sync::{OnceCell, SpinRwLockReadGuard},
+    proc::ProcState,
+    sync::OnceCell,
     trampoline::{self, trampoline, Trapframe},
     uart,
 };
-use rille::{
-    addr::{Virtual, VirtualConst},
-    capability::{CapError, CapabilityType},
-    syscalls::SyscallNumber,
-    units::StorageUnits,
-};
+use rille::{capability::CapError, syscalls::SyscallNumber, units::StorageUnits};
 
 mod syscalls;
 
@@ -305,7 +296,10 @@ unsafe extern "C" fn user_trap() -> ! {
                 SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, trapframe),
                 SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, trapframe),
                 SyscallNumber::DebugPrint => sys_debug_print(&mut private, trapframe),
-                _ => todo!("invalid syscall number"),
+                SyscallNumber::Swap => sys_swap(&mut private, trapframe),
+                _ => {
+                    trapframe.a0 = CapError::InvalidOperation.into();
+                }
             }
 
             // println!(
@@ -583,4 +577,5 @@ define_syscall!(sys_debug_dump_root, 0);
 define_syscall!(sys_debug_cap_slot, 2);
 define_syscall!(sys_debug_print, 2);
 define_syscall!(sys_copy_deep, 6);
+define_syscall!(sys_swap, 4);
 define_syscall!(sys_retype_many, 7);

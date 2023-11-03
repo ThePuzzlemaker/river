@@ -356,10 +356,12 @@ impl RemoteCaptr<Captbl> {
     /// another slot in another potentially remote [`Captbl`].
     ///
     /// Note that `self` and `into` can refer to the same [`Captbl`].
-    ///
+    ///    
     /// # Errors
     ///
-    /// TODO
+    /// If any capability was not present and was required,
+    /// [`CapError::NotPresent`] will be returned. If any capability
+    /// was of an invalid type, [`CapError::InvalidType`] is returned.
     pub fn copy_deep<C: Capability>(
         self,
         from_index: Captr<C>,
@@ -394,7 +396,9 @@ impl<C: Capability> RemoteCaptr<C> {
     ///
     /// # Errors
     ///
-    /// TODO
+    /// If any capability was not present and was required,
+    /// [`CapError::NotPresent`] will be returned. If any capability
+    /// was of an invalid type, [`CapError::InvalidType`] is returned.
     pub fn copy(self, into: RemoteCaptr<Empty>) -> CapResult<RemoteCaptr<C>> {
         let (from, from_index) = self.split();
         let (into, into_index) = into.split();
@@ -402,15 +406,17 @@ impl<C: Capability> RemoteCaptr<C> {
         Ok(RemoteCaptr::remote(from.local_index(), res))
     }
 
-    /// Delete the capability in the slot referred to by this
-    /// `RemoteCaptr`.
+    /// Remove the capability from the slot referred to by this
+    /// `RemoteCaptr`. Children capabilities derived from it are not
+    /// affected.
     ///
-    /// TODO: what will deleting do with refcounts
+    /// If this was the last slot referencing the capability, the
+    /// underlying object will be deleted.
     ///
     /// # Errors
     ///
     /// TODO
-    pub fn delete(self) -> CapResult<()> {
+    pub fn delete(self) -> CapResult<RemoteCaptr<Empty>> {
         todo!()
     }
 
@@ -422,9 +428,31 @@ impl<C: Capability> RemoteCaptr<C> {
     /// TODO
     pub fn swap<C2: Capability>(
         self,
-        _other: RemoteCaptr<C2>,
+        other: RemoteCaptr<C2>,
     ) -> CapResult<(RemoteCaptr<C2>, RemoteCaptr<C>)> {
-        todo!()
+        syscalls::captbl::swap(
+            self.reftbl().into_raw(),
+            self.local_index().into_raw(),
+            other.reftbl().into_raw(),
+            other.local_index().into_raw(),
+        )?;
+
+        Ok((
+            RemoteCaptr::remote(
+                self.reftbl,
+                Captr {
+                    inner: self.index.inner,
+                    _marker: PhantomData,
+                },
+            ),
+            RemoteCaptr::remote(
+                self.reftbl,
+                Captr {
+                    inner: self.index.inner,
+                    _marker: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -553,10 +581,6 @@ impl<C: Capability> ExactSizeIterator for RetypeIter<C> {
 // }
 
 // const ROOT_CAPTBL: Captr<Captbl> = unsafe { Captr::from_raw_unchecked(1) };
-
-/// TODO: move `river::addr` into rille
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Vpn(u16);
 
 // fn test(ut: Captr<Untyped>) -> CapResult<()> {
 //     use paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PageTableFlags};

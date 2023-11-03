@@ -12,10 +12,14 @@ use rille::{
     capability::CapabilityType,
 };
 
-use crate::sync::{arc_like::ArcLike, SpinRwLock};
+use crate::{
+    capability::EmptySlot,
+    sync::{arc_like::ArcLike, SpinRwLock},
+};
 
 use super::{
-    CapToOwned, Capability, CaptblHeader, RawCapability, SlotPtrWithTable, SlotRef, SlotRefMut,
+    derivation::DerivationTreeNode, CapToOwned, Capability, CapabilitySlot, CaptblHeader,
+    RawCapability, RawCapabilitySlot, SlotRef, SlotRefMut,
 };
 
 pub struct Captbl {
@@ -27,7 +31,7 @@ impl fmt::Debug for Captbl {
         f.debug_struct("Captbl")
             .field("<ptr>", &self.hdr.as_ptr())
             .field("hdr", &**self)
-            .field("table", &self.try_read())
+            .field("table", &self.slots())
             .finish()
     }
 }
@@ -55,11 +59,10 @@ impl Captbl {
     pub unsafe fn new(
         base: VirtualMut<u8, DirectMapped>,
         n_slots_log2: u8,
-        untyped: SlotPtrWithTable,
+        untyped: Option<NonNull<CapabilitySlot>>,
     ) -> Self {
         let header = CaptblHeader {
             refcount: AtomicU64::new(1),
-            captbl_lock: SpinRwLock::new(()),
             n_slots_log2,
             untyped,
         };
@@ -72,7 +75,22 @@ impl Captbl {
 
         // SAFETY: This pointer is non-null by our invariants.
         let hdr = unsafe { NonNull::new_unchecked(captbl.as_mut_ptr()) };
-        Self { hdr }
+
+        let mut tbl = Self { hdr };
+
+        // SAFETY: We own this memory right now.
+        for slot in unsafe { tbl.slots_uninit() } {
+            slot.write(CapabilitySlot {
+                lock: SpinRwLock::new(RawCapabilitySlot {
+                    cap: RawCapability {
+                        empty: EmptySlot::default(),
+                    },
+                    dtnode: DerivationTreeNode::default(),
+                }),
+            });
+        }
+
+        tbl
     }
 
     /// TODO
@@ -99,9 +117,13 @@ impl Captbl {
     }
 }
 
+// SAFETY: We properly synchronize Captbls.
 unsafe impl Send for Captbl {}
+// SAFETY: See above.
 unsafe impl Sync for Captbl {}
 
+// SAFETY: We follow all invariants of `ArcLike` and do not override
+// default functions.
 unsafe impl ArcLike for Captbl {
     type Target = CaptblHeader;
 

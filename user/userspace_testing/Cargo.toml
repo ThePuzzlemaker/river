@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 rille = { path = "../../rille" }
+rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }

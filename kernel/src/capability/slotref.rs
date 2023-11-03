@@ -1,12 +1,11 @@
 use core::{fmt, marker::PhantomData};
 
-use rille::addr::{DirectMapped, VirtualConst};
+use crate::sync::{SpinRwLockReadGuard, SpinRwLockWriteGuard};
 
-use super::{AnyCap, Capability, CaptblHeader, RawCapabilitySlot};
+use super::{AnyCap, Capability, RawCapabilitySlot};
 
 pub struct SlotRef<'a, C: Capability> {
-    pub(super) slot: &'a RawCapabilitySlot,
-    pub(super) tbl_addr: VirtualConst<CaptblHeader, DirectMapped>,
+    pub(super) slot: SpinRwLockReadGuard<'a, RawCapabilitySlot>,
     pub(super) meta: C::Metadata,
     pub(super) _phantom: PhantomData<C>,
 }
@@ -18,7 +17,6 @@ impl<'a> SlotRef<'a, AnyCap> {
             Some(SlotRef {
                 slot: self.slot,
                 meta,
-                tbl_addr: self.tbl_addr,
                 _phantom: PhantomData,
             })
         } else {
@@ -33,23 +31,17 @@ impl<'a, C: Capability> SlotRef<'a, C> {
         SlotRef {
             slot: self.slot,
             meta,
-            tbl_addr: self.tbl_addr,
             _phantom: PhantomData,
         }
     }
 
     pub fn as_ptr(&self) -> *const RawCapabilitySlot {
-        self.slot
-    }
-
-    pub fn table_ptr(&self) -> *const CaptblHeader {
-        self.tbl_addr.into_ptr()
+        &*self.slot
     }
 }
 
 pub struct SlotRefMut<'a, C: Capability> {
-    pub(super) slot: &'a mut RawCapabilitySlot,
-    pub(super) tbl_addr: VirtualConst<CaptblHeader, DirectMapped>,
+    pub(super) slot: SpinRwLockWriteGuard<'a, RawCapabilitySlot>,
     pub(super) meta: C::Metadata,
     pub(super) _phantom: PhantomData<C>,
 }
@@ -61,7 +53,6 @@ impl<'a> SlotRefMut<'a, AnyCap> {
             Some(SlotRefMut {
                 slot: self.slot,
                 meta,
-                tbl_addr: self.tbl_addr,
                 _phantom: PhantomData,
             })
         } else {
@@ -71,40 +62,17 @@ impl<'a> SlotRefMut<'a, AnyCap> {
 }
 
 impl<'a, C: Capability> SlotRefMut<'a, C> {
-    pub fn downgrade(&'_ mut self) -> SlotRef<'_, C> {
-        SlotRef {
-            slot: self.slot,
-            meta: C::metadata_from_slot(&self.slot.cap),
-            tbl_addr: self.tbl_addr,
-            _phantom: PhantomData,
-        }
-    }
-
     pub fn upcast_mut(self) -> SlotRefMut<'a, AnyCap> {
         let meta = AnyCap::metadata_from_slot(&self.slot.cap);
         SlotRefMut {
             slot: self.slot,
             meta,
-            tbl_addr: self.tbl_addr,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn into_const(self) -> SlotRef<'a, C> {
-        SlotRef {
-            slot: self.slot,
-            meta: self.meta,
-            tbl_addr: self.tbl_addr,
             _phantom: PhantomData,
         }
     }
 
     pub fn as_ptr(&mut self) -> *mut RawCapabilitySlot {
-        self.slot
-    }
-
-    pub fn table_ptr(&mut self) -> *const CaptblHeader {
-        self.tbl_addr.into_ptr()
+        &mut *self.slot
     }
 }
 

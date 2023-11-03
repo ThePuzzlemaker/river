@@ -35,11 +35,12 @@ use crate::{
 /// These behaviours are not unsafe or unsound, but they may cause
 /// deadlocks, which are undesirable.
 // TODO: prevent writer starvation?
+#[repr(C)]
 pub struct SpinRwLock<T> {
+    data: UnsafeCell<T>,
     /// The number of readers. If above [`u32::MAX`], then `state -
     /// u32::MAX` is the hart id of the current mutable lock holder.
     state: AtomicU64,
-    data: UnsafeCell<T>,
 }
 
 // SAFETY: `SpinRwLock`s provide shared access if there is no
@@ -62,6 +63,13 @@ impl<T> SpinRwLock<T> {
             state: AtomicU64::new(0),
             data: UnsafeCell::new(data),
         }
+    }
+
+    /// Get the data pointer of this `SpinRwLock`. Note that it is
+    /// unsafe to read this pointer if a read or write lock is not
+    /// held.
+    pub const fn data_ptr(&self) -> *const T {
+        self.data.get().cast_const()
     }
 
     /// Forcibly unlock this `SpinRwLock`.
@@ -478,7 +486,10 @@ pub struct MappedSpinRwLockReadGuard<'a, T, U: ?Sized> {
 }
 
 impl<'a, T: 'a, U: ?Sized + 'a> MappedSpinRwLockReadGuard<'a, T, U> {
-    pub fn map<V: 'a>(self, f: impl FnOnce(&U) -> &V) -> MappedSpinRwLockReadGuard<'a, T, V> {
+    pub fn map<V: ?Sized + 'a>(
+        self,
+        f: impl FnOnce(&U) -> &V,
+    ) -> MappedSpinRwLockReadGuard<'a, T, V> {
         MappedSpinRwLockReadGuard {
             guard: self.guard,
             // SAFETY: By invariants
@@ -499,7 +510,7 @@ impl<'a, T: 'a, U: ?Sized + 'a> MappedSpinRwLockReadGuard<'a, T, U> {
             // This pointer is valid, as we have just upgraded the
             // guard to mutable, and doing so will not allow the
             // underlying data to be moved or invalidated.
-            mapped: self.mapped as *mut _,
+            mapped: self.mapped.cast_mut(),
         }
     }
 }

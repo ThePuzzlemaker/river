@@ -70,7 +70,7 @@ use uart::UART;
 
 use crate::{
     boot::HartBootData,
-    capability::{captbl::Captbl, untyped::Untyped, EmptySlot, SlotPtrWithTable},
+    capability::{captbl::Captbl, untyped::Untyped, EmptySlot},
     elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
     io_traits::{Cursor, Read, Seek, SeekFrom},
@@ -91,14 +91,15 @@ static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
 
 struct NoAlloc;
 
+// SAFETY: We don't allocate, and it's safe to panic.
 unsafe impl GlobalAlloc for NoAlloc {
     #[track_caller]
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    unsafe fn alloc(&self, _: Layout) -> *mut u8 {
         unimplemented!()
     }
 
     #[track_caller]
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {
         unimplemented!()
     }
 }
@@ -254,13 +255,12 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         (order + 4096u64.ilog2(), pma.allocate(order).unwrap())
     };
     // SAFETY: This memory is valid.
-    let captbl = unsafe { Captbl::new(captbl_mem, 16, SlotPtrWithTable::null()) };
+    let captbl = unsafe { Captbl::new(captbl_mem, 16, None) };
 
     {
-        let mut lock = captbl.write();
-        let mut slot = lock.get_mut::<EmptySlot>(1).unwrap();
+        let slot = captbl.get_mut::<EmptySlot>(1).unwrap();
         slot.replace(Captbl::clone(&captbl));
-        let mut slot = lock.get_mut::<EmptySlot>(4).unwrap();
+        let slot = captbl.get_mut::<EmptySlot>(4).unwrap();
         // SAFETY: This memory is valid.
         slot.replace(unsafe { Untyped::new(ut_mem, ut_sz_log2 as u8) });
     }

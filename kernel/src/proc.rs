@@ -4,7 +4,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use alloc::{string::String, sync::Arc};
+use alloc::sync::Arc;
 
 use rille::{
     addr::{DirectMapped, Kernel, VirtualConst, VirtualMut},

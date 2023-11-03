@@ -4,7 +4,9 @@ use core::{convert::Infallible, fmt::Debug, marker::PhantomData};
 
 use bitflags::bitflags;
 
-use super::{CapResult, Capability, CapabilityType, Captr, Vpn};
+use crate::addr::Vpn;
+
+use super::{CapResult, Capability, CapabilityType, Captr};
 
 /// The page capability corresponds to a page of physical memory that
 /// can be mapped into a page table. The [`PagingLevel`] determines

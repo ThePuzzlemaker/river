@@ -20,15 +20,17 @@ pub enum SyscallNumber {
     PageTableMap = 5,
     /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap`]
     PageTableUnmap = 6,
-    /// TODO
+    /// Print the debug representation of a capability to the kernel
+    /// console.
     DebugCapSlot = 7,
-    /// TODO
+    /// Print the debug representation of the root capabiltiy to the
+    /// kernel console.
     DebugDumpRoot = 8,
-    /// TODO
+    /// Print a string to the debug console.
     DebugPrint = 9,
-    /// TODO
+    /// Unknown syscall
     #[num_enum(default)]
-    Nop = u64::MAX,
+    Unknown = u64::MAX,
 }
 
 macro_rules! impl_ecall {
@@ -102,7 +104,6 @@ impl_ecall! {
 
 /// Syscalls relating to the [`Captbl`][super::capability::Captbl]
 /// capability.
-#[allow(clippy::missing_errors_doc)]
 pub mod captbl {
     use crate::capability::{CapError, CapResult};
 
@@ -144,6 +145,12 @@ pub mod captbl {
     /// rights into the capability slot described by the `into`
     /// indices.
     ///
+    /// # Errors
+    ///
+    /// If any capability was not present and was required,
+    /// [`CapError::NotPresent`] will be returned. If any capability
+    /// was of an invalid type, [`CapError::InvalidType`] is returned.
+    ///
     /// [1]: crate::capability::RemoteCaptr::<Captbl>::copy_deep
     /// [2]: crate::capability::Captbl
     pub fn copy_deep(
@@ -164,6 +171,35 @@ pub mod captbl {
                 into_tbl_ref as u64,
                 into_tbl_index as u64,
                 into_index as u64,
+            )
+        };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn swap(
+        cap1_table: usize,
+        cap1_index: usize,
+        cap2_table: usize,
+        cap2_index: usize,
+    ) -> CapResult<()> {
+        // SAFETY: swap is always safe.
+        let res = unsafe {
+            super::ecall4(
+                SyscallNumber::Swap,
+                cap1_table as u64,
+                cap1_index as u64,
+                cap2_table as u64,
+                cap2_index as u64,
             )
         };
 
@@ -247,5 +283,59 @@ pub mod untyped {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Syscalls for low-level debugging of capabilities.
+pub mod debug {
+    use crate::capability::{CapError, CapResult};
+
+    use super::SyscallNumber;
+
+    /// Print the debug representation of a capability to the kernel
+    /// console.
+    ///
+    /// # Description
+    ///
+    /// - `table` is the table to index into. If null, it is the root
+    /// table.
+    ///
+    /// - `index` is a non-null index to a capability in `table`, or
+    /// if `table` is null, the root table.
+    ///
+    /// # Errors
+    ///
+    /// - This function will return [`CapError::NotPresent`] if any
+    /// capability index was out of bounds.
+    ///
+    /// - This function will return [`CapError::InvalidType`] if the
+    /// `table` index did not refer to a capability table.
+    pub fn debug_cap_slot(table: usize, index: usize) -> CapResult<()> {
+        // SAFETY: debug_cap_slot is always safe.
+        let res = unsafe { super::ecall2(SyscallNumber::DebugCapSlot, table as u64, index as u64) };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Print the debug representation of this thread's root captbl to
+    /// the kernel console.
+    pub fn debug_dump_root() {
+        // SAFETY: debug_dump_root is always safe.
+        let _ = unsafe { super::ecall0(SyscallNumber::DebugDumpRoot) };
+
+        // debug_dump_root will never fail.
+    }
+
+    /// Print a string to the kernel console.
+    pub fn debug_print_string(s: &str) {
+        // SAFETY: By invariants of &str.
+        let _ =
+            unsafe { super::ecall2(SyscallNumber::DebugPrint, s.as_ptr() as u64, s.len() as u64) };
+
+        // print_string will never fail for valid `&str`s.
     }
 }

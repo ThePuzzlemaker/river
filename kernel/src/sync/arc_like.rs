@@ -10,7 +10,8 @@ use core::{
 ///
 /// The data must only be synchronized using this `ArcLike`
 /// type. Additionally, all unsafe functions must be implemented with
-/// the proper invariants.
+/// the proper invariants. Default implemented functions should not be
+/// overwritten.
 pub unsafe trait ArcLike
 where
     Self: Sized,
@@ -71,6 +72,11 @@ where
         unsafe { Self::data(arc).as_ref() }
     }
 
+    /// Increase the refcount of the `ArcLike`.
+    ///
+    /// # Safety
+    ///
+    /// TODO
     unsafe fn increase_refcount(&self) {
         assert!(
             Self::refcount(self).fetch_add(1, Ordering::Relaxed) <= u64::MAX / 2,

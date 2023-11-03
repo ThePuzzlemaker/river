@@ -111,9 +111,7 @@ impl Elf {
             .seek(SeekFrom::Start(self.sec_hdr_offset as u64))
             .map_err(|_| ParseError)?;
 
-        Ok((0..self.sec_hdr_count)
-            .into_iter()
-            .map(|_| Section::parse(reader)))
+        Ok((0..self.sec_hdr_count).map(|_| Section::parse(reader)))
     }
 
     /// TODO
@@ -129,9 +127,7 @@ impl Elf {
             .seek(SeekFrom::Start(self.prog_hdr_offset as u64))
             .map_err(|_| ParseError)?;
 
-        Ok((0..self.prog_hdr_count)
-            .into_iter()
-            .map(|_| Segment::parse(reader)))
+        Ok((0..self.prog_hdr_count).map(|_| Segment::parse(reader)))
     }
 }
 
