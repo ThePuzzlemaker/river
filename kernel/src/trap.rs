@@ -2,15 +2,21 @@ use core::{arch::global_asm, mem};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
+    capability::captbl::Captbl,
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
-    proc::ProcState,
+    proc::{ProcState, Scheduler},
     sync::OnceCell,
     trampoline::{self, trampoline, Trapframe},
     uart,
 };
-use rille::{capability::CapError, syscalls::SyscallNumber, units::StorageUnits};
+use rille::{
+    addr::{VirtualMut, Vpn},
+    capability::{paging::PageTableFlags, CapError},
+    syscalls::SyscallNumber,
+    units::StorageUnits,
+};
 
 mod syscalls;
 
@@ -292,11 +298,14 @@ unsafe extern "C" fn user_trap() -> ! {
 
             match trapframe.a0.into() {
                 SyscallNumber::CopyDeep => sys_copy_deep(&mut private, trapframe),
-                SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
+                //SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
                 SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, trapframe),
                 SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, trapframe),
                 SyscallNumber::DebugPrint => sys_debug_print(&mut private, trapframe),
                 SyscallNumber::Swap => sys_swap(&mut private, trapframe),
+                SyscallNumber::Delete => sys_delete(&mut private, trapframe),
+                SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
+                SyscallNumber::PageMap => sys_page_map(&mut private, trapframe),
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
@@ -578,4 +587,7 @@ define_syscall!(sys_debug_cap_slot, 2);
 define_syscall!(sys_debug_print, 2);
 define_syscall!(sys_copy_deep, 6);
 define_syscall!(sys_swap, 4);
-define_syscall!(sys_retype_many, 7);
+//define_syscall!(sys_retype_many, 7);
+define_syscall!(sys_delete, 2);
+define_syscall!(sys_page_map, 4);
+define_syscall!(sys_pgtbl_map, 4);

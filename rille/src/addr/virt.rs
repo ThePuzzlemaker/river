@@ -176,7 +176,7 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
         let vpn_1 = vpn_1.into_usize() << 9;
         let vpn_0 = vpn_0.into_usize();
         let pgoff = pgoff.unwrap_or_default().into_usize();
-        Self::try_from_usize(vpn_2 | vpn_1 | vpn_0 | pgoff)
+        Self::try_from_usize(((vpn_2 | vpn_1 | vpn_0) << 12) | pgoff)
     }
 
     /// Align a virtual address to the page it is in.
@@ -372,13 +372,31 @@ impl From<u16> for Vpn {
     }
 }
 
+impl From<u64> for Vpn {
+    fn from(x: u64) -> Vpn {
+        Vpn::from_usize_truncate(x as usize)
+    }
+}
+
+impl From<Vpn> for u64 {
+    fn from(x: Vpn) -> u64 {
+        x.into_u16() as u64
+    }
+}
+
 /// A collection of virtual page numbers ([`Vpn`]s) that fully define
 /// the virtual address of some page in memory. Note that these are in
 /// the order defined in the spec, meaning that the 0th [`Vpn`] is
 /// most significant, and the 2nd [`Vpn`] is the least significant.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Vpns(pub [Vpn; 3]);
+
+impl fmt::Debug for Vpns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Vpns").field(&u32::from(*self)).finish()
+    }
+}
 
 impl Deref for Vpns {
     type Target = [Vpn; 3];

@@ -210,7 +210,8 @@ li {error}, 1
 
         let old: u64;
 
-        // Try to increase the number of readers by one, using an        // Acquire load-reserved and a Relaxed store-conditional. We
+        // Try to increase the number of readers by one, using an
+        // Acquire load-reserved and a Relaxed store-conditional. We
         // go into a short loop until the store-conditional succeeds,
         // but first short-circuit to spin if we're for sure
         // locked. This is essentially a cmpxchg loop, but more easy

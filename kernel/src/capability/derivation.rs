@@ -7,24 +7,104 @@ use core::{
 
 use rille::capability::CapResult;
 
-use super::{slotref::SlotRefMut, Capability, CapabilitySlot};
+use crate::capability::RawCapability;
+
+use super::{slotref::SlotRefMut, AnyCap, Capability, CapabilitySlot, EmptySlot};
 
 #[derive(Copy, Clone, Default, PartialEq, Eq)]
 #[repr(C, align(8))]
 pub struct DerivationTreeNode {
-    first_child: Option<NonNull<CapabilitySlot>>,
-    parent: Option<NonNull<CapabilitySlot>>,
-    next_sibling: Option<NonNull<CapabilitySlot>>,
-    prev_sibling: Option<NonNull<CapabilitySlot>>,
+    pub(super) first_child: Option<NonNull<CapabilitySlot>>,
+    pub(super) parent: Option<NonNull<CapabilitySlot>>,
+    pub(super) next_sibling: Option<NonNull<CapabilitySlot>>,
+    pub(super) prev_sibling: Option<NonNull<CapabilitySlot>>,
+}
+
+impl DerivationTreeNode {
+    pub fn has_child(&self) -> bool {
+        self.first_child.is_some()
+    }
+
+    pub fn first_child_mut(&'_ self) -> Option<SlotRefMut<'_, AnyCap>> {
+        let first_child = self.first_child?;
+
+        // SAFETY: This value is Send + Sync. Additionally, the
+        // pointer is non-null as we checked above. It's also valid by
+        // invariants.
+        let slot = unsafe { first_child.as_ref() };
+        let slot = slot.lock.write();
+
+        let meta = AnyCap::metadata_from_slot(&slot);
+        Some(SlotRefMut {
+            slot,
+            meta,
+            _phantom: PhantomData,
+        })
+    }
+
+    pub fn next_sibling_mut(&'_ self) -> Option<SlotRefMut<'_, AnyCap>> {
+        let next_sibling = self.next_sibling?;
+
+        // SAFETY: This value is Send + Sync. Additionally, the
+        // pointer is non-null as we checked above. It's also valid by
+        // invariants.
+        let slot = unsafe { next_sibling.as_ref() };
+        let slot = slot.lock.write();
+
+        let meta = AnyCap::metadata_from_slot(&slot);
+        Some(SlotRefMut {
+            slot,
+            meta,
+            _phantom: PhantomData,
+        })
+    }
+
+    pub fn prev_sibling_mut(&'_ self) -> Option<SlotRefMut<'_, AnyCap>> {
+        let prev_sibling = self.prev_sibling?;
+
+        // SAFETY: This value is Send + Sync. Additionally, the
+        // pointer is non-null as we checked above. It's also valid by
+        // invariants.
+        let slot = unsafe { prev_sibling.as_ref() };
+        let slot = slot.lock.write();
+
+        let meta = AnyCap::metadata_from_slot(&slot);
+        Some(SlotRefMut {
+            slot,
+            meta,
+            _phantom: PhantomData,
+        })
+    }
+
+    pub fn parent_mut(&'_ self) -> Option<SlotRefMut<'_, AnyCap>> {
+        let parent = self.parent?;
+
+        // SAFETY: This value is Send + Sync. Additionally, the
+        // pointer is non-null as we checked above. It's also valid by
+        // invariants.
+        let slot = unsafe { parent.as_ref() };
+        let slot = slot.lock.write();
+
+        let meta = AnyCap::metadata_from_slot(&slot);
+        Some(SlotRefMut {
+            slot,
+            meta,
+            _phantom: PhantomData,
+        })
+    }
 }
 
 impl<'a, C: Capability> SlotRefMut<'a, C> {
+    pub fn has_child(&self) -> bool {
+        self.slot.dtnode.first_child.is_some()
+    }
+
     /// TODO
     ///
     /// # Panics
     ///
     /// TODO
-    pub fn add_child(&mut self, child: &mut SlotRefMut<'a, C>) {
+    pub fn add_child<C2: Capability>(&mut self, child: &mut SlotRefMut<'_, C2>) {
         assert!(
             child.slot.dtnode.parent.is_none(),
             "SlotRefMut::add_child: parent was not null"
@@ -458,8 +538,53 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         Ok((new_self, new_other))
     }
 
+    pub fn delete(self) -> SlotRefMut<'a, EmptySlot> {
+        // SAFETY: By invariants.
+        let self_addr =
+            unsafe { NonNull::new_unchecked(ptr::addr_of!(*self.slot).cast_mut().cast()) };
+
+        // SAFETY: This is the first time we do this, and we won't do
+        // it again for this slot.
+        unsafe { C::do_delete(self.meta, &self.slot) };
+
+        let mut slot = SlotRefMut {
+            slot: self.slot,
+            meta: (),
+            _phantom: PhantomData,
+        };
+
+        let next_sibling = slot.slot.dtnode.next_sibling;
+        if let Some(mut parent) = slot.parent_mut() {
+            if parent.slot.dtnode.first_child == Some(self_addr) {
+                parent.slot.dtnode.first_child = next_sibling;
+            }
+        }
+
+        if let Some(mut next_sibling) = slot.next_sibling_mut() {
+            next_sibling.slot.dtnode.prev_sibling = None;
+        }
+
+        if let Some(mut prev_sibling) = slot.prev_sibling_mut() {
+            prev_sibling.slot.dtnode.next_sibling = None;
+        }
+
+        slot.for_each_child_mut(|child| {
+            child.slot.dtnode.parent = None;
+        });
+        slot.slot.dtnode = DerivationTreeNode::default();
+
+        slot.slot.cap = RawCapability {
+            empty: EmptySlot::default(),
+        };
+
+        slot
+    }
+
     // TODO: make this an iterator again?
-    pub fn for_each_child_mut(&mut self, mut f: impl for<'b, 'c> FnMut(&'c mut SlotRefMut<'b, C>)) {
+    pub fn for_each_child_mut(
+        &mut self,
+        mut f: impl for<'b, 'c> FnMut(&'c mut SlotRefMut<'b, AnyCap>),
+    ) {
         if let Some(mut child) = self.first_child_mut() {
             f(&mut child);
 
@@ -476,7 +601,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
                 let sibling = unsafe { dtnode.next_sibling.unwrap_unchecked().as_ref() };
                 let sibling = sibling.lock.write();
 
-                let meta = C::metadata_from_slot(&sibling.cap);
+                let meta = AnyCap::metadata_from_slot(&sibling);
                 slot = SlotRefMut {
                     slot: sibling,
                     meta,
@@ -487,7 +612,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         }
     }
 
-    pub fn first_child_mut(&'_ mut self) -> Option<SlotRefMut<'_, C>> {
+    pub fn first_child_mut(&'_ mut self) -> Option<SlotRefMut<'_, AnyCap>> {
         let dtnode = &self.slot.dtnode;
 
         let first_child = dtnode.first_child?;
@@ -498,7 +623,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         let slot = unsafe { first_child.as_ref() };
         let slot = slot.lock.write();
 
-        let meta = C::metadata_from_slot(&slot.cap);
+        let meta = AnyCap::metadata_from_slot(&slot);
         Some(SlotRefMut {
             slot,
             meta,
@@ -506,7 +631,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         })
     }
 
-    pub fn next_sibling_mut(&'_ mut self) -> Option<SlotRefMut<'_, C>> {
+    pub fn next_sibling_mut(&'_ mut self) -> Option<SlotRefMut<'_, AnyCap>> {
         let dtnode = &self.slot.dtnode;
 
         let next_sibling = dtnode.next_sibling?;
@@ -517,7 +642,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         let slot = unsafe { next_sibling.as_ref() };
         let slot = slot.lock.write();
 
-        let meta = C::metadata_from_slot(&slot.cap);
+        let meta = AnyCap::metadata_from_slot(&slot);
         Some(SlotRefMut {
             slot,
             meta,
@@ -525,7 +650,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         })
     }
 
-    pub fn prev_sibling_mut(&'_ mut self) -> Option<SlotRefMut<'_, C>> {
+    pub fn prev_sibling_mut(&'_ mut self) -> Option<SlotRefMut<'_, AnyCap>> {
         let dtnode = &self.slot.dtnode;
 
         let prev_sibling = dtnode.prev_sibling?;
@@ -536,7 +661,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         let slot = unsafe { prev_sibling.as_ref() };
         let slot = slot.lock.write();
 
-        let meta = C::metadata_from_slot(&slot.cap);
+        let meta = AnyCap::metadata_from_slot(&slot);
         Some(SlotRefMut {
             slot,
             meta,
@@ -544,7 +669,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         })
     }
 
-    pub fn parent_mut(&'_ mut self) -> Option<SlotRefMut<'_, C>> {
+    pub fn parent_mut(&'_ mut self) -> Option<SlotRefMut<'_, AnyCap>> {
         let dtnode = &self.slot.dtnode;
 
         let parent = dtnode.parent?;
@@ -555,7 +680,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         let slot = unsafe { parent.as_ref() };
         let slot = slot.lock.write();
 
-        let meta = C::metadata_from_slot(&slot.cap);
+        let meta = AnyCap::metadata_from_slot(&slot);
         Some(SlotRefMut {
             slot,
             meta,

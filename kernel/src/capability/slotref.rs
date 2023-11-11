@@ -1,5 +1,7 @@
 use core::{fmt, marker::PhantomData};
 
+use rille::capability::CapabilityType;
+
 use crate::sync::{SpinRwLockReadGuard, SpinRwLockWriteGuard};
 
 use super::{AnyCap, Capability, RawCapabilitySlot};
@@ -11,9 +13,13 @@ pub struct SlotRef<'a, C: Capability> {
 }
 
 impl<'a> SlotRef<'a, AnyCap> {
+    pub fn cap_type(&self) -> CapabilityType {
+        self.meta.cap_type()
+    }
+
     pub fn downcast<C: Capability>(self) -> Option<SlotRef<'a, C>> {
-        if C::is_slot_valid_type(&self.slot.cap) {
-            let meta = C::metadata_from_slot(&self.slot.cap);
+        if C::is_valid_type(self.slot.cap_type) {
+            let meta = C::metadata_from_slot(&self.slot);
             Some(SlotRef {
                 slot: self.slot,
                 meta,
@@ -27,7 +33,7 @@ impl<'a> SlotRef<'a, AnyCap> {
 
 impl<'a, C: Capability> SlotRef<'a, C> {
     pub fn upcast(self) -> SlotRef<'a, AnyCap> {
-        let meta = AnyCap::metadata_from_slot(&self.slot.cap);
+        let meta = AnyCap::metadata_from_slot(&self.slot);
         SlotRef {
             slot: self.slot,
             meta,
@@ -47,9 +53,13 @@ pub struct SlotRefMut<'a, C: Capability> {
 }
 
 impl<'a> SlotRefMut<'a, AnyCap> {
+    pub fn cap_type(&self) -> CapabilityType {
+        self.meta.cap_type()
+    }
+
     pub fn downcast_mut<C: Capability>(self) -> Option<SlotRefMut<'a, C>> {
-        if C::is_slot_valid_type(&self.slot.cap) {
-            let meta = C::metadata_from_slot(&self.slot.cap);
+        if C::is_valid_type(self.slot.cap_type) {
+            let meta = C::metadata_from_slot(&self.slot);
             Some(SlotRefMut {
                 slot: self.slot,
                 meta,
@@ -63,7 +73,7 @@ impl<'a> SlotRefMut<'a, AnyCap> {
 
 impl<'a, C: Capability> SlotRefMut<'a, C> {
     pub fn upcast_mut(self) -> SlotRefMut<'a, AnyCap> {
-        let meta = AnyCap::metadata_from_slot(&self.slot.cap);
+        let meta = AnyCap::metadata_from_slot(&self.slot);
         SlotRefMut {
             slot: self.slot,
             meta,

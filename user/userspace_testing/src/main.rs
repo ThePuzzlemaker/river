@@ -1,19 +1,29 @@
 #![no_std]
 #![no_main]
+#![feature(panic_info_message)]
 
 use core::{arch::asm, fmt, panic::PanicInfo};
 
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use rille::{
-    capability::{Capability, Captbl, Captr, RemoteCaptr, Untyped},
-    syscalls::{ecall0, ecall2, SyscallNumber},
+    addr::Vpn,
+    capability::{
+        paging::{BasePage, GigaPage, MegaPage, PageCaptr, PageTableFlags, PgTblCaptr},
+        Capability,
+        Captbl,
+        Captr,
+        RemoteCaptr, //Untyped,
+    },
+    init::{BootInfo, InitCapabilities},
+    syscalls::{self, ecall0, ecall2, SyscallNumber},
 };
+
+extern crate panic_handler;
 
 macro_rules! println {
     ($($tt:tt)*) => {{
 	core::fmt::write(&mut DebugPrint, format_args!($($tt)*)).unwrap();
-	// SAFETY: .
-	unsafe { debug_print("\n") }
+	syscalls::debug::debug_print_string("\n")
     }}
 }
 
@@ -24,99 +34,75 @@ macro_rules! print {
 }
 
 #[no_mangle]
-unsafe fn _start() -> ! {
-    let root_captbl: RemoteCaptr<Captbl> = RemoteCaptr::local(Captr::from_raw_unchecked(1));
-    let _untyped: Captr<Untyped> = Captr::from_raw_unchecked(4);
+extern "C" fn _start(init_info: *const BootInfo) -> ! {
+    let caps = unsafe { InitCapabilities::new() };
+
+    let root_captbl = RemoteCaptr::local(caps.captbl);
 
     let slot_2 = root_captbl
-        .copy_deep(
-            root_captbl.local_index(),
-            root_captbl,
-            Captr::from_raw_unchecked(2),
-        )
+        .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
+            Captr::from_raw_unchecked(2)
+        })
         .unwrap();
 
     let _slot_3 = root_captbl
-        .copy_deep(
-            root_captbl.local_index(),
-            root_captbl,
-            Captr::from_raw_unchecked(3),
-        )
-        .unwrap();
-    let _slot_5 = root_captbl
-        .copy_deep(
-            root_captbl.local_index(),
-            root_captbl,
-            Captr::from_raw_unchecked(5),
-        )
-        .unwrap();
-    let _slot_6 = RemoteCaptr::local(slot_2)
-        .copy_deep(slot_2, root_captbl, Captr::from_raw_unchecked(6))
+        .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
+            Captr::from_raw_unchecked(3)
+        })
         .unwrap();
 
-    ecall0(SyscallNumber::DebugDumpRoot).unwrap();
+    let _slot_4 = root_captbl
+        .copy_deep(slot_2, root_captbl, unsafe { Captr::from_raw_unchecked(4) })
+        .unwrap();
 
-    let mut total = [
-        "captblRoot",
-        "captbl2",
-        "captbl3",
-        "untyped",
-        "captbl4",
-        "captbl2a",
-    ];
+    let mut total_order = ["root", "2", "3", "2a"];
 
-    let mut rng = SmallRng::seed_from_u64(0xFEEDC0DE_C0DED00D);
-    for i in 0..100000 {
-        let v1 = rng.next_u64() % 6 + 1;
-        let v2 = rng.next_u64() % 6 + 1;
-        print!("\rRound {}: Swapping {v1} and {v2}", i + 1);
-        let v1: RemoteCaptr<Captbl> = RemoteCaptr::local(Captr::from_raw_unchecked(v1 as usize));
-        let v2: RemoteCaptr<Captbl> = RemoteCaptr::local(Captr::from_raw_unchecked(v2 as usize));
-        v1.swap(v2).unwrap();
-        total.swap(
-            v1.local_index().into_raw() - 1,
-            v2.local_index().into_raw() - 1,
-        )
-        //ecall0(SyscallNumber::DebugDumpRoot).unwrap();
+    let mut rand = SmallRng::seed_from_u64(0xDEADBEEF);
+
+    for i in 0..10_000 {
+        let n1 = (rand.next_u64() % 3 + 1) as usize;
+        let n2 = (rand.next_u64() % 3 + 1) as usize;
+        print!("\rRound {}: Swapping {} with {}", i + 1, n1, n2);
+        total_order.swap(n1 - 1, n2 - 1);
+        RemoteCaptr::remote(root_captbl.local_index(), unsafe {
+            Captr::<Captbl>::from_raw_unchecked(n1)
+        })
+        .swap(RemoteCaptr::remote(root_captbl.local_index(), unsafe {
+            Captr::<Captbl>::from_raw_unchecked(n2)
+        }))
+        .unwrap();
     }
 
-    println!(
-        "\nTotal modification order: {}, {}, {}, {}, {}, {}",
-        total[0], total[1], total[2], total[3], total[4], total[5]
-    );
+    println!("\nTotal order: {:?}", total_order);
+    //    let untyped = unsafe { Captr::<Untyped>::from_raw_unchecked(4) };
 
-    // let new_captbl = untyped
-    //     .retype_many(
-    //         RemoteCaptr::remote(root_captbl.local_index(), new_captr),
-    //         Captr::from_raw_unchecked(5),
-    //         1,
-    //         CaptblSizeSpec { n_slots_log2: 6 },
-    //     )
+    // let page: PageCaptr<BasePage> = untyped
+    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(2) }, ())
     //     .unwrap();
 
-    // debug_print("captr 1:\n");
-    // debug_capslot(root_captbl);
-    // debug_print("captr 2:\n");
-    // debug_capslot(RemoteCaptr::local(new_captr));
+    // let pg_l0: PgTblCaptr<GigaPage> = untyped
+    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(5) }, ())
+    //     .unwrap();
+    // let pg_l1: PgTblCaptr<MegaPage> = untyped
+    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(6) }, ())
+    //     .unwrap();
+    // let pg_l2: PgTblCaptr<BasePage> = untyped
+    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(7) }, ())
+    //     .unwrap();
 
-    // for new_captbl in new_captbl {
-    //     let captr3 = RemoteCaptr::remote(root_captbl.local_index(), new_captr)
-    //         .copy_deep(
-    //             root_captbl.local_index(),
-    //             RemoteCaptr::remote(root_captbl.local_index(), new_captbl),
-    //             Captr::from_raw_unchecked(1),
-    //         )
-    //         .unwrap();
-    //     debug_capslot(RemoteCaptr::local(new_captbl));
-    // }
-    // debug_print("captr 3:\n");
-    // debug_capslot(RemoteCaptr::local(captr3));
+    // page.map(pg_l2, Vpn::from(126u16), PageTableFlags::RW)
+    //     .unwrap();
+    // pg_l2
+    //     .map(pg_l1, Vpn::from(126u16), PageTableFlags::RW)
+    //     .unwrap();
+    // pg_l1
+    //     .map(pg_l0, Vpn::from(126u16), PageTableFlags::RW)
+    //     .unwrap();
 
-    // debug_print("final cap table: \n");
-    ecall0(SyscallNumber::DebugDumpRoot).unwrap();
+    syscalls::debug::debug_dump_root();
 
     loop {
-        asm!("nop");
+        unsafe { asm!("pause") };
     }
 }
 
@@ -124,28 +110,7 @@ struct DebugPrint;
 
 impl fmt::Write for DebugPrint {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        unsafe { debug_print(s) }
+        syscalls::debug::debug_print_string(s);
         Ok(())
-    }
-}
-
-unsafe fn debug_print(s: &str) {
-    ecall2(SyscallNumber::DebugPrint, s.as_ptr() as u64, s.len() as u64).unwrap();
-}
-
-unsafe fn _debug_capslot<C: Capability>(cap: RemoteCaptr<C>) {
-    ecall2(
-        SyscallNumber::DebugCapSlot,
-        cap.reftbl().into_raw() as u64,
-        cap.local_index().into_raw() as u64,
-    )
-    .unwrap();
-}
-
-#[panic_handler]
-unsafe fn panic(_panic: &PanicInfo<'_>) -> ! {
-    debug_print("panic");
-    loop {
-        asm!("nop");
     }
 }

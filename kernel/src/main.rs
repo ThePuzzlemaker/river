@@ -58,19 +58,20 @@ use core::{
     slice,
 };
 
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 use rille::{
     addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
+    init::BootInfo,
     units::StorageUnits,
 };
 use uart::UART;
 
 use crate::{
     boot::HartBootData,
-    capability::{captbl::Captbl, untyped::Untyped, EmptySlot},
+    capability::{captbl::Captbl, CaptblHeader, EmptySlot},
     elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
     io_traits::{Cursor, Read, Seek, SeekFrom},
@@ -249,20 +250,20 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     println!("{:#p}", captbl_mem);
     assert_eq!(captbl_mem.into_usize() & ((1 << 9) - 1), 0, "oops!");
 
-    let (ut_sz_log2, ut_mem) = {
-        let mut pma = PMAlloc::get();
-        let order = pma.num_free_pages().ilog2();
-        (order + 4096u64.ilog2(), pma.allocate(order).unwrap())
-    };
+    // let (ut_sz_log2, ut_mem) = {
+    //     let mut pma = PMAlloc::get();
+    //     let order = pma.num_free_pages().ilog2();
+    //     (order + 4096u64.ilog2(), pma.allocate(order).unwrap())
+    // };
     // SAFETY: This memory is valid.
-    let captbl = unsafe { Captbl::new(captbl_mem, 16, None) };
+    let captbl = unsafe { Captbl::new(captbl_mem, 16) };
 
     {
         let slot = captbl.get_mut::<EmptySlot>(1).unwrap();
         slot.replace(Captbl::clone(&captbl));
-        let slot = captbl.get_mut::<EmptySlot>(4).unwrap();
+        //let slot = captbl.get_mut::<EmptySlot>(4).unwrap();
         // SAFETY: This memory is valid.
-        slot.replace(unsafe { Untyped::new(ut_mem, ut_sz_log2 as u8) });
+        //slot.replace(unsafe { Untyped::new(ut_mem, ut_sz_log2 as u8) });
     }
 
     println!("captbl: {:#x?}", captbl);

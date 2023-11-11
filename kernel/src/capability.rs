@@ -1,21 +1,22 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
-use core::ptr::{self, NonNull};
-use core::sync::atomic::AtomicU64;
+use core::ptr::NonNull;
 
 use bitfield::bitfield;
 use itertools::Itertools;
+use rille::capability::paging::{BasePage, GigaPage, MegaPage, PageTableFlags, PagingLevel};
 use rille::capability::{CapError, CapResult, CapabilityType};
 
-use rille::addr::{canonicalize, Ppn, Vpns};
+use rille::addr::{canonicalize, DirectMapped, Physical, PhysicalMut, Ppn, VirtualMut, Vpn, Vpns};
 
-use crate::sync::SpinRwLock;
+use crate::paging::{self, RawPageTable};
+use crate::sync::{SpinRwLock, SpinRwLockWriteGuard};
 
-use self::captbl::{Captbl, CaptblSlot};
+use self::captbl::{Captbl, CaptblSlot, WeakCaptbl};
 use self::derivation::DerivationTreeNode;
 use self::slotref::{SlotRef, SlotRefMut};
-use self::untyped::{Untyped, UntypedSlot};
+//use self::untyped::{CapMetaRef, Untyped, UntypedSlot};
 
 pub mod captbl;
 pub mod derivation;
@@ -25,11 +26,18 @@ pub mod untyped;
 #[repr(C)]
 pub union RawCapability {
     pub empty: EmptySlot,
-    captbl: ManuallyDrop<CaptblSlot>,
-    pub untyped: UntypedSlot,
+    pub captbl: ManuallyDrop<CaptblSlot>,
+    pub allocator: AllocatorSlot,
+    //pub untyped: UntypedSlot,
     pub pgtbl: PgTblSlot,
     pub page: PageSlot,
-    pub raw: [u8; 16],
+    raw: [u8; 16],
+}
+
+impl Default for RawCapability {
+    fn default() -> Self {
+        Self { empty: EmptySlot }
+    }
 }
 
 #[repr(C)]
@@ -38,20 +46,21 @@ pub struct CapabilitySlot {
     lock: SpinRwLock<RawCapabilitySlot>,
 }
 
-#[repr(C)]
-#[derive(Debug, PartialEq)]
+#[derive(Default, PartialEq)]
+#[repr(C, align(8))]
 pub struct RawCapabilitySlot {
     pub cap: RawCapability,
+    #[allow(clippy::missing_fields_in_debug)]
+    pub cap_type: CapabilityType,
     pub dtnode: DerivationTreeNode,
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 #[repr(align(64))]
 pub struct CaptblHeader {
-    refcount: AtomicU64,
+    //refcount: AtomicU64,
     //captbl_lock: SpinRwLock<()>,
     n_slots_log2: u8,
-    untyped: Option<NonNull<CapabilitySlot>>,
 }
 
 const _ASSERT_CAPTBLHEADER_SIZE_EQ_64: () = assert!(
@@ -64,45 +73,7 @@ const _ASSERT_RAWCAPSLOT_SIZE_EQ_64: () = assert!(
     "RawCapabilitySlot size was not 64 bytes"
 );
 
-#[repr(transparent)]
-pub struct CaptblSlots {
-    inner_no_meta: [CapabilitySlot],
-}
-
-impl CaptblSlots {
-    fn ptr_from_raw(ptr: *const [CapabilitySlot]) -> *const Self {
-        ptr as *const Self
-    }
-}
-
 impl Captbl {
-    fn slots(&self) -> &CaptblSlots {
-        let slots_base_ptr = self
-            .hdr
-            .as_ptr()
-            .wrapping_add(1)
-            .cast::<CapabilitySlot>()
-            .cast_const();
-        let slots_slice_ptr =
-            ptr::slice_from_raw_parts(slots_base_ptr, (1 << self.n_slots_log2) - 1);
-
-        // SAFETY: Our invariants ensure this is valid.
-        unsafe { &*CaptblSlots::ptr_from_raw(slots_slice_ptr) }
-    }
-
-    unsafe fn slots_uninit(&mut self) -> &mut [MaybeUninit<CapabilitySlot>] {
-        let slots_base_ptr = self
-            .hdr
-            .as_ptr()
-            .wrapping_add(1)
-            .cast::<MaybeUninit<CapabilitySlot>>();
-        let slots_slice_ptr =
-            ptr::slice_from_raw_parts_mut(slots_base_ptr, (1 << self.n_slots_log2) - 1);
-
-        // SAFETY: By invariants.
-        unsafe { &mut *slots_slice_ptr }
-    }
-
     /// TODO
     ///
     /// # Errors
@@ -115,18 +86,19 @@ impl Captbl {
             return Err(CapError::NotPresent);
         }
 
-        let slot = self
-            .slots()
-            .inner_no_meta
-            .get(index - 1)
-            .ok_or(CapError::NotPresent)?;
+        // SAFETY: By invariants.
+        let slots = unsafe { &**self.inner };
+
+        let slot = slots.get(index).ok_or(CapError::NotPresent)?;
+        // SAFETY: By invariants.
+        let slot = unsafe { &*slot.slot };
         let guard = slot.lock.read();
 
-        if !C::is_slot_valid_type(&guard.cap) {
+        if !C::is_valid_type(guard.cap_type) {
             return Err(CapError::InvalidType);
         }
 
-        let meta = C::metadata_from_slot(&guard.cap);
+        let meta = C::metadata_from_slot(&guard);
         Ok(SlotRef {
             slot: guard,
             meta,
@@ -146,18 +118,19 @@ impl Captbl {
             return Err(CapError::NotPresent);
         }
 
-        let slot = self
-            .slots()
-            .inner_no_meta
-            .get(index - 1)
-            .ok_or(CapError::NotPresent)?;
+        // SAFETY: By invariants.
+        let slots = unsafe { &**self.inner };
+
+        let slot = slots.get(index).ok_or(CapError::NotPresent)?;
+        // SAFETY: By invariants.
+        let slot = unsafe { &*slot.slot };
         let guard = slot.lock.write();
 
-        if !C::is_slot_valid_type(&guard.cap) {
+        if !C::is_valid_type(guard.cap_type) {
             return Err(CapError::InvalidType);
         }
 
-        let meta = C::metadata_from_slot(&guard.cap);
+        let meta = C::metadata_from_slot(&guard);
         Ok(SlotRefMut {
             slot: guard,
             meta,
@@ -181,13 +154,13 @@ where
 {
     type Metadata: fmt::Debug;
 
-    fn is_slot_valid_type(slot: &RawCapability) -> bool;
+    fn is_valid_type(cap_type: CapabilityType) -> bool;
 
-    fn metadata_from_slot(slot: &RawCapability) -> Self::Metadata;
+    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata;
 
     fn into_meta(self) -> Self::Metadata;
 
-    fn metadata_to_slot(meta: &Self::Metadata) -> RawCapability;
+    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability);
 
     /// Perform any potential deallocation and refcounting when this
     /// capability slot is deleted.
@@ -195,24 +168,27 @@ where
     /// # Safety
     ///
     /// This function must be called only once per slot.
-    unsafe fn do_delete(slot: SlotRefMut<'_, Self>);
+    unsafe fn do_delete(meta: Self::Metadata, slot: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>);
 }
 
 impl Capability for EmptySlot {
     type Metadata = ();
 
-    fn is_slot_valid_type(slot: &RawCapability) -> bool {
-        slot.cap_type() == CapabilityType::Empty
+    fn is_valid_type(cap_type: CapabilityType) -> bool {
+        cap_type == CapabilityType::Empty
     }
 
     fn into_meta(self) -> Self::Metadata {}
-    fn metadata_from_slot(_: &RawCapability) {}
-    fn metadata_to_slot(_: &Self::Metadata) -> RawCapability {
-        RawCapability {
-            empty: EmptySlot::default(),
-        }
+    fn metadata_from_slot(_: &RawCapabilitySlot) {}
+    fn metadata_to_slot(_: &Self::Metadata) -> (CapabilityType, RawCapability) {
+        (
+            CapabilityType::Empty,
+            RawCapability {
+                empty: EmptySlot::default(),
+            },
+        )
     }
-    unsafe fn do_delete(_: SlotRefMut<'_, Self>) {}
+    unsafe fn do_delete(_: Self::Metadata, _: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {}
 }
 
 impl<'a> CapToOwned for SlotRef<'a, EmptySlot> {
@@ -234,8 +210,11 @@ impl<'a> CapToOwned for SlotRefMut<'a, EmptySlot> {
 #[derive(Clone, Debug)]
 pub enum AnyCap {
     Empty,
-    Captbl(ManuallyDrop<Captbl>),
-    Untyped(Untyped),
+    Captbl(WeakCaptbl),
+    // Untyped(Untyped),
+    Allocator,
+    Page(Page),
+    PgTbl(PgTbl),
     // TODO
 }
 
@@ -243,8 +222,11 @@ impl AnyCap {
     pub fn cap_type(&self) -> CapabilityType {
         match self {
             AnyCap::Empty => CapabilityType::Empty,
-            AnyCap::Captbl(_) => CapabilityType::Unknown,
-            AnyCap::Untyped(_) => CapabilityType::Untyped,
+            AnyCap::Captbl(_) => CapabilityType::Captbl,
+            // AnyCap::Untyped(_) => CapabilityType::Untyped,
+            AnyCap::Allocator => CapabilityType::Allocator,
+            AnyCap::Page(_) => CapabilityType::Page,
+            AnyCap::PgTbl(_) => CapabilityType::PgTbl,
         }
     }
 }
@@ -253,17 +235,18 @@ impl Capability for AnyCap {
     type Metadata = AnyCap;
 
     #[inline]
-    fn is_slot_valid_type(_: &RawCapability) -> bool {
+    fn is_valid_type(_: CapabilityType) -> bool {
         true
     }
 
-    fn metadata_from_slot(slot: &RawCapability) -> Self::Metadata {
-        match slot.cap_type() {
+    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
+        match slot.cap_type {
             CapabilityType::Empty => AnyCap::Empty,
             CapabilityType::Captbl => AnyCap::Captbl(Captbl::metadata_from_slot(slot)),
-            CapabilityType::Untyped => AnyCap::Untyped(Untyped::metadata_from_slot(slot)),
-            CapabilityType::PgTbl => todo!(),
-            CapabilityType::Page => todo!(),
+            CapabilityType::Allocator => AnyCap::Allocator,
+            //CapabilityType::Untyped => AnyCap::Untyped(Untyped::metadata_from_slot(slot)),
+            CapabilityType::PgTbl => AnyCap::PgTbl(PgTbl::metadata_from_slot(slot)),
+            CapabilityType::Page => AnyCap::Page(Page::metadata_from_slot(slot)),
             CapabilityType::Unknown => todo!(),
         }
     }
@@ -272,25 +255,28 @@ impl Capability for AnyCap {
         self
     }
 
-    fn metadata_to_slot(meta: &Self::Metadata) -> RawCapability {
+    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
         match meta {
             AnyCap::Empty => EmptySlot::metadata_to_slot(&()),
             AnyCap::Captbl(tbl) => Captbl::metadata_to_slot(tbl),
-            AnyCap::Untyped(ut) => Untyped::metadata_to_slot(ut),
+            // AnyCap::Untyped(ut) => Untyped::metadata_to_slot(ut),
+            AnyCap::Allocator => AllocatorSlot::metadata_to_slot(&()),
+            AnyCap::Page(page) => Page::metadata_to_slot(page),
+            AnyCap::PgTbl(pgtbl) => PgTbl::metadata_to_slot(pgtbl),
         }
     }
 
-    unsafe fn do_delete(slot: SlotRefMut<'_, Self>) {
+    unsafe fn do_delete(meta: Self::Metadata, slot: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
         // SAFETY: Our invariants ensure this isn't called twice, and
         // we downcast correctly.
         unsafe {
-            match slot.meta.cap_type() {
-                CapabilityType::Empty => {}
-                CapabilityType::Captbl => Captbl::do_delete(slot.downcast_mut().unwrap()),
-                CapabilityType::Untyped => Untyped::do_delete(slot.downcast_mut().unwrap()),
-                CapabilityType::PgTbl => todo!(),
-                CapabilityType::Page => todo!(),
-                CapabilityType::Unknown => todo!(),
+            match meta {
+                AnyCap::Empty => {}
+                AnyCap::Captbl(tbl) => Captbl::do_delete(tbl, slot),
+                // AnyCap::Untyped(ut) => Untyped::do_delete(ut, slot),
+                AnyCap::Allocator => AllocatorSlot::do_delete((), slot),
+                AnyCap::Page(pg) => Page::do_delete(pg, slot),
+                AnyCap::PgTbl(pgtbl) => PgTbl::do_delete(pgtbl, slot),
             }
         }
     }
@@ -303,7 +289,10 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
         match &self.meta {
             AnyCap::Empty => AnyCap::Empty,
             AnyCap::Captbl(tbl) => AnyCap::Captbl(tbl.clone()),
-            AnyCap::Untyped(ut) => AnyCap::Untyped(ut.clone()),
+            AnyCap::Allocator => AnyCap::Allocator,
+            // AnyCap::Untyped(ut) => AnyCap::Untyped(ut.clone()),
+            AnyCap::Page(page) => AnyCap::Page(page.clone()),
+            AnyCap::PgTbl(pgtbl) => AnyCap::PgTbl(pgtbl.clone()),
         }
     }
 }
@@ -315,7 +304,10 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
         match &self.meta {
             AnyCap::Empty => AnyCap::Empty,
             AnyCap::Captbl(tbl) => AnyCap::Captbl(tbl.clone()),
-            AnyCap::Untyped(ut) => AnyCap::Untyped(ut.clone()),
+            AnyCap::Allocator => AnyCap::Allocator,
+            // AnyCap::Untyped(ut) => AnyCap::Untyped(ut.clone()),
+            AnyCap::Page(page) => AnyCap::Page(page.clone()),
+            AnyCap::PgTbl(pgtbl) => AnyCap::PgTbl(pgtbl.clone()),
         }
     }
 }
@@ -327,19 +319,12 @@ impl<'a> SlotRefMut<'a, EmptySlot> {
             meta: val.into_meta(),
             _phantom: PhantomData,
         };
-        slot.slot.cap = C::metadata_to_slot(&slot.meta);
+        (slot.slot.cap_type, slot.slot.cap) = C::metadata_to_slot(&slot.meta);
         slot
     }
 }
 
 impl RawCapability {
-    #[inline]
-    pub fn cap_type(&self) -> CapabilityType {
-        // SAFETY: cap_type is always the same size and at the same
-        // offset.
-        unsafe { self.empty.cap_type() }
-    }
-
     pub fn captbl(slot: CaptblSlot) -> Self {
         RawCapability {
             captbl: ManuallyDrop::new(slot),
@@ -347,87 +332,271 @@ impl RawCapability {
     }
 }
 
-bitfield! {
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    pub struct EmptySlot(u128);
-    impl Debug;
-    u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct EmptySlot;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PageSlot {
+    pub ppn: Ppn,
+    pub size_log2: u8,
 }
 
-impl EmptySlot {
-    fn with_cap_type(mut self, cap_type: CapabilityType) -> Self {
-        self.set_cap_type(cap_type);
-        self
+#[derive(Clone, Debug)]
+pub struct Page {
+    phys: PhysicalMut<u8, DirectMapped>,
+    size_log2: u8,
+}
+
+impl Page {
+    pub unsafe fn new(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Self {
+        Self { phys, size_log2 }
     }
 }
 
-impl Default for EmptySlot {
-    fn default() -> Self {
-        EmptySlot(0).with_cap_type(CapabilityType::Empty)
-    }
-}
+impl Capability for Page {
+    type Metadata = Page;
 
-bitfield! {
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    pub struct PageSlot(u128);
-    impl Debug;
-    u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
-    pub u64, from into Ppn, phys_addr, set_phys_addr: 31, 5;
-    pub u8, size_log2, set_size_log2: 36, 32;
-}
-
-impl PageSlot {
-    fn with_cap_type(mut self, cap_type: CapabilityType) -> Self {
-        self.set_cap_type(cap_type);
-        self
+    fn is_valid_type(cap_type: CapabilityType) -> bool {
+        cap_type == CapabilityType::Page
     }
 
-    #[must_use]
-    pub fn with_phys_addr(mut self, phys_addr: Ppn) -> Self {
-        self.set_phys_addr(phys_addr);
-        self
+    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
+        // SAFETY: By invariants.
+        let slot = unsafe { slot.cap.page };
+        Page {
+            phys: Physical::from_components(slot.ppn, None),
+            size_log2: slot.size_log2,
+        }
     }
 
-    #[must_use]
-    pub fn with_size_log2(mut self, size_log2: u8) -> Self {
-        self.set_size_log2(size_log2);
-        self
-    }
-}
-
-impl Default for PageSlot {
-    fn default() -> Self {
-        PageSlot(0).with_cap_type(CapabilityType::Page)
-    }
-}
-
-bitfield! {
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    pub struct PgTblSlot(u128);
-    impl Debug;
-    u8, from into CapabilityType, cap_type, set_cap_type: 4, 0;
-    pub u32, from into Vpns, virt_addr, set_virt_addr: 31, 5;
-}
-
-impl PgTblSlot {
-    fn with_cap_type(mut self, cap_type: CapabilityType) -> Self {
-        self.set_cap_type(cap_type);
+    fn into_meta(self) -> Self::Metadata {
         self
     }
 
-    #[must_use]
-    pub fn with_virt_addr(mut self, virt_addr: Vpns) -> Self {
-        self.set_virt_addr(virt_addr);
-        self
+    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
+        (
+            CapabilityType::Page,
+            RawCapability {
+                page: PageSlot {
+                    ppn: meta.phys.ppn(),
+                    size_log2: meta.size_log2,
+                },
+            },
+        )
+    }
+
+    unsafe fn do_delete(meta: Self::Metadata, slot: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
+        // if let Some(untyped) = meta.untyped {
+        //     // SAFETY: If we're valid and this is non-null, it must be
+        //     // valid.
+        //     let ut = unsafe { untyped.as_ref() };
+        //     let ut = ut.lock.write();
+        //     let ut_meta = Untyped::metadata_from_slot(&ut.cap);
+        //     let mut ut: SlotRefMut<Untyped> = SlotRefMut {
+        //         slot: ut,
+        //         meta: ut_meta,
+        //         _phantom: PhantomData,
+        //     };
+        //     // SAFETY: By our invariants.
+        //     unsafe { ut.handle_child_deletion(CapMetaRef::Page(&meta), slot) }
+        // }
     }
 }
 
-impl Default for PgTblSlot {
-    fn default() -> Self {
-        PgTblSlot(0).with_cap_type(CapabilityType::PgTbl)
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PgTblSlot {
+    pub vpns: Vpns,
+    pub page_size_log2: u8,
+}
+
+#[derive(Clone)]
+pub struct PgTbl {
+    table: NonNull<RawPageTable>,
+    page_size_log2: u8,
+}
+
+impl fmt::Debug for PgTbl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgTbl")
+            .field("<ptr>", &self.table.as_ptr())
+            // SAFETY: table is modified atomically
+            .field("tbl", unsafe { self.table.as_ref() })
+            .finish()
+    }
+}
+
+impl PgTbl {
+    pub unsafe fn new(table: NonNull<RawPageTable>, page_size_log2: u8) -> Self {
+        Self {
+            table,
+            page_size_log2,
+        }
+    }
+}
+
+impl Capability for PgTbl {
+    type Metadata = PgTbl;
+
+    fn is_valid_type(cap_type: CapabilityType) -> bool {
+        cap_type == CapabilityType::PgTbl
+    }
+
+    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
+        // SAFETY: By invariants.
+        let slot = unsafe { slot.cap.pgtbl };
+        PgTbl {
+            // SAFETY: By invariants
+            table: unsafe {
+                NonNull::new_unchecked(
+                    VirtualMut::<_, DirectMapped>::from_components(slot.vpns.0, None)
+                        .into_ptr_mut(),
+                )
+            },
+            page_size_log2: slot.page_size_log2,
+        }
+    }
+
+    fn into_meta(self) -> Self::Metadata {
+        self
+    }
+
+    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
+        (
+            CapabilityType::PgTbl,
+            RawCapability {
+                pgtbl: PgTblSlot {
+                    vpns: Vpns(VirtualMut::<_, DirectMapped>::from_ptr(meta.table.as_ptr()).vpns()),
+                    page_size_log2: meta.page_size_log2,
+                },
+            },
+        )
+    }
+
+    unsafe fn do_delete(meta: Self::Metadata, slot: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
+        // if let Some(untyped) = meta.untyped {
+        //     // SAFETY: If we're valid and this is non-null, it must be
+        //     // valid.
+        //     let ut = unsafe { untyped.as_ref() };
+        //     let ut = ut.lock.write();
+        //     let ut_meta = Untyped::metadata_from_slot(&ut.cap);
+        //     let mut ut: SlotRefMut<Untyped> = SlotRefMut {
+        //         slot: ut,
+        //         meta: ut_meta,
+        //         _phantom: PhantomData,
+        //     };
+        //     // SAFETY: By our invariants.
+        //     unsafe { ut.handle_child_deletion(CapMetaRef::PgTbl(&meta), slot) }
+        // }
+    }
+}
+
+impl<'a> SlotRefMut<'a, PgTbl> {
+    pub fn map_page(
+        &mut self,
+        page: &mut SlotRefMut<'_, Page>,
+        vpn: Vpn,
+        flags: PageTableFlags,
+    ) -> CapResult<()> {
+        use paging::PageTableFlags as KernelFlags;
+
+        if page.meta.size_log2 != self.meta.page_size_log2 {
+            return Err(CapError::InvalidSize);
+        }
+
+        if page.meta.size_log2 == GigaPage::PAGE_SIZE_LOG2 as u8 && vpn.into_u16() >= 128 {
+            return Err(CapError::InvalidOperation);
+        }
+
+        let flags = KernelFlags::from_bits_truncate(flags.bits()) | KernelFlags::VAD;
+
+        // // SAFETY: This table is synchronized atomically.
+        // let table = unsafe { self.meta.table.as_ref() };
+        // let entry = &table.ptes[vpn.into_usize()];
+        // entry
+        // entry.store(
+        //     PageTableEntry {
+        //         flags,
+        //         ppn: page.meta.phys.ppn(),
+        //     }
+        //     .encode()
+        //     .0,
+        // );
+        //        self.add_child(page);
+
+        todo!();
+
+        Ok(())
+    }
+
+    pub fn map_pgtbl(
+        &mut self,
+        pgtbl: &mut SlotRefMut<'_, PgTbl>,
+        vpn: Vpn,
+        _flags: PageTableFlags,
+    ) -> CapResult<()> {
+        use paging::PageTableFlags as KernelFlags;
+
+        let self_size = self.meta.page_size_log2 as usize;
+        let other_size = pgtbl.meta.page_size_log2 as usize;
+        if self_size == BasePage::PAGE_SIZE_LOG2
+            || (self_size == MegaPage::PAGE_SIZE_LOG2 && other_size != BasePage::PAGE_SIZE_LOG2)
+            || (self_size == GigaPage::PAGE_SIZE_LOG2 && other_size != MegaPage::PAGE_SIZE_LOG2)
+        {
+            return Err(CapError::InvalidSize);
+        }
+
+        if self_size == GigaPage::PAGE_SIZE_LOG2 && vpn.into_u16() >= 128 {
+            return Err(CapError::InvalidOperation);
+        }
+
+        let flags = KernelFlags::VAD;
+
+        // // SAFETY: This table is synchronized atomically.
+        // let table = unsafe { self.meta.table.as_ref() };
+        // let entry = &table.ptes[vpn.into_usize()];
+        // entry.store(
+        //     PageTableEntry {
+        //         flags,
+        //         ppn: VirtualConst::<_, DirectMapped>::from_ptr(pgtbl.meta.table.as_ptr())
+        //             .into_phys()
+        //             .ppn(),
+        //     }
+        //     .encode()
+        //     .0,
+        //     Ordering::Release,
+        // );
+        // TODO: sfence
+        todo!();
+
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AllocatorSlot;
+
+impl Capability for AllocatorSlot {
+    type Metadata = ();
+
+    fn is_valid_type(cap_type: CapabilityType) -> bool {
+        cap_type == CapabilityType::Allocator
+    }
+
+    fn metadata_from_slot(slot: &RawCapabilitySlot) {}
+
+    fn into_meta(self) {}
+
+    fn metadata_to_slot(meta: &()) -> (CapabilityType, RawCapability) {
+        (
+            CapabilityType::Allocator,
+            RawCapability {
+                allocator: AllocatorSlot::default(),
+            },
+        )
+    }
+
+    unsafe fn do_delete(meta: Self::Metadata, slot: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
+        todo!()
     }
 }
 
@@ -450,50 +619,34 @@ impl PartialEq for RawCapability {
 
 impl Eq for RawCapability {}
 
-impl fmt::Debug for RawCapability {
+// TODO
+impl fmt::Debug for RawCapabilitySlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.cap_type() {
+        f.debug_struct("RawCapabilitySlot")
+            .field("cap", &RawCapDebugAdapter(&self))
+            .field("dtnode", &self.dtnode)
+            .finish()
+    }
+}
+
+struct RawCapDebugAdapter<'a>(&'a RawCapabilitySlot);
+
+impl<'a> fmt::Debug for RawCapDebugAdapter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.cap_type {
             CapabilityType::Empty => f.debug_struct("EmptySlot").finish(),
             // SAFETY: Type check.
-            CapabilityType::Captbl => unsafe { &self.captbl }.fmt(f),
+            CapabilityType::Captbl => unsafe { &self.0.cap.captbl }.fmt(f),
             // SAFETY: Type check.
-            CapabilityType::Untyped => unsafe { &self.untyped }.fmt(f),
-            CapabilityType::PgTbl => todo!(),
-            CapabilityType::Page => todo!(),
+            CapabilityType::Allocator => unsafe { &self.0.cap.allocator }.fmt(f),
+            // // SAFETY: Type check.
+            // CapabilityType::Untyped => unsafe { &self.untyped }.fmt(f),
+            // SAFETY: Type check.
+            CapabilityType::PgTbl => unsafe { &self.0.cap.pgtbl }.fmt(f),
+            // SAFETY: Type check.
+            CapabilityType::Page => unsafe { &self.0.cap.page }.fmt(f),
             CapabilityType::Unknown => f.debug_struct("InvalidCap").finish(),
         }
-    }
-}
-
-struct DebugAdapterCoalesce<'a>(u64, &'a CapabilitySlot);
-
-impl<'a> fmt::Debug for DebugAdapterCoalesce<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.1.fmt(f)?;
-        match self.0 {
-            0 => Ok(()),
-            n => write!(f, " <repeated {} times>", n + 1),
-        }
-    }
-}
-
-impl fmt::Debug for CaptblSlots {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map()
-            .entries(
-                self.inner_no_meta
-                    .iter()
-                    .map(|x| DebugAdapterCoalesce(0, x))
-                    .coalesce(|l, r| {
-                        if *l.1.lock.read() == *r.1.lock.read() {
-                            Ok(DebugAdapterCoalesce(l.0 + 1, l.1))
-                        } else {
-                            Err((l, r))
-                        }
-                    })
-                    .map(|x| (x.1 as *const _, x)),
-            )
-            .finish()
     }
 }
 
@@ -553,13 +706,13 @@ impl SlotPtrWithTable {
 }
 
 // #[repr(C, align(4096))]
-// pub struct ThreadControlBlock {
+// pub struct Thread {
 //     trapframe: Trapframe,
 //     captbl: Option<Captbl>,
 //     root_pgtbl: Option<NonNull<()>>,
 //     state: ThreadState,
 //     context: Context,
-//     stack: TCBKernelStack,
+//     stack: ThreadKernelStack,
 // }
 
 // #[derive(Copy, Clone, Debug, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
@@ -574,7 +727,7 @@ impl SlotPtrWithTable {
 // }
 
 // #[repr(C, align(4096))]
-// pub struct TCBKernelStack {
+// pub struct ThreadKernelStack {
 //     inner: [u8; THREAD_STACK_SIZE],
 // }
 

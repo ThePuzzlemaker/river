@@ -209,6 +209,22 @@ pub mod captbl {
             Ok(())
         }
     }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn delete(table: usize, index: usize) -> CapResult<()> {
+        // SAFETY: delete is always safe.
+        let res = unsafe { super::ecall2(SyscallNumber::Delete, table as u64, index as u64) };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Syscalls relating to the [`Untyped`][super::capability::Untyped]
@@ -275,6 +291,64 @@ pub mod untyped {
                 count as u64,
                 u8::from(cap_type) as u64,
                 size as u64,
+            )
+        };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Syscalls for paging.
+pub mod paging {
+    use crate::{
+        addr::Vpn,
+        capability::{paging::PageTableFlags, CapError, CapResult},
+    };
+
+    use super::SyscallNumber;
+
+    pub fn pgtbl_map(
+        from_pgtbl: usize,
+        into_pgtbl: usize,
+        vpn: Vpn,
+        flags: PageTableFlags,
+    ) -> CapResult<()> {
+        // SAFETY: pgtbl_map is always safe.
+        let res = unsafe {
+            super::ecall4(
+                SyscallNumber::PageTableMap,
+                from_pgtbl as u64,
+                into_pgtbl as u64,
+                vpn.into_usize() as u64,
+                flags.bits() as u64,
+            )
+        };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn page_map(
+        from_page: usize,
+        into_pgtbl: usize,
+        vpn: Vpn,
+        flags: PageTableFlags,
+    ) -> CapResult<()> {
+        // SAFETY: pgtbl_map is always safe.
+        let res = unsafe {
+            super::ecall4(
+                SyscallNumber::PageMap,
+                from_page as u64,
+                into_pgtbl as u64,
+                vpn.into_usize() as u64,
+                flags.bits() as u64,
             )
         };
 

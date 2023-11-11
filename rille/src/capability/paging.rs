@@ -4,7 +4,7 @@ use core::{convert::Infallible, fmt::Debug, marker::PhantomData};
 
 use bitflags::bitflags;
 
-use crate::addr::Vpn;
+use crate::{addr::Vpn, syscalls};
 
 use super::{CapResult, Capability, CapabilityType, Captr};
 
@@ -37,15 +37,6 @@ impl<L: PagingLevel> Capability for Page<L> {
 /// used for address translation. The [`PagingLevel`] determines which
 /// part of the address translation hierarchy this page table
 /// occupies.
-///
-/// While the kernel's representation of page tables at all paging
-/// levels is identical, `rille` purposefully has these as different
-/// types in order to aide in ensuring that levels are properly
-/// accounted for. However, for utilities such as
-/// [`Captr<Untyped>::retype_many`], implementations of [`From`] and
-/// [`Into`] are provided for ease-of-use. These operations are
-/// extremely cheap (in fact, they are practically no-ops from a
-/// processor perspective).
 ///
 /// See [`PgTblCaptr`] for operations on this capability.
 #[derive(Copy, Clone, Debug)]
@@ -119,7 +110,7 @@ impl<L: PagingLevel> Capability for PageTable<L> {
     type RetypeSizeSpec = ();
 
     fn retype_size_spec(_spec: Self::RetypeSizeSpec) -> usize {
-        0
+        L::PAGE_SIZE_LOG2
     }
 
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::PgTbl;
@@ -148,6 +139,18 @@ bitflags! {
     }
 }
 
+impl From<u64> for PageTableFlags {
+    fn from(value: u64) -> Self {
+        Self::from_bits_truncate(value as u8)
+    }
+}
+
+impl From<PageTableFlags> for u64 {
+    fn from(value: PageTableFlags) -> Self {
+        value.bits as u64
+    }
+}
+
 impl PgTblCaptr<BasePage> {
     /// Map a level 2 page table into a level 1 page table. This makes
     /// the processor use the L2 table for translating the 1MiB region
@@ -158,11 +161,11 @@ impl PgTblCaptr<BasePage> {
     /// TODO
     pub fn map(
         self: PgTblCaptr<BasePage>,
-        _into: PgTblCaptr<MegaPage>,
-        _vpn: Vpn,
-        _flags: PageTableFlags,
+        into: PgTblCaptr<MegaPage>,
+        vpn: Vpn,
+        flags: PageTableFlags,
     ) -> CapResult<()> {
-        todo!();
+        syscalls::paging::pgtbl_map(self.into_raw(), into.into_raw(), vpn, flags)
     }
 }
 
@@ -181,11 +184,11 @@ impl PgTblCaptr<MegaPage> {
     /// TODO
     pub fn map(
         self: PgTblCaptr<MegaPage>,
-        _into: PgTblCaptr<GigaPage>,
-        _vpn: Vpn,
-        _flags: PageTableFlags,
+        into: PgTblCaptr<GigaPage>,
+        vpn: Vpn,
+        flags: PageTableFlags,
     ) -> CapResult<()> {
-        todo!();
+        syscalls::paging::pgtbl_map(self.into_raw(), into.into_raw(), vpn, flags)
     }
 }
 
@@ -205,11 +208,11 @@ impl<L: PagingLevel> PageCaptr<L> {
     /// TODO
     pub fn map(
         self: PageCaptr<L>,
-        _into: PgTblCaptr<L>,
-        _vpn: Vpn,
-        _flags: PageTableFlags,
+        into: PgTblCaptr<L>,
+        vpn: Vpn,
+        flags: PageTableFlags,
     ) -> CapResult<()> {
-        todo!()
+        syscalls::paging::page_map(self.into_raw(), into.into_raw(), vpn, flags)
     }
 }
 
@@ -222,28 +225,4 @@ impl<L: PagingLevel> PgTblCaptr<L> {
     pub fn unmap(self, _vpn: Vpn) -> CapResult<()> {
         todo!()
     }
-}
-
-/// Internal macro that implements [`Into`]/[`From`] for [`PageTable<L>`]
-macro_rules! impl_relevel {
-    ($captr:ident, $pgtbl:ident => [$($first:ident, $second:ident;)+]) => {
-        $(
-	    impl ::core::convert::From<$captr<$pgtbl<$first>>> for $captr<$pgtbl<$second>> {
-		fn from(x: $captr<$pgtbl<$first>>) -> Self {
-		    // SAFETY: The representation of
-		    // Captr<PageTable<Ln>> and Captr<PageTable<Lm>>
-		    // is the same for all Ln and Lm.
-		    unsafe { ::core::mem::transmute(x) }
-		}
-            }
-	)+
-    };
-}
-
-impl_relevel! {
-    Captr, PageTable => [
-  /*GigaPage, GigaPage;*/ GigaPage, MegaPage;   GigaPage, BasePage;
-    MegaPage, GigaPage; /*MegaPage, MegaPage;*/ MegaPage, BasePage;
-    BasePage, GigaPage;   BasePage, MegaPage; /*BasePage, BasePage;*/
-    ]
 }

@@ -284,7 +284,6 @@ impl PageTable {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
 #[repr(C, align(4096))]
 pub struct RawPageTable {
     pub ptes: [RawPageTableEntry; 512],
@@ -298,10 +297,11 @@ impl fmt::Debug for RawPageTable {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct RawPageTableEntry(u64);
+pub struct RawPageTableEntry(pub u64);
 
 impl RawPageTableEntry {
-    pub const fn decode(self) -> PageTableEntry {
+    #[inline(never)]
+    pub fn decode(self) -> PageTableEntry {
         PageTableEntry {
             ppn: Ppn::from_usize_truncate((self.0 >> 10) as usize),
             flags: PageTableFlags::from_bits_truncate(self.0 as u8),
