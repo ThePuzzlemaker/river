@@ -7,7 +7,7 @@
 use crate::{
     addr::{Identity, PhysicalMut},
     capability::{
-        paging::{BasePage, GigaPage, MegaPage, Page, PageCaptr, PageTable, PgTblCaptr},
+        paging::{BasePage, Page, PageCaptr, PageTable},
         Captbl,
         Captr,
         CaptrRange, //Untyped,
@@ -21,16 +21,6 @@ pub struct BootInfo {
     /// Pages of the initial userspace process memory, ordered by
     /// virtual address.
     pub init_pages: CaptrRange<Page<BasePage>>,
-    /// L0 ([`GigaPage`]) page tables of the initial proces memory,
-    /// ordered by virtual address. This includes the process's root
-    /// page table.
-    pub init_tables_l0: CaptrRange<PageTable<GigaPage>>,
-    /// L1 ([`MegaPage`]) page tables of the initial process memory,
-    /// ordered by virtual address.
-    pub init_tables_l1: CaptrRange<PageTable<MegaPage>>,
-    /// L2 ([`BasePage`]) page tables of the initial process memory,
-    /// ordered by virtual address.
-    pub init_tables_l2: CaptrRange<PageTable<BasePage>>,
     // pub untyped_caps: CaptrRange<Untyped>,
     // untyped_desc: [UntypedDescription; 0],
 }
@@ -44,7 +34,7 @@ pub struct UntypedDescription {
 
 pub struct InitCapabilities {
     pub captbl: Captr<Captbl>,
-    pub pgtbl: PgTblCaptr<GigaPage>,
+    pub pgtbl: Captr<PageTable>,
     pub bootinfo_page: PageCaptr<BasePage>,
 }
 

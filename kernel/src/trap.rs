@@ -1,19 +1,19 @@
-use core::{arch::global_asm, mem};
+use core::{arch::global_asm, mem, ptr};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::captbl::Captbl,
+    capability::ThreadState,
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
-    proc::{ProcState, Scheduler},
+    proc::ProcState,
     sync::OnceCell,
     trampoline::{self, trampoline, Trapframe},
     uart,
 };
+use atomic::Ordering;
 use rille::{
-    addr::{VirtualMut, Vpn},
-    capability::{paging::PageTableFlags, CapError},
+    capability::{CapError, CapabilityType},
     syscalls::SyscallNumber,
     units::StorageUnits,
 };
@@ -39,6 +39,7 @@ unsafe extern "C" fn kernel_trap() {
     // interrupt--not sure entirely why, this is a bit hacky but I suppose it
     // works)
     LOCAL_HART.with(|hart| hart.trap.set(true));
+
     let sepc = asm::read_sepc();
     let sstatus = asm::read_sstatus();
     let scause = asm::read_scause();
@@ -70,12 +71,15 @@ unsafe extern "C" fn kernel_trap() {
     );
     LOCAL_HART.with(|hart| {
         if kind == InterruptKind::Timer {
-            if let Some(token) = hart.proc() {
-                let proc = token.proc();
-
-                if proc.state() == ProcState::Running {
-                    proc.set_state(ProcState::Runnable);
-                    token.yield_to_scheduler();
+            if let Some(proc) = hart.thread.borrow().as_ref().cloned() {
+                if proc.state.load(Ordering::Relaxed) == ThreadState::Running {
+                    proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                    asm::write_sepc(sepc);
+                    asm::write_sstatus(sstatus);
+                    // Make sure we inform the HartCtx that it's fine to re-enable interrupts
+                    // now.
+                    hart.trap.set(false);
+                    proc.yield_to_scheduler();
                 }
             }
         }
@@ -115,7 +119,6 @@ fn device_interrupt(scause: u64) -> InterruptKind {
 
         let interval = LOCAL_HART.with(|hart| hart.timer_interval.get());
         sbi::timer::set_timer(asm::read_time() + interval).unwrap();
-
         asm::timer_intr_on();
 
         InterruptKind::Timer
@@ -267,14 +270,11 @@ unsafe extern "C" fn user_trap() -> ! {
     LOCAL_HART.with(|hart| {
         hart.trap.set(true);
 
-        let token = hart.proc().unwrap();
-        let proc = token.proc();
+        let proc = hart.thread.borrow().as_ref().cloned().unwrap();
 
-        let mut private = proc.private(&token);
+        let mut private = proc.private.write();
 
-        // SAFETY: Being in this process's context means that the
-        // trapframe must be initialized and valid.
-        let trapframe = unsafe { (*private.trapframe).assume_init_mut() };
+        let mut trapframe = proc.trapframe.lock();
         trapframe.user_epc = asm::read_sepc();
 
         let scause = asm::read_scause();
@@ -284,7 +284,7 @@ unsafe extern "C" fn user_trap() -> ! {
             "user exception: {}, hart={} pid={} sepc={:#x} stval={:#x} scause={:#x}",
             describe_exception(scause),
             hartid(),
-            proc.pid,
+            proc.tid,
             asm::read_sepc(),
             asm::read_stval(),
             scause
@@ -297,15 +297,18 @@ unsafe extern "C" fn user_trap() -> ! {
             trapframe.user_epc += 4;
 
             match trapframe.a0.into() {
-                SyscallNumber::CopyDeep => sys_copy_deep(&mut private, trapframe),
+                SyscallNumber::CopyDeep => sys_copy_deep(&mut private, &mut trapframe),
                 //SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
-                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, trapframe),
-                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, trapframe),
-                SyscallNumber::DebugPrint => sys_debug_print(&mut private, trapframe),
-                SyscallNumber::Swap => sys_swap(&mut private, trapframe),
-                SyscallNumber::Delete => sys_delete(&mut private, trapframe),
-                SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
-                SyscallNumber::PageMap => sys_page_map(&mut private, trapframe),
+                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, &mut trapframe),
+                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, &mut trapframe),
+                SyscallNumber::DebugPrint => sys_debug_print(&mut private, &mut trapframe),
+                SyscallNumber::Swap => sys_swap(&mut private, &mut trapframe),
+                SyscallNumber::Delete => sys_delete(&mut private, &mut trapframe),
+                // SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
+                SyscallNumber::PageMap => sys_page_map(&mut private, &mut trapframe),
+                SyscallNumber::DebugCapIdentify => {
+                    sys_debug_cap_identify(&mut private, &mut trapframe);
+                }
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
@@ -320,15 +323,15 @@ unsafe extern "C" fn user_trap() -> ! {
             assert!(
                 kind != InterruptKind::Unknown,
                 "user trap from unknown device, pid={} sepc={:#x} stval={:#x} scause={:#x}",
-                proc.pid,
+                proc.tid,
                 trapframe.user_epc,
                 asm::read_stval(),
                 scause
             );
             if kind == InterruptKind::Timer {
                 drop(private);
-                token.proc().set_state(ProcState::Runnable);
-                token.yield_to_scheduler();
+                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                proc.yield_to_scheduler();
             }
         }
     });
@@ -356,22 +359,23 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
     unsafe { asm::write_stvec(trampoline() as *const u8) };
 
     let satp = LOCAL_HART.with(|hart| {
-        let token = hart.proc().unwrap();
+        let proc = hart.thread.borrow().as_ref().cloned().unwrap();
 
-        let mut private = token.proc().private(&token);
+        let private = proc.private.read();
 
         // SAFETY: Our caller guarantees that we are within a valid
         // process's context.
-        let trapframe = unsafe { (*private.trapframe).assume_init_mut() };
+
+        let mut trapframe = proc.trapframe.lock();
         trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
-        trapframe.kernel_sp = (private.kernel_stack.into_usize() as u64) + 4u64.mib();
+        trapframe.kernel_sp = (ptr::addr_of!(proc.stack) as usize as u64) + 4u64.mib();
         trapframe.kernel_trap = user_trap as u64;
         trapframe.kernel_tp = asm::tp();
 
         asm::write_sepc(trapframe.user_epc);
         let satp = Satp {
             asid: 1,
-            ppn: private.mman.get_table().as_physical_const().ppn(),
+            ppn: private.root_pgtbl.as_physical_const().ppn(),
         };
         satp.encode().as_usize()
     });
@@ -453,9 +457,15 @@ impl IntoTrapframe for CapError {
     }
 }
 
+impl IntoTrapframe for CapabilityType {
+    fn into_trapframe(self) -> (u64, u64) {
+        (self.into(), 0)
+    }
+}
+
 macro_rules! define_syscall {
     ($ident:ident, $arity:tt) => {
-	fn $ident(private: &mut $crate::proc::ProcPrivate, trapframe: &mut $crate::trampoline::Trapframe) {
+	fn $ident(private: &mut $crate::capability::ThreadProtected, trapframe: &mut $crate::trampoline::Trapframe) {
 	    define_syscall!(@arity private, trapframe, $ident, $arity);
 	}
     };
@@ -590,4 +600,5 @@ define_syscall!(sys_swap, 4);
 //define_syscall!(sys_retype_many, 7);
 define_syscall!(sys_delete, 2);
 define_syscall!(sys_page_map, 4);
-define_syscall!(sys_pgtbl_map, 4);
+// define_syscall!(sys_pgtbl_map, 4);
+define_syscall!(sys_debug_cap_identify, 2);

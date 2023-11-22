@@ -2,24 +2,24 @@
 #![no_main]
 #![feature(panic_info_message)]
 
-use core::{arch::asm, fmt, panic::PanicInfo};
+use core::{
+    arch::{asm, global_asm},
+    fmt,
+};
 
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use rille::{
-    addr::Vpn,
+    addr::VirtualConst,
     capability::{
-        paging::{BasePage, GigaPage, MegaPage, PageCaptr, PageTableFlags, PgTblCaptr},
-        Capability,
-        Captbl,
-        Captr,
-        RemoteCaptr, //Untyped,
+        paging::{BasePage, Page, PageTable, PageTableFlags},
+        Captr, RemoteCaptr,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls::{self, ecall0, ecall2, SyscallNumber},
+    syscalls,
 };
 
 extern crate panic_handler;
 
+#[allow(unused_macros)]
 macro_rules! println {
     ($($tt:tt)*) => {{
 	core::fmt::write(&mut DebugPrint, format_args!($($tt)*)).unwrap();
@@ -27,53 +27,108 @@ macro_rules! println {
     }}
 }
 
+#[allow(unused_macros)]
 macro_rules! print {
     ($($tt:tt)*) => {{
 	core::fmt::write(&mut DebugPrint, format_args!($($tt)*)).unwrap();
     }}
 }
 
+global_asm!(
+    "
+.pushsection .text
+.option norvc
+.type _start, @function
+.global _start
+_start:
+.option push
+.option norelax
+    lla gp, __global_pointer$
+.option pop
+
+    lla t0, __bss_start
+    lla t1, __bss_end
+    // Clear the .bss section
+clear_bss:
+    beq t0, t1, done_clear_bss
+    sd zero, (t0)
+    addi t0, t0, 8
+    j clear_bss
+
+done_clear_bss:
+    lla sp, __stack_top
+    tail entry
+.popsection
+"
+);
+
 #[no_mangle]
-extern "C" fn _start(init_info: *const BootInfo) -> ! {
+extern "C" fn entry(_init_info: *const BootInfo) -> ! {
     let caps = unsafe { InitCapabilities::new() };
 
-    let root_captbl = RemoteCaptr::local(caps.captbl);
+    let _root_captbl = RemoteCaptr::local(caps.captbl);
 
-    let slot_2 = root_captbl
-        .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
-            Captr::from_raw_unchecked(2)
-        })
-        .unwrap();
+    let pg: Captr<Page<BasePage>> = unsafe { Captr::from_raw_unchecked(2) };
+    let pgtbl: Captr<PageTable> = unsafe { Captr::from_raw_unchecked(3) };
 
-    let _slot_3 = root_captbl
-        .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
-            Captr::from_raw_unchecked(3)
-        })
-        .unwrap();
+    // syscalls::debug::debug_dump_root();
 
-    let _slot_4 = root_captbl
-        .copy_deep(slot_2, root_captbl, unsafe { Captr::from_raw_unchecked(4) })
-        .unwrap();
+    pg.map(
+        pgtbl,
+        VirtualConst::from_usize(0xDEAD0000),
+        PageTableFlags::RW,
+    )
+    .unwrap();
 
-    let mut total_order = ["root", "2", "3", "2a"];
+    // unsafe { core::ptr::write_volatile(0xDEAD0000 as *mut u64, 0xC0DED00D) };
 
-    let mut rand = SmallRng::seed_from_u64(0xDEADBEEF);
+    // println!("{:#x?}", unsafe {
+    //     core::ptr::read_volatile(0xDEAD0000 as *mut u64)
+    // });
 
-    for i in 0..10_000 {
-        let n1 = (rand.next_u64() % 3 + 1) as usize;
-        let n2 = (rand.next_u64() % 3 + 1) as usize;
-        print!("\rRound {}: Swapping {} with {}", i + 1, n1, n2);
-        total_order.swap(n1 - 1, n2 - 1);
-        RemoteCaptr::remote(root_captbl.local_index(), unsafe {
-            Captr::<Captbl>::from_raw_unchecked(n1)
-        })
-        .swap(RemoteCaptr::remote(root_captbl.local_index(), unsafe {
-            Captr::<Captbl>::from_raw_unchecked(n2)
-        }))
-        .unwrap();
+    // syscalls::debug::debug_dump_root();
+    for i in 1..=5 {
+        println!(
+            "{i}: {:?}",
+            syscalls::debug::debug_cap_identify(caps.captbl.into_raw(), i).unwrap()
+        );
     }
 
-    println!("\nTotal order: {:?}", total_order);
+    // let slot_2 = root_captbl
+    //     .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
+    //         Captr::from_raw_unchecked(2)
+    //     })
+    //     .unwrap();
+
+    // let _slot_3 = root_captbl
+    //     .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
+    //         Captr::from_raw_unchecked(3)
+    //     })
+    //     .unwrap();
+
+    // let _slot_4 = root_captbl
+    //     .copy_deep(slot_2, root_captbl, unsafe { Captr::from_raw_unchecked(5) })
+    //     .unwrap();
+
+    // let mut total_order = ["root", "2", "3", "2a"];
+
+    // let mut rand = SmallRng::seed_from_u64(0xDEADBEEF);
+
+    // for i in 0..10_000 {
+    //     let n1 = (rand.next_u64() % 3 + 1) as usize;
+    //     let n2 = (rand.next_u64() % 3 + 1) as usize;
+    //     print!("\rRound {}: Swapping {} with {}", i + 1, n1, n2);
+    //     total_order.swap(n1 - 1, n2 - 1);
+    //     RemoteCaptr::remote(root_captbl.local_index(), unsafe {
+    //         Captr::<Captbl>::from_raw_unchecked(n1)
+    //     })
+    //     .swap(RemoteCaptr::remote(root_captbl.local_index(), unsafe {
+    //         Captr::<Captbl>::from_raw_unchecked(n2)
+    //     }))
+    //     .unwrap();
+    // }
+
+    // println!("\nTotal order: {:?}", total_order);
     //    let untyped = unsafe { Captr::<Untyped>::from_raw_unchecked(4) };
 
     // let page: PageCaptr<BasePage> = untyped
@@ -98,8 +153,6 @@ extern "C" fn _start(init_info: *const BootInfo) -> ! {
     // pg_l1
     //     .map(pg_l0, Vpn::from(126u16), PageTableFlags::RW)
     //     .unwrap();
-
-    syscalls::debug::debug_dump_root();
 
     loop {
         unsafe { asm!("pause") };

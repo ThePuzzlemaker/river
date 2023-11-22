@@ -65,16 +65,16 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         let mut uart = UART.lock();
         // SAFETY: Our caller guarantees that this address is valid.
         unsafe { uart.init(uart_reg.starting_address.cast_mut()) };
-        uart.print_str_sync("[");
+        uart.print_str_sync("[         ] [");
         uart.early_print_u64(hartid());
         uart.print_str_sync("] ");
-        uart.print_str_sync("[info] booting hart ");
+        uart.print_str_sync("[info]: booting hart ");
         uart.early_print_u64(hartid());
         uart.print_str_sync("...\n");
-        uart.print_str_sync("[");
+        uart.print_str_sync("[         ] [");
         uart.early_print_u64(hartid());
         uart.print_str_sync("] ");
-        uart.print_str_sync("[info] initialized serial device at 0x");
+        uart.print_str_sync("[info]: initialized serial device at 0x");
         uart.early_print_u64_hex(uart_reg.starting_address as u64);
         uart.print_str_sync("\n");
     }
@@ -129,10 +129,10 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     unsafe { hart_local::init() }
     {
         let mut uart = UART.lock();
-        uart.print_str_sync("[");
+        uart.print_str_sync("[         ] [");
         uart.early_print_u64(hartid());
         uart.print_str_sync("] ");
-        uart.print_str_sync("[info] initialized hart-local storage for hart ");
+        uart.print_str_sync("[info]: initialized hart-local storage for hart ");
         uart.early_print_u64(hartid());
         uart.print_str_sync("\n");
     }
@@ -370,10 +370,10 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
 
     {
         let mut uart = UART.lock();
-        uart.print_str_sync("[");
+        uart.print_str_sync("[         ] [");
         uart.early_print_u64(hartid());
         uart.print_str_sync("] ");
-        uart.print_str_sync("[info] booting hart ");
+        uart.print_str_sync("[info]: booting hart ");
         uart.early_print_u64(hartid());
         uart.print_str_sync("...\n");
     }
@@ -382,10 +382,10 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
     unsafe { hart_local::init() }
     {
         let mut uart = UART.lock();
-        uart.print_str_sync("[");
+        uart.print_str_sync("[         ] [");
         uart.early_print_u64(hartid());
         uart.print_str_sync("] ");
-        uart.print_str_sync("[info] initialized hart-local storage for hart ");
+        uart.print_str_sync("[info]: initialized hart-local storage for hart ");
         uart.early_print_u64(hartid());
         uart.print_str_sync("\n");
     }

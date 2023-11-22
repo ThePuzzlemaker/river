@@ -538,14 +538,14 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         Ok((new_self, new_other))
     }
 
-    pub fn delete(self) -> SlotRefMut<'a, EmptySlot> {
+    pub fn delete(mut self) -> SlotRefMut<'a, EmptySlot> {
         // SAFETY: By invariants.
         let self_addr =
             unsafe { NonNull::new_unchecked(ptr::addr_of!(*self.slot).cast_mut().cast()) };
 
         // SAFETY: This is the first time we do this, and we won't do
         // it again for this slot.
-        unsafe { C::do_delete(self.meta, &self.slot) };
+        unsafe { C::do_delete(self.meta, &mut self.slot) };
 
         let mut slot = SlotRefMut {
             slot: self.slot,
@@ -573,9 +573,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         });
         slot.slot.dtnode = DerivationTreeNode::default();
 
-        slot.slot.cap = RawCapability {
-            empty: EmptySlot::default(),
-        };
+        slot.slot.cap = RawCapability { empty: EmptySlot };
 
         slot
     }

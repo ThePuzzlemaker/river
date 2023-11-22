@@ -2,9 +2,11 @@ use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
+use atomic::Ordering;
 
 use crate::{
     asm,
+    capability::{Thread, ThreadState},
     hart_local::LOCAL_HART,
     sync::{OnceCell, SpinMutex},
 };
@@ -19,7 +21,7 @@ static SCHED: Scheduler = Scheduler {
 #[derive(Debug)]
 pub struct Scheduler {
     per_hart: OnceCell<BTreeMap<u64, SpinMutex<SchedulerInner>>>,
-    wait_queue: SpinMutex<BTreeMap<usize, Arc<Proc>>>,
+    wait_queue: SpinMutex<BTreeMap<usize, Arc<Thread>>>,
 }
 
 // TODO: maybe make this a LocalScheduler and be able to get it via
@@ -27,7 +29,7 @@ pub struct Scheduler {
 #[derive(Debug, Default)]
 pub struct SchedulerInner {
     procs: VecDeque<usize>,
-    run_queue: BTreeMap<usize, Arc<Proc>>,
+    run_queue: BTreeMap<usize, Arc<Thread>>,
 }
 
 impl Scheduler {
@@ -48,7 +50,7 @@ impl Scheduler {
     /// [1]: crate::proc::ProcToken::yield_to_scheduler
     pub unsafe fn start() -> ! {
         let hartid = LOCAL_HART.with(|hart| {
-            *hart.proc.borrow_mut() = None;
+            *hart.thread.borrow_mut() = None;
             hart.hartid.get()
         });
         // Avoid deadlock, make sure this core can interrupt. N.B. the
@@ -80,9 +82,9 @@ impl Scheduler {
                         crate::println!(
                             "[hart {}]: adopting process {} from the wait queue",
                             asm::hartid(),
-                            entry.pid
+                            entry.tid
                         );
-                        let (pid, proc) = wait_queue.remove_entry(&entry.pid).unwrap();
+                        let (pid, proc) = wait_queue.remove_entry(&entry.tid).unwrap();
                         scheduler.run_queue.insert(pid, Arc::clone(&proc));
                         scheduler.procs.push_back(pid);
                         (pid, proc)
@@ -91,24 +93,19 @@ impl Scheduler {
                     }
                 };
 
-                let mut proc_lock = proc.spin_protected.lock();
-
-                if proc_lock.state == ProcState::Runnable {
+                if proc.state.load(Ordering::Relaxed) == ThreadState::Runnable {
                     drop(scheduler);
-                    proc_lock.state = ProcState::Running;
-                    drop(proc_lock);
+                    proc.state.store(ThreadState::Running, Ordering::Relaxed);
 
                     LOCAL_HART.with(move |hart| {
-                        *hart.proc.borrow_mut() = Some(proc);
+                        *hart.thread.borrow_mut() = Some(proc);
 
-                        let token = hart.proc().unwrap();
-
-                        let proc = token.proc();
+                        let proc = hart.thread.borrow().as_ref().cloned().unwrap();
 
                         // SAFETY: Our caller guarantees these contexts are valid.
                         unsafe { Context::switch(&proc.context, &hart.context) }
 
-                        *hart.proc.borrow_mut() = None;
+                        *hart.thread.borrow_mut() = None;
                     });
 
                     continue 'outer;
@@ -128,7 +125,7 @@ impl Scheduler {
     /// # Panics
     ///
     /// This function will panic if the scheduler is not initialized.
-    pub fn enqueue(proc: Proc) {
+    pub fn enqueue(proc: Arc<Thread>) {
         LOCAL_HART.with(|hart| {
             let mut sched = SCHED
                 .per_hart
@@ -137,8 +134,8 @@ impl Scheduler {
                 .unwrap()
                 .lock();
 
-            let pid = proc.pid;
-            sched.run_queue.insert(pid, Arc::new(proc));
+            let pid = proc.tid;
+            sched.run_queue.insert(pid, proc);
             sched.procs.push_back(pid);
         });
     }
@@ -159,16 +156,19 @@ impl Scheduler {
                 .lock();
 
             let proc = hart
-                .proc()
+                .thread
+                .borrow()
+                .as_ref()
+                .cloned()
                 .expect("Scheduler::current_proc_wait: no process");
-            let pid = proc.proc().pid;
+            let pid = proc.tid;
 
             sched.run_queue.remove(&pid);
             sched.procs.retain(|p| *p != pid);
             // crate::println!("{:#?}", sched);
 
             let mut wait_queue = SCHED.wait_queue.lock();
-            wait_queue.insert(pid, Arc::clone(proc.proc()));
+            wait_queue.insert(pid, proc);
         });
     }
 }

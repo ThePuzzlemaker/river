@@ -30,8 +30,18 @@ pub union CaptblInner {
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Captbl {
-    pub(super) inner: Arc<*const [CaptblInner]>,
+    pub(super) inner: Arc<UnsafeCaptblPtr>,
 }
+
+#[derive(Clone)]
+#[repr(transparent)]
+pub(super) struct UnsafeCaptblPtr(pub(super) *const [CaptblInner]);
+
+// SAFETY: The user of this type ensures that any accesses to the
+// inner value are properly synchronized.
+unsafe impl Send for UnsafeCaptblPtr {}
+// SAFETY: See above.
+unsafe impl Sync for UnsafeCaptblPtr {}
 
 impl Captbl {
     pub fn downgrade(&self) -> WeakCaptbl {
@@ -44,7 +54,7 @@ impl Captbl {
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct WeakCaptbl {
-    pub(super) inner: Weak<*const [CaptblInner]>,
+    pub(super) inner: Weak<UnsafeCaptblPtr>,
 }
 
 impl WeakCaptbl {
@@ -63,13 +73,13 @@ impl Drop for Captbl {
             let order = {
                 // SAFETY: By our invariants, the header must be
                 // initialized and this memory should still be valid.
-                let hdr = unsafe { &**inner };
+                let hdr = unsafe { &*inner.0 };
                 // SAFETY: By our invariants, the 0th element must be
                 // the header, and must be valid and initialized.
                 let n_slots_log2 = unsafe { hdr[0].hdr }.n_slots_log2;
                 kalloc::phys::what_order(1 << (n_slots_log2 + 6))
             };
-            let ptr_raw = inner.as_ptr().cast_mut();
+            let ptr_raw = inner.0.as_ptr().cast_mut();
             let ptr_virt = VirtualMut::from_ptr(ptr_raw);
             {
                 let mut pma = PMAlloc::get();
@@ -117,7 +127,7 @@ impl Captbl {
         let captbl = ptr::addr_of!(*captbl);
 
         Self {
-            inner: Arc::new(captbl),
+            inner: Arc::new(UnsafeCaptblPtr(captbl)),
         }
     }
 }
@@ -149,8 +159,11 @@ impl Capability for Captbl {
         )
     }
 
-    unsafe fn do_delete(meta: Self::Metadata, _slot: &SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
-        drop(meta);
+    unsafe fn do_delete(_: Self::Metadata, _: &mut SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
+        // We don't really need to worry about dropping anything, as
+        // we only have a weak reference. Even with a
+        // `ManuallyDrop<WeakCaptbl>` internally, this won't keep the
+        // captbl alive longer than necessary.
     }
 }
 
@@ -201,11 +214,11 @@ impl<'a> fmt::Debug for CaptblSlots<'a> {
 impl fmt::Debug for Captbl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Captbl")
-            .field("inner", &self.inner)
+            .field("inner", &self.inner.0)
             // SAFETY: By invariants.
-            .field("hdr", unsafe { &(**self.inner)[0].slot })
+            .field("hdr", unsafe { &(*self.inner.0)[0].slot })
             // SAFETY: By invariants
-            .field("table", &CaptblSlots(unsafe { &**self.inner }))
+            .field("table", &CaptblSlots(unsafe { &*self.inner.0 }))
             .finish()
     }
 }
@@ -214,7 +227,7 @@ impl fmt::Debug for WeakCaptbl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(captbl) = self.upgrade() {
             f.debug_struct("WeakCaptbl")
-                .field("inner", &*captbl.inner)
+                .field("inner", &captbl.inner.0)
                 .finish()
         } else {
             f.debug_struct("WeakCaptbl")

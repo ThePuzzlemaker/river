@@ -7,6 +7,8 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use bytemuck::Zeroable;
+
 use crate::{
     asm::{self, hartid},
     hart_local::{self, LOCAL_HART},
@@ -34,13 +36,22 @@ use crate::{
 ///
 /// These behaviours are not unsafe or unsound, but they may cause deadlocks,
 /// which are undesirable.
-// TODO: SpinRwLock?
+#[repr(C)]
 pub struct SpinMutex<T> {
+    data: UnsafeCell<T>,
     /// We store hartid+1 in this field, 0 for unlocked. (It's fine to
     /// use hartid+1 as we definitely won't have 18 quintillion and a
     /// bit (2^64-1) cores available.)
     locked: AtomicU64,
-    data: UnsafeCell<T>,
+}
+
+// SAFETY: See below.
+unsafe impl<T: Zeroable> Zeroable for SpinMutex<T> {
+    fn zeroed() -> Self {
+        // SAFETY: If our inner type is zeroable, then we are
+        // zeroable--a locked flag of 0 means unlocked.
+        unsafe { core::mem::zeroed() }
+    }
 }
 
 // SAFETY: `SpinMutex`es only provide mutually exclusive access to their data,

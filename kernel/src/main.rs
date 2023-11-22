@@ -33,13 +33,13 @@ pub mod boot;
 pub mod capability;
 pub mod elf;
 pub mod hart_local;
-pub mod io_traits;
 pub mod kalloc;
 pub mod paging;
 pub mod plic;
 pub mod proc;
 pub mod symbol;
 pub mod sync;
+pub mod syslog;
 pub mod trampoline;
 pub mod trap;
 pub mod uart;
@@ -54,37 +54,42 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     arch::{asm, global_asm},
     cmp,
+    mem::MaybeUninit,
     panic::PanicInfo,
     slice,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc};
 use asm::hartid;
 use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 use rille::{
     addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
-    init::BootInfo,
+    capability::paging::PageSize,
     units::StorageUnits,
 };
 use uart::UART;
 
 use crate::{
     boot::HartBootData,
-    capability::{captbl::Captbl, CaptblHeader, EmptySlot},
+    capability::{captbl::Captbl, AllocatorSlot, EmptySlot, Page, PgTbl, Thread, ThreadState},
     elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
-    io_traits::{Cursor, Read, Seek, SeekFrom},
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
+    paging::{PagingAllocator, SharedPageTable},
     plic::PLIC,
     proc::{
         mman::{RegionPurpose, RegionRequest},
         Proc, ProcState, Scheduler, SchedulerInner,
     },
-    sync::SpinMutex,
+    symbol::fn_user_code_woo,
+    sync::{SpinMutex, SpinRwLock},
     trampoline::Trapframe,
     trap::{Irqs, IRQS},
 };
+
+use rille::io_traits::{Cursor, Read, Seek, SeekFrom};
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
@@ -117,7 +122,7 @@ global_asm!(
 user_code_woo:
     li s0, 0
 user_code_woo.loop:
-    li a0, 0
+    li a0, 9
 
     lla a1, hello
 
@@ -160,14 +165,30 @@ user_code_woo2.loop:
 "
 );
 
-pub static BASIC_ELF: &[u8] =
-    include_bytes!("../../target/riscv64gc-unknown-none-elf/debug/userspace_testing");
+pub static INIT: &[u8] = include_bytes!(env!("CARGO_BUILD_INIT_PATH"));
+
+static N_STARTED: AtomicUsize = AtomicUsize::new(0);
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
 extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
-    println!("[{}] [info] initialized paging", hartid());
+    // SAFETY: The pointer given to us is guaranteed to be valid by our caller
+    let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
+        Ok(fdt) => fdt,
+        Err(e) => panic!("error loading fdt: {}", e),
+    };
+
+    LOCAL_HART.with(|hart| {
+        let timebase_freq = fdt
+            .cpus()
+            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
+            .expect("Could not find boot hart in FDT")
+            .timebase_frequency() as u64;
+        hart.timebase_freq.set(timebase_freq);
+    });
+
+    info!("initialized paging");
 
     {
         let mut pgtbl = root_page_table().lock();
@@ -190,12 +211,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     }
     // SAFETY: We guarantee that this virtual address is well-aligned and unaliased.
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
-
-    // SAFETY: The pointer given to us is guaranteed to be valid by our caller
-    let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
-        Ok(fdt) => fdt,
-        Err(e) => panic!("error loading fdt: {}", e),
-    };
 
     let plic = fdt
         .find_compatible(&["riscv,plic0"])
@@ -225,8 +240,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     asm::timer_intr_on();
     asm::external_intr_on();
 
-    let mut cursor = Cursor::new(BASIC_ELF);
-    let mut elf = Elf::parse_header(&mut cursor).unwrap();
+    // let mut cursor = Cursor::new(BASIC_ELF);
+    // let mut elf = Elf::parse_header(&mut cursor).unwrap();
     // elf.parse_sections(&mut cursor).unwrap();
     // elf.parse_segments(&mut cursor).unwrap();
 
@@ -247,7 +262,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         }
         page_virt
     };
-    println!("{:#p}", captbl_mem);
+    //println!("{:#p}", captbl_mem);
     assert_eq!(captbl_mem.into_usize() & ((1 << 9) - 1), 0, "oops!");
 
     // let (ut_sz_log2, ut_mem) = {
@@ -261,144 +276,201 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     {
         let slot = captbl.get_mut::<EmptySlot>(1).unwrap();
         slot.replace(Captbl::clone(&captbl));
+        let slot = captbl.get_mut::<EmptySlot>(4).unwrap();
+        slot.replace(AllocatorSlot);
+        let page = {
+            let mut pma = PMAlloc::get();
+            pma.allocate(kalloc::phys::what_order(4.kib())).unwrap()
+        };
+        let slot = captbl.get_mut::<EmptySlot>(2).unwrap();
+        // SAFETY: This page is valid.
+        slot.replace(unsafe { Page::new(page, 12) });
         //let slot = captbl.get_mut::<EmptySlot>(4).unwrap();
         // SAFETY: This memory is valid.
         //slot.replace(unsafe { Untyped::new(ut_mem, ut_sz_log2 as u8) });
     }
 
-    println!("captbl: {:#x?}", captbl);
+    //println!("captbl: {:#x?}", captbl);
 
-    let mut proc = Proc::new("basic_elf", captbl);
+    // let mut proc = Proc::new("basic_elf", captbl);
+    // {
+    //     let private = proc.private_mut();
+    //     // TODO: what does xv6 even use this for
+    //     private.mem_size = usize::MAX;
+
+    //     // SAFETY: We have exclusive access to this process
+    //     let trapframe = unsafe { &mut *private.trapframe };
+    //     let trapframe = trapframe.write(Trapframe::default());
+
+    //     trapframe.user_epc = elf.entry_addr as u64;
+
+    //     trapframe.sp = private
+    //         .mman
+    //         .alloc(
+    //             &RegionRequest {
+    //                 n_pages: 4.mib() / 4.kib(),
+    //                 contiguous: true,
+    //                 flags: PageTableFlags::VAD | PageTableFlags::RW | PageTableFlags::USER,
+    //                 purpose: RegionPurpose::Stack,
+    //             },
+    //             Some(VirtualConst::from_usize(paging::LOWER_HALF_TOP)),
+    //         )
+    //         .unwrap()
+    //         .end
+    //         .into_usize() as u64;
+
+    //     let mut cursor2 = Cursor::new(BASIC_ELF);
+    //     cursor2
+    //         .seek(SeekFrom::Start(cursor.seek(SeekFrom::Current(0)).unwrap()))
+    //         .unwrap();
+    //     for seg in elf.parse_segments(&mut cursor2).unwrap() {
+    //         let seg = seg.unwrap();
+    //         if seg.seg_type == SegmentType::Load {
+    //             let start_addr = VirtualConst::<u8, Identity>::from_usize(seg.virt_addr);
+    //             let start_addr_pgalign = start_addr.page_align();
+    //             let offset_from_pg = start_addr.into_usize() - start_addr_pgalign.into_usize();
+    //             let end_addr =
+    //                 VirtualConst::<u8, Identity>::from_usize(seg.virt_addr + seg.mem_size)
+    //                     .add(4.kib())
+    //                     .page_align();
+    //             let n_pages = (end_addr.into_usize() - start_addr_pgalign.into_usize()) / 4.kib();
+    //             // println!("seg.virt_addr = {:#x}, seg.virt_addr + seg.mem_size = {:#x}, start_addr={:#x}, end_addr={:#x}",
+    //             //     seg.virt_addr,
+    //             //     seg.virt_addr + seg.mem_size,
+    //             //     start_addr.into_usize(),
+    //             //     end_addr.into_usize()
+    //             // );
+
+    //             let mut flags = PageTableFlags::VAD | PageTableFlags::USER;
+    //             if seg.flags.contains(SegmentFlags::READ) {
+    //                 flags |= PageTableFlags::READ;
+    //             }
+    //             if seg.flags.contains(SegmentFlags::WRITE) {
+    //                 flags |= PageTableFlags::WRITE;
+    //             }
+    //             if seg.flags.contains(SegmentFlags::EXEC) {
+    //                 flags |= PageTableFlags::EXECUTE;
+    //             }
+
+    //             // TODO: find purpose
+    //             private
+    //                 .mman
+    //                 .alloc(
+    //                     &RegionRequest {
+    //                         n_pages,
+    //                         contiguous: true,
+    //                         flags,
+    //                         purpose: RegionPurpose::Unknown,
+    //                     },
+    //                     Some(start_addr_pgalign),
+    //                 )
+    //                 .unwrap();
+
+    //             cursor.seek(SeekFrom::Start(seg.offset as u64)).unwrap();
+    //             let mut len = seg.file_size;
+    //             let mut addr = start_addr;
+    //             // TODO: WHAT THE FUCK IS THIS????????
+    //             // TODO: WHAT WHAT WHAT WHAT WHAT
+    //             // TODO: I HAVE NO IDEA WHY THIS WORKS
+    //             // TODO: THIS IS ALMOST CERTAINLY BUGRIDDEN
+    //             loop {
+    //                 if len == 0 {
+    //                     break;
+    //                 }
+    //                 let n = cmp::min(4.kib() - offset_from_pg, len);
+
+    //                 let table = private.mman.get_table();
+
+    //                 let phys_addr = table.walk(addr).unwrap().0;
+    //                 let virt_addr = phys_addr.into_virt();
+
+    //                 // SAFETY: This page was allocated by the
+    //                 // UserMemoryManager and is 4 KiB long, and len <=
+    //                 // n <= min(4KiB, len_remaining).
+    //                 let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
+    //                 cursor.read(buf).unwrap();
+    //                 addr = addr.add(n);
+
+    //                 len -= n;
+    //             }
+    //             // for page in 0..n_pages {
+    //             //     if len == 0 {
+    //             //         break;
+    //             //     }
+    //             //     let n = cmp::min(4.kib(), len);
+
+    //             //     let phys_addr = private
+    //             //         .mman
+    //             //         .get_table()
+    //             //         .walk(start_addr_pgalign.add(page * 4.kib()))
+    //             //         .unwrap()
+    //             //         .0;
+    //             //     let virt_addr = phys_addr.into_virt();
+
+    //             //     // SAFETY: This page was allocated by the
+    //             //     // UserMemoryManager and is 4 KiB long, and len <=
+    //             //     // n <= 4 KiB.
+    //             //     let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
+    //             //     cursor.read(buf).unwrap();
+    //             //     crate::println!("n={n:x?}, len={len:x?}, phys_addr={phys_addr:x?}, virt_addr={virt_addr:x?}");
+    //             //     crate::println!("buf={buf:x?}");
+
+    //             //     len -= n;
+    //             // }
+    //         }
+    //     }
+
+    //     let slot = private.captbl.get_mut::<EmptySlot>(3).unwrap();
+    //     slot.replace(PgTbl::new(private.mman.get_table().clone()));
+
+    //     proc.set_state(ProcState::Runnable);
+    // }
+
+    let init_padded = INIT.len() + (INIT.len() % 4.kib());
+    let page = {
+        let mut pma = PMAlloc::get();
+        pma.allocate(kalloc::phys::what_order(init_padded + 4.mib()))
+            .expect("allocate init process")
+    };
     {
-        let private = proc.private_mut();
-        // TODO: what does xv6 even use this for
-        private.mem_size = usize::MAX;
-
-        // SAFETY: We have exclusive access to this process
-        let trapframe = unsafe { &mut *private.trapframe };
-        let trapframe = trapframe.write(Trapframe::default());
-
-        trapframe.user_epc = elf.entry_addr as u64;
-
-        trapframe.sp = private
-            .mman
-            .alloc(
-                &RegionRequest {
-                    n_pages: 4.mib() / 4.kib(),
-                    contiguous: true,
-                    flags: PageTableFlags::VAD | PageTableFlags::RW | PageTableFlags::USER,
-                    purpose: RegionPurpose::Stack,
-                },
-                Some(VirtualConst::from_usize(paging::LOWER_HALF_TOP)),
-            )
-            .unwrap()
-            .end
-            .into_usize() as u64;
-
-        let mut cursor2 = Cursor::new(BASIC_ELF);
-        cursor2
-            .seek(SeekFrom::Start(cursor.seek(SeekFrom::Current(0)).unwrap()))
-            .unwrap();
-        for seg in elf.parse_segments(&mut cursor2).unwrap() {
-            let seg = seg.unwrap();
-            if seg.seg_type == SegmentType::Load {
-                let start_addr = VirtualConst::<u8, Identity>::from_usize(seg.virt_addr);
-                let start_addr_pgalign = start_addr.page_align();
-                let offset_from_pg = start_addr.into_usize() - start_addr_pgalign.into_usize();
-                let end_addr =
-                    VirtualConst::<u8, Identity>::from_usize(seg.virt_addr + seg.mem_size)
-                        .add(4.kib())
-                        .page_align();
-                let n_pages = (end_addr.into_usize() - start_addr_pgalign.into_usize()) / 4.kib();
-                // println!("seg.virt_addr = {:#x}, seg.virt_addr + seg.mem_size = {:#x}, start_addr={:#x}, end_addr={:#x}",
-                //     seg.virt_addr,
-                //     seg.virt_addr + seg.mem_size,
-                //     start_addr.into_usize(),
-                //     end_addr.into_usize()
-                // );
-
-                let mut flags = PageTableFlags::VAD | PageTableFlags::USER;
-                if seg.flags.contains(SegmentFlags::READ) {
-                    flags |= PageTableFlags::READ;
-                }
-                if seg.flags.contains(SegmentFlags::WRITE) {
-                    flags |= PageTableFlags::WRITE;
-                }
-                if seg.flags.contains(SegmentFlags::EXEC) {
-                    flags |= PageTableFlags::EXECUTE;
-                }
-
-                // TODO: find purpose
-                private
-                    .mman
-                    .alloc(
-                        &RegionRequest {
-                            n_pages,
-                            contiguous: true,
-                            flags,
-                            purpose: RegionPurpose::Unknown,
-                        },
-                        Some(start_addr_pgalign),
-                    )
-                    .unwrap();
-
-                cursor.seek(SeekFrom::Start(seg.offset as u64)).unwrap();
-                let mut len = seg.file_size;
-                let mut addr = start_addr;
-                // TODO: WHAT THE FUCK IS THIS????????
-                // TODO: WHAT WHAT WHAT WHAT WHAT
-                // TODO: I HAVE NO IDEA WHY THIS WORKS
-                // TODO: THIS IS ALMOST CERTAINLY BUGRIDDEN
-                loop {
-                    if len == 0 {
-                        break;
-                    }
-                    let n = cmp::min(4.kib() - offset_from_pg, len);
-
-                    let table = private.mman.get_table();
-
-                    let phys_addr = table.walk(addr).unwrap().0;
-                    let virt_addr = phys_addr.into_virt();
-
-                    // SAFETY: This page was allocated by the
-                    // UserMemoryManager and is 4 KiB long, and len <=
-                    // n <= min(4KiB, len_remaining).
-                    let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
-                    cursor.read(buf).unwrap();
-                    addr = addr.add(n);
-
-                    len -= n;
-                }
-                // for page in 0..n_pages {
-                //     if len == 0 {
-                //         break;
-                //     }
-                //     let n = cmp::min(4.kib(), len);
-
-                //     let phys_addr = private
-                //         .mman
-                //         .get_table()
-                //         .walk(start_addr_pgalign.add(page * 4.kib()))
-                //         .unwrap()
-                //         .0;
-                //     let virt_addr = phys_addr.into_virt();
-
-                //     // SAFETY: This page was allocated by the
-                //     // UserMemoryManager and is 4 KiB long, and len <=
-                //     // n <= 4 KiB.
-                //     let buf = unsafe { slice::from_raw_parts_mut(virt_addr.into_ptr_mut(), n) };
-                //     cursor.read(buf).unwrap();
-                //     crate::println!("n={n:x?}, len={len:x?}, phys_addr={phys_addr:x?}, virt_addr={virt_addr:x?}");
-                //     crate::println!("buf={buf:x?}");
-
-                //     len -= n;
-                // }
-            }
-        }
-
-        proc.set_state(ProcState::Runnable);
+        let data = page.add(4.mib());
+        // SAFETY: We have just allocated this ptr, and it is valid for at least INIT.len.
+        let s = unsafe { slice::from_raw_parts_mut(data.into_virt().into_ptr_mut(), INIT.len()) };
+        s.copy_from_slice(INIT);
     }
 
+    // SAFETY: The page is zeroed and thus is well-defined and valid.
+    let pgtbl =
+        unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
+    let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
+    let pgtbl = SharedPageTable::from_inner(pgtbl);
+    let mut proc = Thread::new(String::from("user_mode_woo"), Some(captbl), pgtbl);
+    {
+        let mut private = proc.private.write();
+
+        {
+            let slot = private
+                .captbl
+                .as_ref()
+                .unwrap()
+                .get_mut::<EmptySlot>(3)
+                .unwrap();
+            slot.replace(PgTbl::new(private.root_pgtbl.clone()));
+        }
+        let mut trapframe = proc.trapframe.lock();
+        trapframe.user_epc = 0x1040_0000;
+        trapframe.sp = 0x1040_0000;
+        for i in 0..(init_padded / 4.kib() + (4.mib() / 4.kib())) {
+            private.root_pgtbl.map(
+                page.add(i * 4.kib()).into_identity().into_const(),
+                VirtualConst::from_usize(0x1000_0000).add(i * 4.kib()),
+                PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RWX,
+                PageSize::Base,
+            );
+        }
+
+        proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+    }
     // let mut proc = Proc::new(String::from("user_mode_woo"));
     // #[allow(clippy::undocumented_unsafe_blocks)]
     // {
@@ -438,16 +510,17 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     LOCAL_HART.with(|hart| {
         //hart.push_off();
-        println!(
-            r#"
-   ___   .  _  _ __   ___
-  /  /  /  /  / /__| /  /
- /   \_/\__\_/_/\___/   \"#
+
+        info!("{}", r"  ___   .  _  _ __   ___".bright_purple());
+        info!("{}", r" /  /  /  /  / /__| /  /".bright_purple());
+        info!("{}", r"/   \_/\__\_/_/\___/   \".bright_purple());
+        info!(
+            "{} {} {}",
+            "=====".bright_white().bold(),
+            "river v0.0.-Inf".bright_magenta().bold(),
+            "====".bright_white().bold(),
         );
-        println!(
-            "===== river v0.0.-Inf ====\n- boot hart id: {0}\n",
-            hart.hartid.get()
-        );
+        info!("boot hart id: {}", hart.hartid.get());
 
         let (free, total) = {
             let pma = PMAlloc::get();
@@ -457,7 +530,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         let free = (free * 4.kib()) / 1.mib();
         let used = (used * 4.kib()) / 1.mib();
         let total = (total * 4.kib()) / 1.mib();
-        println!(
+        info!(
             "current memory usage: {}MiB / {}MiB ({}MiB free)",
             used, total, free
         );
@@ -470,7 +543,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
         {
             let id = hart.ids().first();
-            println!("found FDT node for hart {id}");
+            info!("found FDT node for hart {id}");
             // Allocate a 4 MiB stack
             let stack_base_phys = {
                 let mut pma = PMAlloc::get();
@@ -506,6 +579,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
         Scheduler::init(scheduler_map);
         Scheduler::enqueue(proc);
+
         // Scheduler::enqueue(proc2);
         // hart.pop_off();
 
@@ -519,8 +593,13 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         hart.timer_interval.set(timebase_freq / 10);
         let interval = hart.timer_interval.get();
         sbi::timer::set_timer(asm::read_time() + interval).unwrap();
+        //sbi::timer::set_timer(5 * timebase_freq).unwrap();
     });
+    N_STARTED.fetch_add(1, Ordering::Relaxed);
 
+    while N_STARTED.load(Ordering::Relaxed) != fdt.cpus().count() {
+        core::hint::spin_loop();
+    }
     // SAFETY: The scheduler is only started once on the main hart.
     unsafe { Scheduler::start() }
 }
@@ -529,13 +608,22 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain_hart"]
 extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
-    println!("[{0}] [info] hart {0} starting", hartid());
-
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
         Err(e) => panic!("error loading fdt: {e}"),
     };
+
+    LOCAL_HART.with(|hart| {
+        let timebase_freq = fdt
+            .cpus()
+            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
+            .expect("Could not find boot hart in FDT")
+            .timebase_frequency() as u64;
+        hart.timebase_freq.set(timebase_freq);
+    });
+
+    info!("hart {} starting", hartid());
 
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
@@ -565,6 +653,8 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
         // sbi::timer::set_timer(asm::read_time() + interval).unwrap();
     });
 
+    N_STARTED.fetch_add(1, Ordering::Relaxed);
+
     loop {
         asm::nop();
     }
@@ -587,7 +677,7 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
     if paging::enabled() {
         // Paging is set up, we can use dynamic dispatch.
         if let Some(msg) = panic_info.message() {
-            println!("panic occurred: {}", msg);
+            critical!("panic occurred: {}", msg);
             if let Some(location) = panic_info.location() {
                 println!(
                     "  at {}:{}:{}",
@@ -605,7 +695,7 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
                 println!("    - ... <omitted>");
             }*/
         } else {
-            println!("panic occurred (reason unknown).\n");
+            critical!("panic occurred (reason unknown).\n");
             if let Some(location) = panic_info.location() {
                 println!(
                     "  at {}:{}:{}",

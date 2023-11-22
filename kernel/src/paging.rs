@@ -7,7 +7,7 @@ use core::{
     slice,
 };
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use bitflags::bitflags;
 
 use rille::{
@@ -15,13 +15,14 @@ use rille::{
         DirectMapped, Identity, PgOff, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual,
         VirtualConst, VirtualMut,
     },
+    capability::paging::PageSize,
     units::StorageUnits,
 };
 
 use crate::{
     asm::{self, get_satp},
     kalloc::phys::PMAlloc,
-    sync::{OnceCell, SpinMutex},
+    sync::{OnceCell, SpinMutex, SpinRwLock},
 };
 
 static ROOT_PAGE_TABLE: OnceCell<SpinMutex<PageTable>> = OnceCell::new();
@@ -47,6 +48,7 @@ pub fn root_page_table() -> &'static SpinMutex<PageTable> {
     })
 }
 
+// TODO: replace all `PageTable`s with `SharedPageTable`s (then rename it back)
 #[derive(Debug)]
 pub struct PageTable {
     root: Box<RawPageTable, PagingAllocator>,
@@ -200,7 +202,10 @@ impl PageTable {
             let entry = &mut table.ptes[vpn.into_usize()];
 
             if lvl == 0 {
-                assert!(entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(), "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags);
+                assert!(
+		    entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(),
+		    "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags
+		);
 
                 entry.update_in_place(|mut pte| {
                     pte.flags = flags;
@@ -467,4 +472,132 @@ pub fn enabled() -> bool {
     // this should be true. (Not sure if this helps *too* much with
     // perf, but can't hurt).
     likely(satp.mode() == 8)
+}
+
+#[derive(Clone, Debug)]
+pub struct SharedPageTable {
+    inner: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>,
+}
+
+impl SharedPageTable {
+    pub fn from_inner(x: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>) -> Self {
+        Self { inner: x }
+    }
+
+    /// Walk a virtual address (which does not have to be page-aligned) and find
+    /// the physical address it maps to (which is offset from the page by the
+    /// same amount as the virtual address).
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if it is called with an unmapped virtual
+    /// address.
+    #[track_caller]
+    pub fn walk<T>(
+        &self,
+        virt_addr: VirtualConst<T, Identity>,
+    ) -> Option<(PhysicalConst<T, DirectMapped>, PageTableFlags)> {
+        let addr = virt_addr.into_usize();
+        let page = virt_addr.page_align().into_usize();
+        let offset = addr - page;
+
+        let inner = self.inner.read();
+        let mut table = &**inner;
+        for vpn in virt_addr.vpns().into_iter().rev() {
+            let entry = &table.ptes[vpn.into_usize()].decode();
+
+            match entry.kind() {
+                PTEKind::Leaf => {
+                    let ppn = entry.ppn;
+                    let phys_page = PhysicalConst::from_components(
+                        ppn,
+                        Some(PgOff::from_usize_truncate(offset)),
+                    );
+                    return Some((phys_page, entry.flags));
+                }
+                PTEKind::Branch(phys_addr) => {
+                    // SAFETY: By our invariants, this is safe.
+                    table = unsafe { &*(phys_addr.into_virt().into_ptr()) };
+                }
+                PTEKind::Invalid => return None,
+            }
+        }
+
+        unreachable!();
+    }
+
+    /// Map a page in this page table.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if either the physical or virtual addresses are unaligned.
+    #[track_caller]
+    pub fn map(
+        &mut self,
+        from: PhysicalConst<u8, Identity>,
+        to: VirtualConst<u8, Identity>,
+        flags: PageTableFlags,
+        size: PageSize,
+    ) {
+        assert!(
+            from.is_page_aligned(),
+            "PageTable::map: tried to map from an unaligned physical address: from={from:#p}, to={to:#p}, flags={flags:?}", 
+        );
+        assert!(
+            to.is_page_aligned(),
+            "PageTable::map: tried to map to an unaligned virtual address: from={from:#p}, to={to:#p}, flags={flags:?}",
+        );
+
+        let depth_max = match size {
+            PageSize::Base => 3,
+            PageSize::Mega => 2,
+            PageSize::Giga => 1,
+        };
+
+        let mut inner = self.inner.write();
+        let mut table = &mut **inner;
+
+        for (iter, vpn) in to.vpns().into_iter().enumerate().rev().take(depth_max) {
+            let entry = &mut table.ptes[vpn.into_usize()];
+
+            if iter == 0 {
+                assert!(
+		    entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(),
+		    "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags
+		);
+
+                entry.update_in_place(|mut pte| {
+                    pte.flags = flags;
+                    pte.ppn = from.ppn();
+                    pte
+                });
+
+                return;
+            }
+
+            match entry.decode().kind() {
+                PTEKind::Leaf => unreachable!(),
+                PTEKind::Branch(paddr) => {
+                    // SAFETY: By invariants
+                    table = unsafe { &mut *(paddr.into_virt().into_ptr_mut()) }
+                }
+                PTEKind::Invalid => {
+                    let new_subtable = Box::leak(PageTable::new_table());
+                    let subtable_phys: PhysicalMut<RawPageTable, DirectMapped> =
+                        Virtual::from_ptr(new_subtable as *mut _).into_phys();
+                    entry.update_in_place(|mut pte| {
+                        pte.flags = PageTableFlags::VALID;
+                        pte.ppn = subtable_phys.ppn();
+                        pte
+                    });
+
+                    table = new_subtable;
+                }
+            }
+        }
+    }
+
+    pub fn as_physical_const(&self) -> PhysicalConst<RawPageTable, DirectMapped> {
+        Virtual::from_ptr(core::ptr::addr_of!(**self.inner.read())).into_phys()
+    }
 }

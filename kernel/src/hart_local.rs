@@ -11,6 +11,7 @@ use rille::addr::{Kernel, VirtualConst, KERNEL_PHYS_OFFSET};
 
 use crate::{
     asm::{self, intr_off, intr_on},
+    capability::Thread,
     kalloc::phys::{self, PMAlloc},
     paging,
     proc::{Context, Proc},
@@ -206,12 +207,14 @@ pub struct HartCtx {
     pub hartid: Cell<u64>,
     /// In trap handler?
     pub trap: Cell<bool>,
-    /// What process are we running?
-    pub proc: RefCell<Option<Arc<Proc>>>,
+    /// What thread are we running?
+    pub thread: RefCell<Option<Arc<Thread>>>,
     /// Register spill area for this hart
     pub context: SpinMutex<Context>,
     /// Interval for timer interrupts
     pub timer_interval: Cell<u64>,
+    /// Time base frequency
+    pub timebase_freq: Cell<u64>,
     /// Ensure HartCtx is !Send + !Sync
     _phantom: PhantomData<*const ()>,
 }

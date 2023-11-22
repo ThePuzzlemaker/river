@@ -4,7 +4,10 @@ use core::{convert::Infallible, fmt::Debug, marker::PhantomData};
 
 use bitflags::bitflags;
 
-use crate::{addr::Vpn, syscalls};
+use crate::{
+    addr::{Identity, VirtualConst, Vpn},
+    syscalls,
+};
 
 use super::{CapResult, Capability, CapabilityType, Captr};
 
@@ -40,10 +43,7 @@ impl<L: PagingLevel> Capability for Page<L> {
 ///
 /// See [`PgTblCaptr`] for operations on this capability.
 #[derive(Copy, Clone, Debug)]
-pub struct PageTable<L: PagingLevel>(#[doc(hidden)] PhantomData<L>, #[doc(hidden)] Infallible);
-
-/// Helper type for [`PageTable`] captrs.
-pub type PgTblCaptr<L> = Captr<PageTable<L>>;
+pub struct PageTable(#[doc(hidden)] Infallible);
 
 /// Page tables are divided into different "levels", where each level
 /// determines which part of the address translation hierarchy the
@@ -61,7 +61,7 @@ pub type PgTblCaptr<L> = Captr<PageTable<L>>;
 /// Note that the upper half of memory (`0xFFFF_FFC0_0000_0000` to
 /// `0xFFFF_FFFF_FFFF_FFFF`, inclusive)[^1] is reserved for kernel
 /// use. This leaves the memory range `0x0000_0000_0000_0000` to
-/// `0x0000_0020_0000_0000` for use by userspace applications. This is
+/// `0x0000_0040_0000_0000` for use by userspace applications. This is
 /// certainly enough for all applications that river will be used for,
 /// being almost 128GiB of virtual memory.
 ///
@@ -79,6 +79,17 @@ pub trait PagingLevel: Copy + Clone + Debug + super::private::Sealed {
     /// The base-2 logarithm of this paging level's page size in
     /// bytes.
     const PAGE_SIZE_LOG2: usize;
+}
+
+/// An enum representing [`PagingLevel`]s at runtime.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PageSize {
+    /// Regular-sized pages. See [`BasePage`].
+    Base,
+    /// Megapages. See [`MegaPage`].
+    Mega,
+    /// Gigapages. See [`GigaPage`].
+    Giga,
 }
 
 /// Gigapages are 1GiB (`1 << 30` bytes) in size. This is the base
@@ -105,12 +116,12 @@ impl PagingLevel for BasePage {
     const PAGE_SIZE_LOG2: usize = 12;
 }
 
-impl<L: PagingLevel> Capability for PageTable<L> {
+impl Capability for PageTable {
     /// Page table sizes are constant, no matter the [`PagingLevel`].
     type RetypeSizeSpec = ();
 
     fn retype_size_spec(_spec: Self::RetypeSizeSpec) -> usize {
-        L::PAGE_SIZE_LOG2
+        0
     }
 
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::PgTbl;
@@ -151,47 +162,6 @@ impl From<PageTableFlags> for u64 {
     }
 }
 
-impl PgTblCaptr<BasePage> {
-    /// Map a level 2 page table into a level 1 page table. This makes
-    /// the processor use the L2 table for translating the 1MiB region
-    /// specified by the [`Vpn`] in the L1 table.
-    ///
-    /// # Errors
-    ///
-    /// TODO
-    pub fn map(
-        self: PgTblCaptr<BasePage>,
-        into: PgTblCaptr<MegaPage>,
-        vpn: Vpn,
-        flags: PageTableFlags,
-    ) -> CapResult<()> {
-        syscalls::paging::pgtbl_map(self.into_raw(), into.into_raw(), vpn, flags)
-    }
-}
-
-impl PgTblCaptr<MegaPage> {
-    /// Map a level 1 page table into a level 0 page table. This makes
-    /// the processor use the L1 table for translating the 1GiB region
-    /// specified by the [`Vpn`] in the L0 table.
-    ///
-    /// # Limitations
-    ///
-    /// The [`Vpn`] must correspond to the lower half of virtual
-    /// memory, i.e. it cannot be `128` or higher.
-    ///
-    /// # Errors
-    ///
-    /// TODO
-    pub fn map(
-        self: PgTblCaptr<MegaPage>,
-        into: PgTblCaptr<GigaPage>,
-        vpn: Vpn,
-        flags: PageTableFlags,
-    ) -> CapResult<()> {
-        syscalls::paging::pgtbl_map(self.into_raw(), into.into_raw(), vpn, flags)
-    }
-}
-
 impl<L: PagingLevel> PageCaptr<L> {
     /// Map a page of a given level into its corresponding page
     /// table. This makes the processor use the provided physical page
@@ -208,15 +178,15 @@ impl<L: PagingLevel> PageCaptr<L> {
     /// TODO
     pub fn map(
         self: PageCaptr<L>,
-        into: PgTblCaptr<L>,
-        vpn: Vpn,
+        into: Captr<PageTable>,
+        vaddr: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
     ) -> CapResult<()> {
-        syscalls::paging::page_map(self.into_raw(), into.into_raw(), vpn, flags)
+        syscalls::paging::page_map(self.into_raw(), into.into_raw(), vaddr, flags)
     }
 }
 
-impl<L: PagingLevel> PgTblCaptr<L> {
+impl Captr<PageTable> {
     /// Unmap the region specified by the [`Vpn`] in this page table.
     ///
     /// # Errors

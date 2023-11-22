@@ -180,12 +180,12 @@ impl<'h> ProcToken<'h> {
     }
 }
 
-impl HartCtx {
-    pub fn proc(&'_ self) -> Option<ProcToken<'_>> {
-        let proc = Arc::clone(self.proc.borrow().as_ref()?);
-        Some(ProcToken { proc, hart: self })
-    }
-}
+// impl HartCtx {
+//     pub fn proc(&'_ self) -> Option<ProcToken<'_>> {
+//         let proc = Arc::clone(self.thread.borrow().as_ref()?);
+//         Some(ProcToken { proc, hart: self })
+//     }
+// }
 
 #[derive(Debug)]
 pub struct ProcProtected {

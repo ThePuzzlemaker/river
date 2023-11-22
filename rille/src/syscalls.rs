@@ -28,6 +28,8 @@ pub enum SyscallNumber {
     DebugDumpRoot = 8,
     /// Print a string to the debug console.
     DebugPrint = 9,
+    /// Identify the type of a capability.
+    DebugCapIdentify = 10,
     /// Unknown syscall
     #[num_enum(default)]
     Unknown = u64::MAX,
@@ -305,12 +307,17 @@ pub mod untyped {
 /// Syscalls for paging.
 pub mod paging {
     use crate::{
-        addr::Vpn,
+        addr::{Identity, VirtualConst, Vpn},
         capability::{paging::PageTableFlags, CapError, CapResult},
     };
 
     use super::SyscallNumber;
 
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
     pub fn pgtbl_map(
         from_pgtbl: usize,
         into_pgtbl: usize,
@@ -335,10 +342,15 @@ pub mod paging {
         }
     }
 
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
     pub fn page_map(
         from_page: usize,
         into_pgtbl: usize,
-        vpn: Vpn,
+        vaddr: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
     ) -> CapResult<()> {
         // SAFETY: pgtbl_map is always safe.
@@ -347,7 +359,7 @@ pub mod paging {
                 SyscallNumber::PageMap,
                 from_page as u64,
                 into_pgtbl as u64,
-                vpn.into_usize() as u64,
+                vaddr.into_usize() as u64,
                 flags.bits() as u64,
             )
         };
@@ -362,7 +374,7 @@ pub mod paging {
 
 /// Syscalls for low-level debugging of capabilities.
 pub mod debug {
-    use crate::capability::{CapError, CapResult};
+    use crate::capability::{CapError, CapResult, CapabilityType};
 
     use super::SyscallNumber;
 
@@ -411,5 +423,25 @@ pub mod debug {
             unsafe { super::ecall2(SyscallNumber::DebugPrint, s.as_ptr() as u64, s.len() as u64) };
 
         // print_string will never fail for valid `&str`s.
+    }
+
+    /// Get the capability type of a capability in the given slot.
+    ///
+    /// # Errors
+    ///
+    /// - This function will return [`CapError::NotPresent`] if any
+    /// capability index was out of bounds.
+    ///
+    /// - This function will return [`CapError::InvalidType`] if the
+    /// `table` index did not refer to a capability table.
+    pub fn debug_cap_identify(table: usize, index: usize) -> CapResult<CapabilityType> {
+        // SAFETY: debug_cap_identify is always safe
+        let res =
+            unsafe { super::ecall2(SyscallNumber::DebugCapIdentify, table as u64, index as u64) };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(v) => Ok(CapabilityType::from(v)),
+        }
     }
 }

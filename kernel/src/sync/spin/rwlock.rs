@@ -539,12 +539,12 @@ pub struct SpinRwLockWriteGuard<'a, T> {
 
 impl<'a, T: 'a> SpinRwLockWriteGuard<'a, T> {
     pub fn map<U: ?Sized + 'a>(
-        mut self,
+        mut this: Self,
         f: impl FnOnce(&mut T) -> &mut U,
     ) -> MappedSpinRwLockWriteGuard<'a, T, U> {
-        let mapped = f(&mut *self) as *mut _;
+        let mapped = f(&mut *this) as *mut _;
         MappedSpinRwLockWriteGuard {
-            guard: self,
+            guard: this,
             mapped,
         }
     }

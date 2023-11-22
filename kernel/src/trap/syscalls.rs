@@ -3,28 +3,62 @@
     clippy::unnecessary_wraps,
     clippy::too_many_arguments
 )]
-use core::{ptr::NonNull, slice};
+use core::slice;
 
 use rille::{
-    addr::{Identity, VirtualConst, Vpn},
-    capability::{paging::PageTableFlags, CapError, CapResult},
+    addr::{Identity, VirtualConst},
+    capability::{paging::PageTableFlags, CapError, CapResult, CapabilityType},
 };
 
 use crate::{
-    capability::{captbl::Captbl, AnyCap, CapToOwned, EmptySlot, Page, PgTbl},
+    capability::{captbl::Captbl, AnyCap, CapToOwned, EmptySlot, Page, PgTbl, ThreadProtected},
     print, println,
-    proc::ProcPrivate,
 };
 
-pub fn sys_debug_dump_root(private: &mut ProcPrivate) -> Result<(), CapError> {
+pub fn sys_debug_dump_root(private: &mut ThreadProtected) -> Result<(), CapError> {
     crate::println!("{:#x?}", private.captbl);
     Ok(())
 }
 
-pub fn sys_debug_cap_slot(private: &mut ProcPrivate, tbl: u64, index: u64) -> Result<(), CapError> {
+pub fn sys_debug_cap_identify(
+    private: &mut ThreadProtected,
+    tbl: u64,
+    index: u64,
+) -> Result<CapabilityType, CapError> {
     let (tbl, index) = (tbl as usize, index as usize);
 
-    let root_hdr = &private.captbl;
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
+
+    let tbl = if tbl == 0 {
+        root_hdr.clone()
+    } else {
+        root_hdr
+            .get::<Captbl>(tbl)?
+            .to_owned_cap()
+            .upgrade()
+            .ok_or(CapError::NotPresent)?
+    };
+
+    let slot = tbl.get::<AnyCap>(index)?;
+    Ok(slot.cap_type())
+}
+
+pub fn sys_debug_cap_slot(
+    private: &mut ThreadProtected,
+    tbl: u64,
+    index: u64,
+) -> Result<(), CapError> {
+    let (tbl, index) = (tbl as usize, index as usize);
+
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
 
     let tbl = if tbl == 0 {
         root_hdr.clone()
@@ -43,16 +77,16 @@ pub fn sys_debug_cap_slot(private: &mut ProcPrivate, tbl: u64, index: u64) -> Re
 }
 
 pub fn sys_debug_print(
-    private: &mut ProcPrivate,
+    private: &mut ThreadProtected,
     str_ptr: VirtualConst<u8, Identity>,
     str_len: u64,
 ) {
     let str_len = str_len as usize;
 
-    assert!(
-        str_ptr.add(str_len).into_usize() < private.mem_size,
-        "too long"
-    );
+    // assert!(
+    //     str_ptr.add(str_len).into_usize() < private.mem_size,
+    //     "too long"
+    // );
 
     // SAFETY: All values are valid for u8, and process memory is
     // zeroed and never uninitialized. TODO: make this not disclose
@@ -60,8 +94,7 @@ pub fn sys_debug_print(
     let slice = unsafe {
         slice::from_raw_parts(
             private
-                .mman
-                .get_table()
+                .root_pgtbl
                 .walk(str_ptr)
                 .unwrap()
                 .0
@@ -76,7 +109,7 @@ pub fn sys_debug_print(
 }
 
 pub fn sys_copy_deep(
-    private: &mut ProcPrivate,
+    private: &mut ThreadProtected,
     from_tbl_ref: u64,
     from_tbl_index: u64,
     from_index: u64,
@@ -91,7 +124,11 @@ pub fn sys_copy_deep(
     let into_tbl_index = into_tbl_index as usize;
     let into_index = into_index as usize;
 
-    let root_hdr = &private.captbl;
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
 
     let from_tbl_ref = if from_tbl_ref == 0 {
         root_hdr.clone()
@@ -154,7 +191,7 @@ pub fn sys_copy_deep(
 }
 
 pub fn sys_swap(
-    private: &mut ProcPrivate,
+    private: &mut ThreadProtected,
     cap1_table: u64,
     cap1_index: u64,
     cap2_table: u64,
@@ -167,7 +204,11 @@ pub fn sys_swap(
         cap2_index as usize,
     );
 
-    let root_hdr = &private.captbl;
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
 
     if cap1_table == cap2_table && cap1_index == cap2_index {
         // Captrs are aliased, this is a no-op
@@ -202,10 +243,14 @@ pub fn sys_swap(
     Ok(())
 }
 
-pub fn sys_delete(private: &mut ProcPrivate, table: u64, index: u64) -> CapResult<()> {
+pub fn sys_delete(private: &mut ThreadProtected, table: u64, index: u64) -> CapResult<()> {
     let (table, index) = (table as usize, index as usize);
 
-    let root_hdr = &private.captbl;
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
 
     let table = if table == 0 {
         root_hdr.clone()
@@ -446,15 +491,19 @@ pub fn sys_delete(private: &mut ProcPrivate, table: u64, index: u64) -> CapResul
 // }
 
 pub fn sys_page_map(
-    private: &mut ProcPrivate,
+    private: &mut ThreadProtected,
     from_page: u64,
     into_pgtbl: u64,
-    vpn: Vpn,
+    addr: VirtualConst<u8, Identity>,
     flags: PageTableFlags,
 ) -> CapResult<()> {
     let (from_page, into_pgtbl) = (from_page as usize, into_pgtbl as usize);
 
-    let root_hdr = &private.captbl;
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
 
     if from_page == into_pgtbl {
         return Err(CapError::InvalidOperation);
@@ -463,30 +512,30 @@ pub fn sys_page_map(
     let mut from_page = root_hdr.get_mut::<Page>(from_page)?;
     let mut into_pgtbl = root_hdr.get_mut::<PgTbl>(into_pgtbl)?;
 
-    into_pgtbl.map_page(&mut from_page, vpn, flags)?;
+    into_pgtbl.map_page(&mut from_page, addr, flags)?;
 
     Ok(())
 }
 
-pub fn sys_pgtbl_map(
-    private: &mut ProcPrivate,
-    from_pgtbl: u64,
-    into_pgtbl: u64,
-    vpn: Vpn,
-    flags: PageTableFlags,
-) -> CapResult<()> {
-    let (from_pgtbl, into_pgtbl) = (from_pgtbl as usize, into_pgtbl as usize);
+// pub fn sys_pgtbl_map(
+//     private: &mut ProcPrivate,
+//     from_pgtbl: u64,
+//     into_pgtbl: u64,
+//     vpn: Vpn,
+//     flags: PageTableFlags,
+// ) -> CapResult<()> {
+//     let (from_pgtbl, into_pgtbl) = (from_pgtbl as usize, into_pgtbl as usize);
 
-    let root_hdr = &private.captbl;
+//     let root_hdr = &private.captbl;
 
-    if from_pgtbl == into_pgtbl {
-        return Err(CapError::InvalidOperation);
-    }
+//     if from_pgtbl == into_pgtbl {
+//         return Err(CapError::InvalidOperation);
+//     }
 
-    let mut from_pgtbl = root_hdr.get_mut::<PgTbl>(from_pgtbl)?;
-    let mut into_pgtbl = root_hdr.get_mut::<PgTbl>(into_pgtbl)?;
+//     let mut from_pgtbl = root_hdr.get_mut::<PgTbl>(from_pgtbl)?;
+//     let mut into_pgtbl = root_hdr.get_mut::<PgTbl>(into_pgtbl)?;
 
-    into_pgtbl.map_pgtbl(&mut from_pgtbl, vpn, flags)?;
+//     into_pgtbl.map_pgtbl(&mut from_pgtbl, vpn, flags)?;
 
-    Ok(())
-}
+//     Ok(())
+// }

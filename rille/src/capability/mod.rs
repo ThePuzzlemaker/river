@@ -636,6 +636,7 @@ pub struct CaptrRange<C: Capability> {
 }
 
 impl<C: Capability> CaptrRange<C> {
+    /// TODO
     pub fn count(&self) -> usize {
         (self.hi.into_raw() - self.lo.into_raw()) + 1
     }
@@ -655,7 +656,7 @@ mod private {
     impl Sealed for MegaPage {}
     impl Sealed for BasePage {}
     impl<L: PagingLevel> Sealed for Page<L> {}
-    impl<L: PagingLevel> Sealed for PageTable<L> {}
+    impl Sealed for PageTable {}
     impl Sealed for Captbl {}
     impl Sealed for Empty {}
     //impl Sealed for Untyped {}

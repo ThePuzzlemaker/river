@@ -1,20 +1,22 @@
-use core::ops::Range;
+use core::{mem::MaybeUninit, ops::Range};
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
 
 use rille::{
     addr::{Identity, PhysicalConst, VirtualConst},
+    capability::paging::PageSize,
     units::StorageUnits,
 };
 
 use crate::{
     kalloc::{self, phys::PMAlloc},
-    paging::{PageTable, PageTableFlags},
+    paging::{PageTableFlags, PagingAllocator, SharedPageTable},
+    sync::SpinRwLock,
 };
 
 #[derive(Debug)]
 pub struct UserMemoryManager {
-    table: PageTable,
+    table: SharedPageTable,
     map: BTreeMap<VirtualConst<u8, Identity>, VmemRegion>,
 }
 
@@ -60,8 +62,12 @@ pub enum RegionPurpose {
 
 impl Default for UserMemoryManager {
     fn default() -> Self {
+        // SAFETY: The page is zeroed and thus is well-defined and valid.
+        let table =
+            unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
+        let table = Arc::new(SpinRwLock::new(table));
         Self {
-            table: PageTable::new(),
+            table: SharedPageTable::from_inner(table),
             map: BTreeMap::new(),
         }
     }
@@ -102,7 +108,7 @@ impl UserMemoryManager {
             let from = backing_mem.add(page * 4.kib()).into_identity().into_const();
             let to = addr.add(page * 4.kib());
             let flags = req.flags;
-            self.table.map(from, to, flags);
+            self.table.map(from, to, flags, PageSize::Base);
         }
 
         let range = addr..addr.add(req.n_pages * 4.kib());
@@ -127,10 +133,10 @@ impl UserMemoryManager {
         to: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
     ) {
-        self.table.map(from, to, flags);
+        self.table.map(from, to, flags, PageSize::Base);
     }
 
-    pub fn get_table(&self) -> &PageTable {
+    pub fn get_table(&self) -> &SharedPageTable {
         &self.table
     }
 }

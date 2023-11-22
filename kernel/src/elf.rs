@@ -21,7 +21,7 @@ use core::mem;
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::io_traits::{Read, Seek, SeekFrom};
+use rille::io_traits::{Read, Seek, SeekFrom};
 
 use self::raw::FileIdent;
 
