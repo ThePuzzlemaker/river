@@ -36,7 +36,7 @@ macro_rules! print {
 
 global_asm!(
     "
-.pushsection .text
+.pushsection .init
 .option norvc
 .type _start, @function
 .global _start

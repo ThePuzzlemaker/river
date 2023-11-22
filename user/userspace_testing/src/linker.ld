@@ -12,6 +12,8 @@ SECTIONS {
     . = 0x10400000;
     .text : {
         . = ALIGN(4K);
+	*(.init);
+	. = ALIGN(8);
         *(.text .text.*);
 	. = ALIGN(4K);
     }
