@@ -283,75 +283,77 @@ unsafe extern "C" fn user_trap() -> ! {
         hart.thread.borrow().as_ref().cloned().unwrap()
     });
 
-    let mut private = proc.private.write();
+    {
+        let mut private = proc.private.write();
 
-    let mut trapframe = proc.trapframe.lock();
-    trapframe.user_epc = asm::read_sepc();
+        let mut trapframe = proc.trapframe.lock();
+        trapframe.user_epc = asm::read_sepc();
 
-    let scause = asm::read_scause();
-    // Exception, not a syscall or interrupt.
-    assert!(
-        scause & SCAUSE_INTR_BIT != 0 || scause == 8,
-        "user exception: {}, hart={} pid={} sepc={:#x} stval={:#x} scause={:#x}",
-        describe_exception(scause),
-        hartid(),
-        proc.tid,
-        asm::read_sepc(),
-        asm::read_stval(),
-        scause
-    );
-
-    if scause == 8 {
-        // syscall
-
-        // `ecall` instrs are 4 bytes, skip to the instruction after
-        trapframe.user_epc += 4;
-
-        match trapframe.a0.into() {
-            SyscallNumber::CopyDeep => sys_copy_deep(&mut private, &mut trapframe),
-            //SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
-            SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, &mut trapframe),
-            SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, &mut trapframe),
-            SyscallNumber::DebugPrint => sys_debug_print(&mut private, &mut trapframe),
-            SyscallNumber::Swap => sys_swap(&mut private, &mut trapframe),
-            SyscallNumber::Delete => sys_delete(&mut private, &mut trapframe),
-            // SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
-            SyscallNumber::PageMap => sys_page_map(&mut private, &mut trapframe),
-            SyscallNumber::DebugCapIdentify => {
-                sys_debug_cap_identify(&mut private, &mut trapframe);
-            }
-            _ => {
-                trapframe.a0 = CapError::InvalidOperation.into();
-            }
-        }
-
-        // println!(
-        //     "user trap! a0={} epc={:#x}",
-        //     trapframe.a0, trapframe.user_epc
-        // );
-    } else {
-        let kind = device_interrupt(scause);
+        let scause = asm::read_scause();
+        // Exception, not a syscall or interrupt.
         assert!(
-            kind != InterruptKind::Unknown,
-            "user trap from unknown device, pid={} sepc={:#x} stval={:#x} scause={:#x}",
+            scause & SCAUSE_INTR_BIT != 0 || scause == 8,
+            "user exception: {}, hart={} pid={} sepc={:#x} stval={:#x} scause={:#x}",
+            describe_exception(scause),
+            hartid(),
             proc.tid,
-            trapframe.user_epc,
+            asm::read_sepc(),
             asm::read_stval(),
             scause
         );
-        if kind == InterruptKind::Timer {
-            // Make sure we don't hold any locks while we context
-            // switch. We don't need to worry about LOCAL_HART as
-            // that is lock-free. Additionally, yield_to_scheduler
-            // will constrain this process to the current hart, or
-            // return us directly to user_trap_ret if we weren't.
-            drop(trapframe);
-            drop(private);
-            proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
-            LOCAL_HART.with(|hart| hart.trap.set(false));
-            // SAFETY: This thread is currently running on this hart.
-            unsafe {
-                proc.yield_to_scheduler();
+
+        if scause == 8 {
+            // syscall
+
+            // `ecall` instrs are 4 bytes, skip to the instruction after
+            trapframe.user_epc += 4;
+
+            match trapframe.a0.into() {
+                SyscallNumber::CopyDeep => sys_copy_deep(&mut private, &mut trapframe),
+                //SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
+                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, &mut trapframe),
+                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, &mut trapframe),
+                SyscallNumber::DebugPrint => sys_debug_print(&mut private, &mut trapframe),
+                SyscallNumber::Swap => sys_swap(&mut private, &mut trapframe),
+                SyscallNumber::Delete => sys_delete(&mut private, &mut trapframe),
+                // SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
+                SyscallNumber::PageMap => sys_page_map(&mut private, &mut trapframe),
+                SyscallNumber::DebugCapIdentify => {
+                    sys_debug_cap_identify(&mut private, &mut trapframe);
+                }
+                _ => {
+                    trapframe.a0 = CapError::InvalidOperation.into();
+                }
+            }
+
+            // println!(
+            //     "user trap! a0={} epc={:#x}",
+            //     trapframe.a0, trapframe.user_epc
+            // );
+        } else {
+            let kind = device_interrupt(scause);
+            assert!(
+                kind != InterruptKind::Unknown,
+                "user trap from unknown device, pid={} sepc={:#x} stval={:#x} scause={:#x}",
+                proc.tid,
+                trapframe.user_epc,
+                asm::read_stval(),
+                scause
+            );
+            if kind == InterruptKind::Timer {
+                // Make sure we don't hold any locks while we context
+                // switch. We don't need to worry about LOCAL_HART as
+                // that is lock-free. Additionally, yield_to_scheduler
+                // will constrain this process to the current hart, or
+                // return us directly to user_trap_ret if we weren't.
+                drop(trapframe);
+                drop(private);
+                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                LOCAL_HART.with(|hart| hart.trap.set(false));
+                // SAFETY: This thread is currently running on this hart.
+                unsafe {
+                    proc.yield_to_scheduler();
+                }
             }
         }
     }
