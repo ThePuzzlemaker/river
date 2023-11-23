@@ -53,7 +53,6 @@ extern "C" {
 use core::{
     alloc::{GlobalAlloc, Layout},
     arch::{asm, global_asm},
-    cmp,
     mem::MaybeUninit,
     panic::PanicInfo,
     slice,
@@ -74,22 +73,14 @@ use uart::UART;
 use crate::{
     boot::HartBootData,
     capability::{captbl::Captbl, AllocatorSlot, EmptySlot, Page, PgTbl, Thread, ThreadState},
-    elf::{Elf, SegmentFlags, SegmentType},
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
     plic::PLIC,
-    proc::{
-        mman::{RegionPurpose, RegionRequest},
-        Proc, ProcState, Scheduler, SchedulerInner,
-    },
-    symbol::fn_user_code_woo,
+    proc::{Scheduler, SchedulerInner},
     sync::{SpinMutex, SpinRwLock},
-    trampoline::Trapframe,
     trap::{Irqs, IRQS},
 };
-
-use rille::io_traits::{Cursor, Read, Seek, SeekFrom};
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LinkedListAlloc = LinkedListAlloc::new();
@@ -444,7 +435,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
     let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
-    let mut proc = Thread::new(String::from("user_mode_woo"), Some(captbl), pgtbl);
+    let proc = Thread::new(String::from("user_mode_woo"), Some(captbl), pgtbl);
     {
         let mut private = proc.private.write();
 

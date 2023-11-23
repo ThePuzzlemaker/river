@@ -14,7 +14,7 @@ use crate::{
     capability::Thread,
     kalloc::phys::{self, PMAlloc},
     paging,
-    proc::{Context, Proc},
+    proc::Context,
     symbol::{self, tdata_end, tdata_start},
     sync::SpinMutex,
 };

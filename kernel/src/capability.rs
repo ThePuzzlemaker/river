@@ -16,7 +16,7 @@ use rille::capability::{CapError, CapResult, CapabilityType};
 use rille::addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Ppn, VirtualConst};
 use rille::units::{self, StorageUnits};
 
-use crate::hart_local::{HartCtx, LOCAL_HART};
+use crate::hart_local::LOCAL_HART;
 use crate::kalloc::phys::PMAlloc;
 use crate::paging::{self, root_page_table, SharedPageTable};
 use crate::proc::Context;
@@ -686,7 +686,21 @@ impl Thread {
         this
     }
 
-    pub fn yield_to_scheduler(&self) {
+    /// Yield this process's time to the scheduler.
+    ///
+    /// # Safety
+    ///
+    /// The provided thread must be running on the current hart.
+    ///
+    /// # Guarantees and Deadlocks
+    ///
+    /// Locks **must not** be held when calling this function, else
+    /// there is a large chance for deadlock.
+    ///
+    /// The scheduler will constrain the user thread's stream of
+    /// execution to the current hart. To allow a thread to be stolen
+    /// by another hart, the waitlist must be used.
+    pub unsafe fn yield_to_scheduler(&self) {
         LOCAL_HART.with(|hart| {
             let intena = hart.intena.get();
             self.state.store(ThreadState::Runnable, Ordering::Relaxed);
@@ -709,43 +723,6 @@ impl fmt::Debug for Thread {
             .finish_non_exhaustive()
     }
 }
-
-// /// An opaque token that:
-// /// 1. Constrains the current logical kernel thread onto the current
-// /// hart
-// /// 2. Signifies that the thread is running on the current hart.
-// pub struct ThreadToken<'h> {
-//     thread: Arc<Thread>,
-//     hart: &'h HartCtx,
-// }
-
-// impl<'h> ThreadToken<'h> {
-//     #[inline(always)]
-//     pub fn thread(&self) -> &Arc<Thread> {
-//         &self.thread
-//     }
-
-//     #[inline(always)]
-//     pub fn hart(&self) -> &'h HartCtx {
-//         self.hart
-//     }
-
-//     pub fn yield_to_scheduler(&self) {
-//         let intena = self.hart.intena.get();
-//         let thread = &self.thread;
-
-//         // TODO: set state
-
-//         // SAFETY: The scheduler context is always valid, as
-//         // guaranteed by the scheduler.
-//         unsafe { Context::switch(&self.hart.context, &thread.context) }
-
-//         // N.B. Yielding does not allow the thread to migrate across
-//         // harts. Thus our hart ctx is still valid here.
-
-//         self.hart.intena.set(intena);
-//     }
-// }
 
 #[derive(Debug)]
 pub struct ThreadProtected {

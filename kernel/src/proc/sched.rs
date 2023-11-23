@@ -11,7 +11,7 @@ use crate::{
     sync::{OnceCell, SpinMutex},
 };
 
-use super::{Context, Proc, ProcState};
+use super::Context;
 
 static SCHED: Scheduler = Scheduler {
     per_hart: OnceCell::new(),
@@ -161,6 +161,7 @@ impl Scheduler {
                 .as_ref()
                 .cloned()
                 .expect("Scheduler::current_proc_wait: no process");
+            proc.state.store(ThreadState::Suspended, Ordering::Relaxed);
             let pid = proc.tid;
 
             sched.run_queue.remove(&pid);
