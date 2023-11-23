@@ -20,8 +20,10 @@ pub enum SyscallNumber {
     PageTableMap = 5,
     /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap`]
     PageTableUnmap = 6,
-    /// TODO
     ThreadSuspend = 7,
+    ThreadConfigure = 8,
+    ThreadResume = 9,
+    ThreadWriteRegisters = 10,
     /// Print the debug representation of a capability to the kernel
     /// console.
     DebugCapSlot = 0xFFFF_0000,
@@ -444,6 +446,66 @@ pub mod debug {
         match res {
             Err(e) => Err(CapError::from(e)),
             Ok(v) => Ok(CapabilityType::from(v)),
+        }
+    }
+}
+
+pub mod thread {
+    use crate::capability::{CapError, CapResult, UserRegisters};
+
+    use super::SyscallNumber;
+
+    pub fn suspend(thread: usize) -> CapResult<()> {
+        // SAFETY: thread_suspend is always safe
+        let res = unsafe { super::ecall1(SyscallNumber::ThreadSuspend, thread as u64) };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(_) => Ok(()),
+        }
+    }
+
+    pub fn resume(thread: usize) -> CapResult<()> {
+        // SAFETY: thread_suspend is always safe
+        let res = unsafe { super::ecall1(SyscallNumber::ThreadResume, thread as u64) };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(_) => Ok(()),
+        }
+    }
+
+    pub unsafe fn configure(thread: usize, captbl: usize, pgtbl: usize) -> CapResult<()> {
+        // SAFETY: By invariants.
+        let res = unsafe {
+            super::ecall3(
+                SyscallNumber::ThreadConfigure,
+                thread as u64,
+                captbl as u64,
+                pgtbl as u64,
+            )
+        };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(_) => Ok(()),
+        }
+    }
+
+    pub fn write_registers(thread: usize, registers: *const UserRegisters) -> CapResult<()> {
+        // SAFETY: write_registers is always safe, as it can only
+        // write the registers of a suspended process.
+        let res = unsafe {
+            super::ecall2(
+                SyscallNumber::ThreadWriteRegisters,
+                thread as u64,
+                registers as u64,
+            )
+        };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(_) => Ok(()),
         }
     }
 }

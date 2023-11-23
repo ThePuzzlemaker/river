@@ -43,6 +43,8 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::syscalls;
 
+use self::paging::PageTable;
+
 pub mod paging;
 
 /// This trait is implemented by all of the opaque types representing
@@ -584,6 +586,79 @@ impl<C: Capability> ExactSizeIterator for AllocateIter<C> {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Thread {}
+
+impl Capability for Thread {
+    type AllocateSizeSpec = ();
+
+    fn allocate_size_spec((): Self::AllocateSizeSpec) -> usize {
+        0
+    }
+
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Thread;
+}
+
+impl Captr<Thread> {
+    pub fn suspend(&self) -> CapResult<()> {
+        syscalls::thread::suspend(self.into_raw())
+    }
+
+    pub fn resume(&self) -> CapResult<()> {
+        syscalls::thread::resume(self.into_raw())
+    }
+
+    pub unsafe fn configure(
+        &self,
+        captbl: Captr<Captbl>,
+        pgtbl: Captr<PageTable>,
+    ) -> CapResult<()> {
+        // SAFETY: By invariants.
+        unsafe { syscalls::thread::configure(self.into_raw(), captbl.into_raw(), pgtbl.into_raw()) }
+    }
+
+    pub fn write_registers(&self, registers: &UserRegisters) -> CapResult<()> {
+        syscalls::thread::write_registers(self.into_raw(), registers as *const _)
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+#[allow(missing_docs)]
+pub struct UserRegisters {
+    /*   0 */ pub ra: u64,
+    /*   8 */ pub sp: u64,
+    /*  16 */ pub gp: u64,
+    /*  24 */ pub tp: u64,
+    /*  32 */ pub t0: u64,
+    /*  40 */ pub t1: u64,
+    /*  48 */ pub t2: u64,
+    /*  56 */ pub s0: u64,
+    /*  64 */ pub s1: u64,
+    /*  72 */ pub a0: u64,
+    /*  80 */ pub a1: u64,
+    /*  88 */ pub a2: u64,
+    /*  96 */ pub a3: u64,
+    /* 104 */ pub a4: u64,
+    /* 112 */ pub a5: u64,
+    /* 120 */ pub a6: u64,
+    /* 128 */ pub a7: u64,
+    /* 136 */ pub s2: u64,
+    /* 144 */ pub s3: u64,
+    /* 152 */ pub s4: u64,
+    /* 160 */ pub s5: u64,
+    /* 168 */ pub s6: u64,
+    /* 176 */ pub s7: u64,
+    /* 184 */ pub s8: u64,
+    /* 192 */ pub s9: u64,
+    /* 200 */ pub s10: u64,
+    /* 208 */ pub s11: u64,
+    /* 216 */ pub t3: u64,
+    /* 224 */ pub t4: u64,
+    /* 232 */ pub t5: u64,
+    /* 240 */ pub t6: u64,
+}
+
 // fn captbl_alloc(captbl: Captr<Captbl>, n: usize) -> CapResult<Captr<Empty>> {
 //     todo!()
 // }
@@ -637,7 +712,7 @@ impl<C: Capability> CaptrRange<C> {
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Allocator, Captbl, Empty,
+        Allocator, Captbl, Empty, Thread,
     };
 
     pub trait Sealed {}
@@ -649,6 +724,7 @@ mod private {
     impl Sealed for Captbl {}
     impl Sealed for Empty {}
     impl Sealed for Allocator {}
+    impl Sealed for Thread {}
 }
 
 // These impls are just so Capability doesn't have to impl all these

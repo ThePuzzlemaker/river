@@ -582,7 +582,7 @@ impl SharedPageTable {
     /// This function will panic if either the physical or virtual addresses are unaligned.
     #[track_caller]
     pub fn map(
-        &mut self,
+        &self,
         from: PhysicalConst<u8, Identity>,
         to: VirtualConst<u8, Identity>,
         flags: PageTableFlags,

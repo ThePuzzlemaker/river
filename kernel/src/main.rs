@@ -228,12 +228,22 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
     let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
-    let proc = Thread::new(String::from("user_mode_woo"), Some(captbl), pgtbl);
+    let proc = Thread::new(String::from("user_mode_woo"), Some(captbl), Some(pgtbl));
     let mut free_slot_ctr = 6;
     let mut init_pages_range = 0..0;
     proc.setup_page_table();
     {
         let mut private = proc.private.write();
+
+        let trampoline_virt =
+            VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
+
+        private.root_pgtbl.as_mut().unwrap().map(
+            trampoline_virt.into_phys().into_identity(),
+            VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
+            PageTableFlags::VAD | PageTableFlags::RX,
+            PageSize::Base,
+        );
 
         {
             let slot = private
@@ -533,11 +543,15 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
 
     N_STARTED.fetch_add(1, Ordering::Relaxed);
 
+    while N_STARTED.load(Ordering::Relaxed) != fdt.cpus().count() {
+        core::hint::spin_loop();
+    }
+
     loop {
         asm::nop();
     }
     // SAFETY: The scheduler is only started once on the main hart.
-    // unsafe { Scheduler::start() }
+    //unsafe { Scheduler::start() }
 }
 
 #[panic_handler]

@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
-use core::sync::atomic::AtomicU16;
+use core::sync::atomic::{AtomicU16, AtomicU64};
 use core::{fmt, mem, ptr};
 
 use alloc::string::String;
@@ -11,7 +11,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 use rille::capability::paging::{
     BasePage, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel,
 };
-use rille::capability::{CapError, CapResult, CapabilityType};
+use rille::capability::{CapError, CapResult, CapabilityType, UserRegisters};
 
 use rille::addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Ppn, VirtualConst};
 use rille::units::{self, StorageUnits};
@@ -478,6 +478,12 @@ impl Capability for PgTbl {
     }
 }
 
+impl<'a> SlotRef<'a, PgTbl> {
+    pub fn table(&self) -> &SharedPageTable {
+        &self.meta.table
+    }
+}
+
 impl<'a> SlotRefMut<'a, PgTbl> {
     /// TODO
     ///
@@ -596,7 +602,7 @@ impl<'a> fmt::Debug for RawCapDebugAdapter<'a> {
             // SAFETY: Type check.
             CapabilityType::Page => unsafe { &self.0.cap.page }.fmt(f),
             // SAFETY: Type check.
-            CapabilityType::Thread => unsafe { &self.0.cap.thread }.fmt(f),
+            CapabilityType::Thread => write!(f, "Thread(<opaque>)"),
             CapabilityType::Unknown => f.debug_struct("InvalidCap").finish(),
         }
     }
@@ -679,13 +685,114 @@ impl Capability for Arc<Thread> {
 }
 
 impl<'a> SlotRef<'a, Arc<Thread>> {
-    pub fn suspend(&self, private: &ThreadProtected) {
+    pub fn suspend(&self) {
         self.meta
             .inner
             .state
             .store(ThreadState::Suspended, Ordering::Relaxed);
         // TODO: notify the hart running the thread to stop its execution, or not?
-        Scheduler::dequeue(private.hartid, self.meta.inner.tid);
+        Scheduler::dequeue(
+            self.meta.inner.hartid.load(Ordering::Relaxed),
+            self.meta.inner.tid,
+        );
+    }
+
+    pub fn configure(&self, captbl: Captbl, pgtbl: SharedPageTable) {
+        let mut private = self.meta.inner.private.write();
+        private.captbl = Some(captbl);
+        let old_pgtbl = private.root_pgtbl.replace(pgtbl);
+        if let Some(_pgtbl) = old_pgtbl {
+            // TODO: pgtbl.unmap(VirtualConst::from(private.trapframe_addr))
+        }
+
+        drop(private);
+
+        self.meta.inner.setup_page_table();
+        self.meta
+            .inner
+            .state
+            .store(ThreadState::Suspended, Ordering::Relaxed);
+    }
+
+    pub fn resume(&self) -> CapResult<()> {
+        let cont = {
+            let private = self.meta.inner.private.read();
+            private.root_pgtbl.is_some()
+        };
+
+        if !cont {
+            return Err(CapError::InvalidOperation);
+        }
+
+        self.meta
+            .inner
+            .state
+            .store(ThreadState::Runnable, Ordering::Relaxed);
+        Scheduler::enqueue(self.meta.inner.clone());
+
+        Ok(())
+    }
+
+    pub fn write_registers(
+        &self,
+        registers: VirtualConst<UserRegisters, Identity>,
+    ) -> CapResult<()> {
+        use paging::PageTableFlags as KernelFlags;
+
+        if self.meta.inner.state.load(Ordering::Relaxed) != ThreadState::Suspended {
+            return Err(CapError::InvalidOperation);
+        }
+
+        let private = self.meta.inner.private.read();
+        let Some((addr, flags)) = private.root_pgtbl.as_ref().unwrap().walk(registers) else {
+            return Err(CapError::InvalidOperation);
+        };
+        if !flags.contains(KernelFlags::USER) {
+            return Err(CapError::InvalidOperation);
+        }
+        // SAFETY: This pointer is valid and non-null.
+        let registers = unsafe { &*addr.into_virt().cast::<UserRegisters>().into_ptr() };
+
+        let mut trapframe = self.meta.inner.trapframe.lock();
+        let trapframe = &mut *trapframe;
+        trapframe.user_epc = registers.ra;
+        *trapframe = Trapframe {
+            ra: 0,
+            sp: registers.sp,
+            gp: registers.gp,
+            tp: registers.tp,
+            t0: registers.t0,
+            t1: registers.t1,
+            t2: registers.t2,
+            s0: registers.s0,
+            s1: registers.s1,
+            a0: registers.a0,
+            a1: registers.a1,
+            a2: registers.a2,
+            a3: registers.a3,
+            a4: registers.a4,
+            a5: registers.a5,
+            a6: registers.a6,
+            a7: registers.a7,
+            s2: registers.s2,
+            s3: registers.s3,
+            s4: registers.s4,
+            s5: registers.s5,
+            s6: registers.s6,
+            s7: registers.s7,
+            s8: registers.s8,
+            s9: registers.s9,
+            s10: registers.s10,
+            s11: registers.s11,
+            t3: registers.t3,
+            t4: registers.t4,
+            t5: registers.t5,
+            t6: registers.t6,
+            user_epc: registers.ra,
+            ..*trapframe
+        };
+
+        Ok(())
     }
 }
 
@@ -697,10 +804,15 @@ pub struct Thread {
     pub context: SpinMutex<Context>,
     pub state: Atomic<ThreadState>,
     pub tid: usize,
+    pub hartid: AtomicU64,
 }
 
 impl Thread {
-    pub fn new(name: String, captbl: Option<Captbl>, pgtbl: SharedPageTable) -> Arc<Thread> {
+    pub fn new(
+        name: String,
+        captbl: Option<Captbl>,
+        pgtbl: Option<SharedPageTable>,
+    ) -> Arc<Thread> {
         let mut this = Arc::<Thread>::new_uninit();
         let this_mut = Arc::get_mut(&mut this).unwrap();
 
@@ -711,16 +823,16 @@ impl Thread {
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).private).write(SpinRwLock::new(
                 ThreadProtected {
                     captbl,
-                    root_pgtbl: Some(pgtbl),
+                    root_pgtbl: pgtbl,
                     asid: 1, // TODO
                     name,
-                    hartid: u64::MAX,
                     trapframe_addr: 0,
                 },
             ));
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).state)
                 .write(Atomic::new(ThreadState::Uninit));
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).tid).write(tid as usize);
+            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).hartid).write(AtomicU64::new(u64::MAX));
         }
 
         // SAFETY: We have just initialized this.
@@ -766,16 +878,6 @@ impl Thread {
         );
 
         private.trapframe_addr = trapframe_mapped_addr.into_usize();
-
-        let trampoline_virt =
-            VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
-
-        private.root_pgtbl.as_mut().unwrap().map(
-            trampoline_virt.into_phys().into_identity(),
-            VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
-            KernelFlags::VAD | KernelFlags::RX,
-            PageSize::Base,
-        );
     }
 
     /// Yield this process's time to the scheduler.
@@ -821,7 +923,6 @@ pub struct ThreadProtected {
     pub root_pgtbl: Option<SharedPageTable>,
     pub asid: u16,
     pub name: String,
-    pub hartid: u64,
     pub trapframe_addr: usize,
 }
 

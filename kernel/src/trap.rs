@@ -2,7 +2,7 @@ use core::{arch::global_asm, mem, ptr};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::ThreadState,
+    capability::{ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
@@ -293,8 +293,6 @@ unsafe extern "C" fn user_trap() -> ! {
         // before, we wouldn't have been able to interrupt unless
         // someone enabled interrupts while the lock was still held
         // (which is a bug itself).
-        let mut private = proc.private.write();
-
         let mut trapframe = proc.trapframe.lock();
         trapframe.user_epc = asm::read_sepc();
 
@@ -318,19 +316,24 @@ unsafe extern "C" fn user_trap() -> ! {
             trapframe.user_epc += 4;
 
             match trapframe.a0.into() {
-                SyscallNumber::CopyDeep => sys_copy_deep(&mut private, &mut trapframe),
-                SyscallNumber::AllocateMany => sys_allocate_many(&mut private, &mut trapframe),
-                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, &mut trapframe),
-                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, &mut trapframe),
-                SyscallNumber::DebugPrint => sys_debug_print(&mut private, &mut trapframe),
-                SyscallNumber::Swap => sys_swap(&mut private, &mut trapframe),
-                SyscallNumber::Delete => sys_delete(&mut private, &mut trapframe),
+                SyscallNumber::CopyDeep => sys_copy_deep(&proc, &mut trapframe),
+                SyscallNumber::AllocateMany => sys_allocate_many(&proc, &mut trapframe),
+                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&proc, &mut trapframe),
+                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&proc, &mut trapframe),
+                SyscallNumber::DebugPrint => sys_debug_print(&proc, &mut trapframe),
+                SyscallNumber::Swap => sys_swap(&proc, &mut trapframe),
+                SyscallNumber::Delete => sys_delete(&proc, &mut trapframe),
                 // SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
-                SyscallNumber::PageMap => sys_page_map(&mut private, &mut trapframe),
+                SyscallNumber::PageMap => sys_page_map(&proc, &mut trapframe),
                 SyscallNumber::DebugCapIdentify => {
-                    sys_debug_cap_identify(&mut private, &mut trapframe);
+                    sys_debug_cap_identify(&proc, &mut trapframe);
                 }
-                SyscallNumber::ThreadSuspend => sys_thread_suspend(&mut private, &mut trapframe),
+                SyscallNumber::ThreadSuspend => sys_thread_suspend(&proc, &mut trapframe),
+                SyscallNumber::ThreadConfigure => sys_thread_configure(&proc, &mut trapframe),
+                SyscallNumber::ThreadResume => sys_thread_resume(&proc, &mut trapframe),
+                SyscallNumber::ThreadWriteRegisters => {
+                    sys_thread_write_registers(&proc, &mut trapframe);
+                }
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
@@ -338,7 +341,6 @@ unsafe extern "C" fn user_trap() -> ! {
 
             if proc.state.load(Ordering::Relaxed) == ThreadState::Suspended {
                 drop(trapframe);
-                drop(private);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
@@ -362,7 +364,6 @@ unsafe extern "C" fn user_trap() -> ! {
             );
             if proc.state.load(Ordering::Relaxed) == ThreadState::Suspended {
                 drop(trapframe);
-                drop(private);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
@@ -372,7 +373,6 @@ unsafe extern "C" fn user_trap() -> ! {
                 // Make sure we don't hold any locks while we context
                 // switch.
                 drop(trapframe);
-                drop(private);
                 proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
@@ -398,6 +398,7 @@ unsafe extern "C" fn user_trap() -> ! {
 ///
 /// This function will panic if there is not a process scheduled on
 /// the local hart.
+#[inline(never)]
 pub unsafe extern "C" fn user_trap_ret() -> ! {
     asm::intr_off();
     LOCAL_HART.with(|hart| hart.trap.set(true));
@@ -415,8 +416,9 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
 
         let mut trapframe = proc.trapframe.lock();
         trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
-        trapframe.kernel_sp = (ptr::addr_of!(proc.stack) as usize as u64) + 4u64.mib();
-        trapframe.kernel_trap = user_trap as u64;
+        trapframe.kernel_sp =
+            (ptr::addr_of!(proc.stack) as usize as u64) + THREAD_STACK_SIZE as u64;
+        trapframe.kernel_trap = user_trap as usize as u64;
         trapframe.kernel_tp = asm::tp();
 
         asm::write_sepc(trapframe.user_epc);
@@ -518,7 +520,7 @@ impl IntoTrapframe for CapabilityType {
 
 macro_rules! define_syscall {
     ($ident:ident, $arity:tt) => {
-	fn $ident(private: &mut $crate::capability::ThreadProtected, trapframe: &mut $crate::trampoline::Trapframe) {
+	fn $ident(private: &::alloc::sync::Arc<$crate::capability::Thread>, trapframe: &mut $crate::trampoline::Trapframe) {
 	    define_syscall!(@arity private, trapframe, $ident, $arity);
 	}
     };
@@ -656,3 +658,6 @@ define_syscall!(sys_page_map, 4);
 // define_syscall!(sys_pgtbl_map, 4);
 define_syscall!(sys_debug_cap_identify, 2);
 define_syscall!(sys_thread_suspend, 1);
+define_syscall!(sys_thread_configure, 3);
+define_syscall!(sys_thread_resume, 1);
+define_syscall!(sys_thread_write_registers, 2);

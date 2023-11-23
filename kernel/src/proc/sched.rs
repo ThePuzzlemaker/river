@@ -107,10 +107,7 @@ impl Scheduler {
 
                         let proc = hart.thread.borrow().as_ref().cloned().unwrap();
 
-                        {
-                            let mut private = proc.private.write();
-                            private.hartid = hart.hartid.get();
-                        }
+                        proc.hartid.store(hart.hartid.get(), Ordering::Relaxed);
                         // SAFETY: Our caller guarantees these contexts are valid.
                         unsafe { Context::switch(&proc.context, &hart.context) }
 

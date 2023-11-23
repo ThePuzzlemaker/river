@@ -12,7 +12,7 @@ use rille::{
     addr::VirtualConst,
     capability::{
         paging::{BasePage, Page, PageTable, PageTableFlags},
-        Allocator, Captr, RemoteCaptr,
+        Allocator, Captr, RemoteCaptr, Thread,
     },
     init::{BootInfo, InitCapabilities},
     syscalls::{self, ecall1, SyscallNumber},
@@ -87,7 +87,22 @@ fn print_node(node: FdtNode<'_, '_>, n_spaces: usize) {
         print_node(child, n_spaces + 4);
     }
 }
- 
+
+extern "C" fn thread_entry(thread: usize) -> ! {
+    let _caps = unsafe { InitCapabilities::new() };
+    //let thread = unsafe { Captr::from_raw_unchecked(thread) };
+    loop {
+        print!("\rthread 2!");
+    }
+    // thread.suspend().unwrap();
+
+    // println!("resumed???");
+
+    // thread.suspend().unwrap();
+}
+
+static THREAD_STACK: &[u8; 1024 * 1024] = &[0; 1024 * 1024];
+
 #[no_mangle]
 extern "C" fn entry(init_info: *const BootInfo) -> ! {
     let caps = unsafe { InitCapabilities::new() };
@@ -100,32 +115,54 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
         .unwrap();
 
-    pg.map(
-        caps.pgtbl,
-        VirtualConst::from_usize(0xDEAD0000),
-        PageTableFlags::RW,
-    )
-    .unwrap();
+    let thread: Captr<Thread> = caps
+        .allocator
+        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65534) }, ())
+        .unwrap();
+    unsafe { thread.configure(Captr::null(), Captr::null()).unwrap() };
+    thread
+        .write_registers(&rille::capability::UserRegisters {
+            ra: thread_entry as usize as u64,
+            sp: THREAD_STACK.as_ptr().wrapping_add(1024 * 1024) as usize as u64,
+            a0: 65534,
+            ..Default::default()
+        })
+        .unwrap();
 
-    unsafe { core::ptr::write_volatile(0xDEAD0000 as *mut u64, 0xC0DED00D) };
+    // pg.map(
+    //     caps.pgtbl,
+    //     VirtualConst::from_usize(0xDEAD0000),
+    //     PageTableFlags::RW,
+    // )
+    // .unwrap();
 
-    for i in 1..=6 {
-        println!(
-            "{i}: {:?}",
-            syscalls::debug::debug_cap_identify(caps.captbl.into_raw(), i).unwrap()
-        );
+    // unsafe { core::ptr::write_volatile(0xDEAD0000 as *mut u64, 0xC0DED00D) };
+
+    // for i in 1..=6 {
+    //     println!(
+    //         "{i}: {:?}",
+    //         syscalls::debug::debug_cap_identify(caps.captbl.into_raw(), i).unwrap()
+    //     );
+    // }
+
+    // println!("{:#?}", init_info);
+
+    // let fdt = unsafe { Fdt::<'static>::from_ptr(init_info.fdt_ptr) }.unwrap();
+    // print_node(fdt.find_node("/").unwrap(), 0);
+
+    thread.resume().unwrap();
+
+    // thread.resume().unwrap();
+
+    loop {
+        print!("\rthread 1!");
     }
 
-    println!("{:#?}", init_info);
+    // unsafe {
+    //     ecall1(SyscallNumber::ThreadSuspend, caps.thread as u64).unwrap();
+    // }
 
-    let fdt = unsafe { Fdt::<'static>::from_ptr(init_info.fdt_ptr) }.unwrap();
-    print_node(fdt.find_node("/").unwrap(), 0);
-
-    unsafe {
-        ecall1(SyscallNumber::ThreadSuspend, caps.thread as u64).unwrap();
-    }
-
-    unreachable!();
+    // unreachable!();
 
     // let slot_2 = root_captbl
     //     .copy_deep(root_captbl.local_index(), root_captbl, unsafe {

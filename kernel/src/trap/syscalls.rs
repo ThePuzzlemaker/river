@@ -5,13 +5,14 @@
 )]
 use core::{mem::MaybeUninit, slice};
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 use rille::{
-    addr::{Identity, VirtualConst},
+    addr::{Identity, Kernel, VirtualConst},
     capability::{
-        paging::{BasePage, GigaPage, MegaPage, PageTableFlags, PagingLevel},
-        CapError, CapResult, CapabilityType,
+        paging::{BasePage, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel},
+        CapError, CapResult, CapabilityType, UserRegisters,
     },
+    units::StorageUnits,
 };
 
 use crate::{
@@ -21,23 +22,25 @@ use crate::{
     },
     kalloc::{self, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
-    print, println,
+    print, println, symbol,
     sync::SpinRwLock,
 };
 
-pub fn sys_debug_dump_root(private: &mut ThreadProtected) -> Result<(), CapError> {
-    crate::println!("{:#x?}", private.captbl);
+pub fn sys_debug_dump_root(thread: &Arc<Thread>) -> Result<(), CapError> {
+    crate::println!("{:#x?}", thread.private.read().captbl);
     Ok(())
 }
 
 pub fn sys_debug_cap_identify(
-    private: &mut ThreadProtected,
+    thread: &Arc<Thread>,
     tbl: u64,
     index: u64,
 ) -> Result<CapabilityType, CapError> {
     let (tbl, index) = (tbl as usize, index as usize);
 
-    let root_hdr = &private
+    let root_hdr = &thread
+        .private
+        .read()
         .captbl
         .as_ref()
         .cloned()
@@ -57,14 +60,12 @@ pub fn sys_debug_cap_identify(
     Ok(slot.cap_type())
 }
 
-pub fn sys_debug_cap_slot(
-    private: &mut ThreadProtected,
-    tbl: u64,
-    index: u64,
-) -> Result<(), CapError> {
+pub fn sys_debug_cap_slot(thread: &Arc<Thread>, tbl: u64, index: u64) -> Result<(), CapError> {
     let (tbl, index) = (tbl as usize, index as usize);
 
-    let root_hdr = &private
+    let root_hdr = &thread
+        .private
+        .read()
         .captbl
         .as_ref()
         .cloned()
@@ -86,12 +87,10 @@ pub fn sys_debug_cap_slot(
     Ok(())
 }
 
-pub fn sys_debug_print(
-    private: &mut ThreadProtected,
-    str_ptr: VirtualConst<u8, Identity>,
-    str_len: u64,
-) {
+pub fn sys_debug_print(thread: &Arc<Thread>, str_ptr: VirtualConst<u8, Identity>, str_len: u64) {
     let str_len = str_len as usize;
+
+    let mut private = thread.private.write();
 
     // assert!(
     //     str_ptr.add(str_len).into_usize() < private.mem_size,
@@ -121,7 +120,7 @@ pub fn sys_debug_print(
 }
 
 pub fn sys_copy_deep(
-    private: &mut ThreadProtected,
+    thread: &Arc<Thread>,
     from_tbl_ref: u64,
     from_tbl_index: u64,
     from_index: u64,
@@ -135,6 +134,8 @@ pub fn sys_copy_deep(
     let into_tbl_ref = into_tbl_ref as usize;
     let into_tbl_index = into_tbl_index as usize;
     let into_index = into_index as usize;
+
+    let private = thread.private.read();
 
     let root_hdr = &private
         .captbl
@@ -203,7 +204,7 @@ pub fn sys_copy_deep(
 }
 
 pub fn sys_swap(
-    private: &mut ThreadProtected,
+    thread: &Arc<Thread>,
     cap1_table: u64,
     cap1_index: u64,
     cap2_table: u64,
@@ -215,6 +216,8 @@ pub fn sys_swap(
         cap2_table as usize,
         cap2_index as usize,
     );
+
+    let private = thread.private.read();
 
     let root_hdr = &private
         .captbl
@@ -255,8 +258,10 @@ pub fn sys_swap(
     Ok(())
 }
 
-pub fn sys_delete(private: &mut ThreadProtected, table: u64, index: u64) -> CapResult<()> {
+pub fn sys_delete(thread: &Arc<Thread>, table: u64, index: u64) -> CapResult<()> {
     let (table, index) = (table as usize, index as usize);
+
+    let private = thread.private.read();
 
     let root_hdr = &private
         .captbl
@@ -281,7 +286,7 @@ pub fn sys_delete(private: &mut ThreadProtected, table: u64, index: u64) -> CapR
 }
 
 pub fn sys_allocate_many(
-    private: &mut ThreadProtected,
+    thread: &Arc<Thread>,
     allocator: u64,
     into_ref: u64,
     into_index: u64,
@@ -298,6 +303,8 @@ pub fn sys_allocate_many(
         count as usize,
     );
     let size = size as u8;
+
+    let private = thread.private.read();
 
     let root_hdr = &private
         .captbl
@@ -347,6 +354,12 @@ pub fn sys_allocate_many(
             for i in 0..count {
                 let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
                 perform_pgtbl_retype(slot)?;
+            }
+        }
+        CapabilityType::Thread => {
+            for i in 0..count {
+                let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
+                perform_thread_retype(slot)?;
             }
         }
 
@@ -416,27 +429,47 @@ fn perform_page_retype(size_log2: u8, slot: SlotRefMut<'_, EmptySlot>) -> CapRes
 }
 
 fn perform_pgtbl_retype(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
+    use crate::paging::PageTableFlags as KernelFlags;
+
     // SAFETY: The page is zeroed and thus is well-defined and valid.
     let pgtbl =
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
     let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
 
-    // SAFETY: This page table is valid as the memory has been zeroed
-    // (by the invariants of Untyped) and it is of the proper size.
+    let trampoline_virt =
+        VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
+
+    pgtbl.map(
+        trampoline_virt.into_phys().into_identity(),
+        VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
+        KernelFlags::VAD | KernelFlags::RX,
+        PageSize::Base,
+    );
+
     let _ = slot.replace(PgTbl::new(pgtbl));
 
     Ok(())
 }
 
+fn perform_thread_retype(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
+    let thread = Thread::new(String::new(), None, None);
+
+    let _ = slot.replace(thread);
+
+    Ok(())
+}
+
 pub fn sys_page_map(
-    private: &mut ThreadProtected,
+    thread: &Arc<Thread>,
     from_page: u64,
     into_pgtbl: u64,
     addr: VirtualConst<u8, Identity>,
     flags: PageTableFlags,
 ) -> CapResult<()> {
     let (from_page, into_pgtbl) = (from_page as usize, into_pgtbl as usize);
+
+    let private = thread.private.read();
 
     let root_hdr = &private
         .captbl
@@ -456,13 +489,85 @@ pub fn sys_page_map(
     Ok(())
 }
 
-pub fn sys_thread_suspend(private: &mut ThreadProtected, thread: u64) -> CapResult<()> {
-    let thread = thread as usize;
+pub fn sys_thread_suspend(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
+    let thread_cap = thread_cap as usize;
+    let private = thread.private.read();
     let root_hdr = private.captbl.as_ref().unwrap();
 
-    let thread = root_hdr.get::<Arc<Thread>>(thread)?;
+    let thread_cap = root_hdr.get::<Arc<Thread>>(thread_cap)?;
 
-    thread.suspend(private);
+    thread_cap.suspend();
+
+    Ok(())
+}
+
+pub fn sys_thread_resume(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
+    let thread_cap = thread_cap as usize;
+    let root_hdr = {
+        let private = thread.private.read();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let thread_cap = root_hdr.get::<Arc<Thread>>(thread_cap)?;
+
+    thread_cap.resume()?;
+
+    Ok(())
+}
+
+pub fn sys_thread_configure(
+    thread: &Arc<Thread>,
+    thread_cap: u64,
+    captbl: u64,
+    pgtbl: u64,
+) -> CapResult<()> {
+    let (thread_cap, captbl, pgtbl) = (thread_cap as usize, captbl as usize, pgtbl as usize);
+
+    let root_hdr = {
+        let private = thread.private.read();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let thread_cap = root_hdr.get::<Arc<Thread>>(thread_cap)?;
+    let captbl = if captbl == 0 {
+        root_hdr.clone()
+    } else {
+        root_hdr
+            .get::<Captbl>(captbl)?
+            .upgrade()
+            .ok_or(CapError::NotPresent)?
+    };
+
+    let pgtbl = if pgtbl == 0 {
+        let private = thread.private.read();
+        private.root_pgtbl.as_ref().unwrap().clone()
+    } else {
+        root_hdr.get::<PgTbl>(pgtbl)?.table().clone()
+    };
+
+    thread_cap.configure(captbl, pgtbl);
+
+    Ok(())
+}
+
+pub fn sys_thread_write_registers(
+    thread: &Arc<Thread>,
+    thread_cap: u64,
+    regs_vaddr: u64,
+) -> CapResult<()> {
+    let (thread_cap, regs_vaddr) = (
+        thread_cap as usize,
+        VirtualConst::<UserRegisters, Identity>::from_usize(regs_vaddr as usize),
+    );
+
+    let root_hdr = {
+        let private = thread.private.read();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let thread_cap = root_hdr.get::<Arc<Thread>>(thread_cap)?;
+
+    thread_cap.write_registers(regs_vaddr)?;
 
     Ok(())
 }
