@@ -462,6 +462,18 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
         proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
     }
+
+    {
+        let private = proc.private.write();
+        let slot = private
+            .captbl
+            .as_ref()
+            .unwrap()
+            .get_mut::<EmptySlot>(5)
+            .unwrap();
+        slot.replace(proc.clone());
+    }
+
     // let mut proc = Proc::new(String::from("user_mode_woo"));
     // #[allow(clippy::undocumented_unsafe_blocks)]
     // {

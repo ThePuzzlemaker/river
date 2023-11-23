@@ -20,16 +20,18 @@ pub enum SyscallNumber {
     PageTableMap = 5,
     /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap`]
     PageTableUnmap = 6,
+    /// TODO
+    ThreadSuspend = 7,
     /// Print the debug representation of a capability to the kernel
     /// console.
-    DebugCapSlot = 7,
+    DebugCapSlot = 0xFFFF_0000,
     /// Print the debug representation of the root capabiltiy to the
     /// kernel console.
-    DebugDumpRoot = 8,
+    DebugDumpRoot = 0xFFFF_0001,
     /// Print a string to the debug console.
-    DebugPrint = 9,
+    DebugPrint = 0xFFFF_0002,
     /// Identify the type of a capability.
-    DebugCapIdentify = 10,
+    DebugCapIdentify = 0xFFFF_0003,
     /// Unknown syscall
     #[num_enum(default)]
     Unknown = u64::MAX,

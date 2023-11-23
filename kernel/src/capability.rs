@@ -19,7 +19,7 @@ use rille::units::{self, StorageUnits};
 use crate::hart_local::LOCAL_HART;
 use crate::kalloc::phys::PMAlloc;
 use crate::paging::{self, root_page_table, SharedPageTable};
-use crate::proc::Context;
+use crate::proc::{Context, Scheduler};
 use crate::sync::{SpinMutex, SpinRwLock, SpinRwLockWriteGuard};
 use crate::trampoline::Trapframe;
 use crate::trap::user_trap_ret;
@@ -40,6 +40,7 @@ pub union RawCapability {
     pub allocator: AllocatorSlot,
     pub pgtbl: ManuallyDrop<PgTblSlot>,
     pub page: PageSlot,
+    pub thread: ManuallyDrop<ThreadSlot>,
     raw: [u8; 16],
 }
 
@@ -216,6 +217,7 @@ pub enum AnyCap {
     Allocator,
     Page(Page),
     PgTbl(ManuallyDrop<PgTblSlot>),
+    Thread(ManuallyDrop<ThreadSlot>),
     // TODO
 }
 
@@ -227,6 +229,7 @@ impl AnyCap {
             AnyCap::Allocator => CapabilityType::Allocator,
             AnyCap::Page(_) => CapabilityType::Page,
             AnyCap::PgTbl(_) => CapabilityType::PgTbl,
+            AnyCap::Thread(_) => CapabilityType::Thread,
         }
     }
 }
@@ -246,6 +249,7 @@ impl Capability for AnyCap {
             CapabilityType::Allocator => AnyCap::Allocator,
             CapabilityType::PgTbl => AnyCap::PgTbl(PgTbl::metadata_from_slot(slot)),
             CapabilityType::Page => AnyCap::Page(Page::metadata_from_slot(slot)),
+            CapabilityType::Thread => AnyCap::Thread(Arc::<Thread>::metadata_from_slot(slot)),
             CapabilityType::Unknown => todo!(),
         }
     }
@@ -261,6 +265,7 @@ impl Capability for AnyCap {
             AnyCap::Allocator => AllocatorSlot::metadata_to_slot(&()),
             AnyCap::Page(page) => Page::metadata_to_slot(page),
             AnyCap::PgTbl(pgtbl) => PgTbl::metadata_to_slot(pgtbl),
+            AnyCap::Thread(thread) => Arc::<Thread>::metadata_to_slot(thread),
         }
     }
 
@@ -277,6 +282,7 @@ impl Capability for AnyCap {
                 AnyCap::Allocator => AllocatorSlot::do_delete((), slot),
                 AnyCap::Page(pg) => Page::do_delete(pg, slot),
                 AnyCap::PgTbl(pgtbl) => PgTbl::do_delete(pgtbl, slot),
+                AnyCap::Thread(thread) => Arc::<Thread>::do_delete(thread, slot),
             }
         }
     }
@@ -292,6 +298,7 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
             AnyCap::Allocator => AnyCap::Allocator,
             AnyCap::Page(page) => AnyCap::Page(page.clone()),
             AnyCap::PgTbl(pgtbl) => AnyCap::PgTbl(pgtbl.clone()),
+            AnyCap::Thread(thread) => AnyCap::Thread(thread.clone()),
         }
     }
 }
@@ -306,6 +313,7 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
             AnyCap::Allocator => AnyCap::Allocator,
             AnyCap::Page(page) => AnyCap::Page(page.clone()),
             AnyCap::PgTbl(pgtbl) => AnyCap::PgTbl(pgtbl.clone()),
+            AnyCap::Thread(thread) => AnyCap::Thread(thread.clone()),
         }
     }
 }
@@ -587,6 +595,8 @@ impl<'a> fmt::Debug for RawCapDebugAdapter<'a> {
             CapabilityType::PgTbl => unsafe { &self.0.cap.pgtbl }.fmt(f),
             // SAFETY: Type check.
             CapabilityType::Page => unsafe { &self.0.cap.page }.fmt(f),
+            // SAFETY: Type check.
+            CapabilityType::Thread => unsafe { &self.0.cap.thread }.fmt(f),
             CapabilityType::Unknown => f.debug_struct("InvalidCap").finish(),
         }
     }
@@ -612,6 +622,71 @@ fn next_tid() -> u16 {
         "oops! ran out of TIDs"
     );
     v
+}
+
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct ThreadSlot {
+    inner: Arc<Thread>,
+}
+
+impl Capability for Arc<Thread> {
+    type Metadata = ManuallyDrop<ThreadSlot>;
+
+    fn is_valid_type(cap_type: CapabilityType) -> bool {
+        cap_type == CapabilityType::Thread
+    }
+
+    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
+        // SAFETY: By invariants
+        unsafe { slot.cap.thread.clone() }
+    }
+
+    fn into_meta(self) -> Self::Metadata {
+        ManuallyDrop::new(ThreadSlot { inner: self })
+    }
+
+    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
+        (
+            CapabilityType::Thread,
+            RawCapability {
+                thread: meta.clone(),
+            },
+        )
+    }
+
+    unsafe fn do_delete(
+        meta: Self::Metadata,
+        slot: &mut SpinRwLockWriteGuard<'_, RawCapabilitySlot>,
+    ) {
+        // If we're an orphan dtnode, extract our captbl and drop it
+        // first. This breaks any cycles that prevent us from being
+        // fully dropped.
+        if slot.dtnode.first_child.is_none()
+            && slot.dtnode.next_sibling.is_none()
+            && slot.dtnode.prev_sibling.is_none()
+            && slot.dtnode.parent.is_none()
+        {
+            let mut private = meta.inner.private.write();
+            drop(private.captbl.take());
+        }
+
+        drop(ManuallyDrop::into_inner(meta));
+        let raw_slot = mem::replace(&mut slot.cap, RawCapability { empty: EmptySlot });
+        // SAFETY: By invariants
+        drop(ManuallyDrop::into_inner(unsafe { raw_slot.thread }));
+    }
+}
+
+impl<'a> SlotRef<'a, Arc<Thread>> {
+    pub fn suspend(&self, private: &ThreadProtected) {
+        self.meta
+            .inner
+            .state
+            .store(ThreadState::Suspended, Ordering::Relaxed);
+        // TODO: notify the hart running the thread to stop its execution, or not?
+        Scheduler::dequeue(private.hartid, self.meta.inner.tid);
+    }
 }
 
 #[repr(C, align(4096))]
@@ -640,7 +715,7 @@ impl Thread {
                     root_pgtbl: pgtbl,
                     asid: 1, // TODO
                     name,
-                    hartid: 0,
+                    hartid: u64::MAX,
                 },
             ));
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).state)
@@ -703,7 +778,6 @@ impl Thread {
     pub unsafe fn yield_to_scheduler(&self) {
         LOCAL_HART.with(|hart| {
             let intena = hart.intena.get();
-            self.state.store(ThreadState::Runnable, Ordering::Relaxed);
 
             // SAFETY: The scheduler context is always valid, as
             // guaranteed by the scheduler.

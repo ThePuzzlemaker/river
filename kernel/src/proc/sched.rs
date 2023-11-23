@@ -59,6 +59,7 @@ impl Scheduler {
         // rescheduled.
         asm::intr_on();
         'outer: loop {
+            core::hint::spin_loop();
             let mut scheduler = SCHED
                 .per_hart
                 .expect("Scheduler::per_hart")
@@ -79,11 +80,7 @@ impl Scheduler {
 
                     let v = (asm::read_time() as usize * 717) % wait_queue.len();
                     if let Some(entry) = wait_queue.values().nth(v).cloned() {
-                        crate::println!(
-                            "[hart {}]: adopting process {} from the wait queue",
-                            asm::hartid(),
-                            entry.tid
-                        );
+                        crate::info!("adopting thread with tid={} from the wait queue", entry.tid);
                         let (pid, proc) = wait_queue.remove_entry(&entry.tid).unwrap();
                         scheduler.run_queue.insert(pid, Arc::clone(&proc));
                         scheduler.procs.push_back(pid);
@@ -93,15 +90,27 @@ impl Scheduler {
                     }
                 };
 
-                if proc.state.load(Ordering::Relaxed) == ThreadState::Runnable {
+                if proc
+                    .state
+                    .compare_exchange(
+                        ThreadState::Runnable,
+                        ThreadState::Running,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
                     drop(scheduler);
-                    proc.state.store(ThreadState::Running, Ordering::Relaxed);
 
                     LOCAL_HART.with(move |hart| {
                         *hart.thread.borrow_mut() = Some(proc);
 
                         let proc = hart.thread.borrow().as_ref().cloned().unwrap();
 
+                        {
+                            let mut private = proc.private.write();
+                            private.hartid = hart.hartid.get();
+                        }
                         // SAFETY: Our caller guarantees these contexts are valid.
                         unsafe { Context::switch(&proc.context, &hart.context) }
 
@@ -112,6 +121,23 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    /// Dequeue a process from a hart's scheduler.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the scheduler is not initialized.
+    pub fn dequeue(hartid: u64, tid: usize) {
+        let mut sched = SCHED
+            .per_hart
+            .expect("Scheduler::dequeue: scheduler not initialized")
+            .get(&hartid)
+            .unwrap()
+            .lock();
+
+        sched.run_queue.remove(&tid);
+        sched.procs.retain(|x| *x != tid);
     }
 
     pub fn init(hart_map: BTreeMap<u64, SpinMutex<SchedulerInner>>) {

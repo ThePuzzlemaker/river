@@ -5,13 +5,16 @@
 )]
 use core::slice;
 
+use alloc::sync::Arc;
 use rille::{
     addr::{Identity, VirtualConst},
     capability::{paging::PageTableFlags, CapError, CapResult, CapabilityType},
 };
 
 use crate::{
-    capability::{captbl::Captbl, AnyCap, CapToOwned, EmptySlot, Page, PgTbl, ThreadProtected},
+    capability::{
+        captbl::Captbl, AnyCap, CapToOwned, EmptySlot, Page, PgTbl, Thread, ThreadProtected,
+    },
     print, println,
 };
 
@@ -513,6 +516,17 @@ pub fn sys_page_map(
     let mut into_pgtbl = root_hdr.get_mut::<PgTbl>(into_pgtbl)?;
 
     into_pgtbl.map_page(&mut from_page, addr, flags)?;
+
+    Ok(())
+}
+
+pub fn sys_thread_suspend(private: &mut ThreadProtected, thread: u64) -> CapResult<()> {
+    let thread = thread as usize;
+    let root_hdr = private.captbl.as_ref().unwrap();
+
+    let thread = root_hdr.get::<Arc<Thread>>(thread)?;
+
+    thread.suspend(private);
 
     Ok(())
 }

@@ -86,11 +86,9 @@ unsafe extern "C" fn kernel_trap() {
                 // Make sure we inform the HartCtx that it's fine to re-enable interrupts
                 // now.
                 LOCAL_HART.with(|hart| hart.trap.set(false));
+                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
                 // SAFETY: This thread is currently running on
-                // this hart. yield_to_scheduler will constrain us
-                // to the current hart, or return us directly to
-                // user_ret or process start if we're moved to
-                // another hart.
+                // this hart.
                 unsafe {
                     proc.yield_to_scheduler();
                 }
@@ -286,6 +284,7 @@ unsafe extern "C" fn user_trap() -> ! {
 
             hart.thread.borrow().as_ref().cloned().unwrap()
         });
+
         // We cannot deadlock here. Full stop. Here's why:
         // 1. We are the user trap handler. If this lock was held by
         // the same thread, then something has gone wrong--we can't
@@ -331,8 +330,19 @@ unsafe extern "C" fn user_trap() -> ! {
                 SyscallNumber::DebugCapIdentify => {
                     sys_debug_cap_identify(&mut private, &mut trapframe);
                 }
+                SyscallNumber::ThreadSuspend => sys_thread_suspend(&mut private, &mut trapframe),
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
+                }
+            }
+
+            if proc.state.load(Ordering::Relaxed) == ThreadState::Suspended {
+                drop(trapframe);
+                drop(private);
+                LOCAL_HART.with(|hart| hart.trap.set(false));
+                // SAFETY: This thread is currently running on this hart.
+                unsafe {
+                    proc.yield_to_scheduler();
                 }
             }
 
@@ -350,7 +360,15 @@ unsafe extern "C" fn user_trap() -> ! {
                 asm::read_stval(),
                 scause
             );
-            if kind == InterruptKind::Timer {
+            if proc.state.load(Ordering::Relaxed) == ThreadState::Suspended {
+                drop(trapframe);
+                drop(private);
+                LOCAL_HART.with(|hart| hart.trap.set(false));
+                // SAFETY: This thread is currently running on this hart.
+                unsafe {
+                    proc.yield_to_scheduler();
+                }
+            } else if kind == InterruptKind::Timer {
                 // Make sure we don't hold any locks while we context
                 // switch.
                 drop(trapframe);
@@ -631,3 +649,4 @@ define_syscall!(sys_delete, 2);
 define_syscall!(sys_page_map, 4);
 // define_syscall!(sys_pgtbl_map, 4);
 define_syscall!(sys_debug_cap_identify, 2);
+define_syscall!(sys_thread_suspend, 1);

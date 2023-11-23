@@ -14,7 +14,7 @@ use rille::{
         Captr, RemoteCaptr,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls,
+    syscalls::{self, ecall0, ecall1, SyscallNumber},
 };
 
 extern crate panic_handler;
@@ -80,19 +80,25 @@ extern "C" fn entry(_init_info: *const BootInfo) -> ! {
     )
     .unwrap();
 
-    // unsafe { core::ptr::write_volatile(0xDEAD0000 as *mut u64, 0xC0DED00D) };
+    unsafe { core::ptr::write_volatile(0xDEAD0000 as *mut u64, 0xC0DED00D) };
 
     // println!("{:#x?}", unsafe {
     //     core::ptr::read_volatile(0xDEAD0000 as *mut u64)
     // });
 
     // syscalls::debug::debug_dump_root();
-    for i in 1..=5 {
+    for i in 1..=6 {
         println!(
             "{i}: {:?}",
             syscalls::debug::debug_cap_identify(caps.captbl.into_raw(), i).unwrap()
         );
     }
+
+    unsafe {
+        ecall1(SyscallNumber::ThreadSuspend, 5).unwrap();
+    }
+
+    unreachable!();
 
     // let slot_2 = root_captbl
     //     .copy_deep(root_captbl.local_index(), root_captbl, unsafe {

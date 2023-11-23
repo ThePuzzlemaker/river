@@ -82,6 +82,8 @@ pub enum CapabilityType {
     /// [`Page`][paging::Page]s that can be mapped into
     /// [`PageTable`][paging::PageTable]s.
     Page = 4,
+    /// Threads (WIP in rille).
+    Thread = 5,
     /// Any capability type `>=32` is undefined, as the `cap_type`
     /// field in all capability slots only occupies 5 bits (`0` to
     /// `31`).
