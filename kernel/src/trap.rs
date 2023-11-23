@@ -68,29 +68,32 @@ unsafe extern "C" fn kernel_trap() {
         asm::read_stval(),
         scause
     );
-    let proc = LOCAL_HART.with(|hart| {
-        if kind == InterruptKind::Timer {
-            hart.thread.borrow().as_ref().cloned()
-        } else {
-            None
-        }
-    });
 
-    if let Some(proc) = proc {
-        if proc.state.load(Ordering::Relaxed) == ThreadState::Running {
-            proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
-            asm::write_sepc(sepc);
-            asm::write_sstatus(sstatus);
-            // Make sure we inform the HartCtx that it's fine to re-enable interrupts
-            // now.
-            LOCAL_HART.with(|hart| hart.trap.set(false));
-            // SAFETY: This thread is currently running on
-            // this hart. yield_to_scheduler will constrain us
-            // to the current hart, or return us directly to
-            // user_ret or process start if we're moved to
-            // another hart.
-            unsafe {
-                proc.yield_to_scheduler();
+    {
+        let proc = LOCAL_HART.with(|hart| {
+            if kind == InterruptKind::Timer {
+                hart.thread.borrow().as_ref().cloned()
+            } else {
+                None
+            }
+        });
+
+        if let Some(proc) = proc {
+            if proc.state.load(Ordering::Relaxed) == ThreadState::Running {
+                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                asm::write_sepc(sepc);
+                asm::write_sstatus(sstatus);
+                // Make sure we inform the HartCtx that it's fine to re-enable interrupts
+                // now.
+                LOCAL_HART.with(|hart| hart.trap.set(false));
+                // SAFETY: This thread is currently running on
+                // this hart. yield_to_scheduler will constrain us
+                // to the current hart, or return us directly to
+                // user_ret or process start if we're moved to
+                // another hart.
+                unsafe {
+                    proc.yield_to_scheduler();
+                }
             }
         }
     }
@@ -277,13 +280,20 @@ unsafe extern "C" fn user_trap() -> ! {
         asm::read_sstatus()
     );
 
-    let proc = LOCAL_HART.with(|hart| {
-        hart.trap.set(true);
-
-        hart.thread.borrow().as_ref().cloned().unwrap()
-    });
-
     {
+        let proc = LOCAL_HART.with(|hart| {
+            hart.trap.set(true);
+
+            hart.thread.borrow().as_ref().cloned().unwrap()
+        });
+        // We cannot deadlock here. Full stop. Here's why:
+        // 1. We are the user trap handler. If this lock was held by
+        // the same thread, then something has gone wrong--we can't
+        // access this datastructure from U-mode.
+        // 2. Even if there were any instances of this lock held
+        // before, we wouldn't have been able to interrupt unless
+        // someone enabled interrupts while the lock was still held
+        // (which is a bug itself).
         let mut private = proc.private.write();
 
         let mut trapframe = proc.trapframe.lock();
@@ -342,10 +352,7 @@ unsafe extern "C" fn user_trap() -> ! {
             );
             if kind == InterruptKind::Timer {
                 // Make sure we don't hold any locks while we context
-                // switch. We don't need to worry about LOCAL_HART as
-                // that is lock-free. Additionally, yield_to_scheduler
-                // will constrain this process to the current hart, or
-                // return us directly to user_trap_ret if we weren't.
+                // switch.
                 drop(trapframe);
                 drop(private);
                 proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
@@ -356,7 +363,7 @@ unsafe extern "C" fn user_trap() -> ! {
                 }
             }
         }
-    }
+    } // guards: trapframe, private
 
     LOCAL_HART.with(|hart| hart.trap.set(false));
     // SAFETY: We are calling this function in the context of a valid
