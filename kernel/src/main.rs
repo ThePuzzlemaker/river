@@ -231,6 +231,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let proc = Thread::new(String::from("user_mode_woo"), Some(captbl), pgtbl);
     let mut free_slot_ctr = 6;
     let mut init_pages_range = 0..0;
+    proc.setup_page_table();
     {
         let mut private = proc.private.write();
 
@@ -241,7 +242,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 .unwrap()
                 .get_mut::<EmptySlot>(2)
                 .unwrap();
-            slot.replace(PgTbl::new(private.root_pgtbl.clone()));
+            slot.replace(PgTbl::new(private.root_pgtbl.clone().unwrap()));
         }
         let mut trapframe = proc.trapframe.lock();
         trapframe.user_epc = 0x1040_0000;
@@ -250,7 +251,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         init_pages_range.start = free_slot_ctr;
         for i in 0..(init_padded / 4.kib() + (4.mib() / 4.kib())) {
             let phys = init.add(i * 4.kib());
-            private.root_pgtbl.map(
+            private.root_pgtbl.as_mut().unwrap().map(
                 phys.into_identity().into_const(),
                 VirtualConst::from_usize(0x1000_0000).add(i * 4.kib()),
                 PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RWX,
@@ -309,7 +310,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         fdt_pages_range.start = free_slot_ctr;
         for i in 0..(fdt_size / 4.kib()) {
             let phys = fdt_init.add(i * 4.kib());
-            private.root_pgtbl.map(
+            private.root_pgtbl.as_mut().unwrap().map(
                 phys.into_identity().into_const(),
                 VirtualConst::from_usize(0x2000_1000).add(i * 4.kib()),
                 PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::READ,
@@ -336,7 +337,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     };
     {
         let mut private = proc.private.write();
-        private.root_pgtbl.map(
+        private.root_pgtbl.as_mut().unwrap().map(
             bootinfo_page.into_const().into_identity(),
             VirtualConst::from_usize(0x2000_0000),
             PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::READ,

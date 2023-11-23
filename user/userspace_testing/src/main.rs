@@ -87,7 +87,7 @@ fn print_node(node: FdtNode<'_, '_>, n_spaces: usize) {
         print_node(child, n_spaces + 4);
     }
 }
-
+ 
 #[no_mangle]
 extern "C" fn entry(init_info: *const BootInfo) -> ! {
     let caps = unsafe { InitCapabilities::new() };

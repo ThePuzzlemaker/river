@@ -701,7 +701,6 @@ pub struct Thread {
 
 impl Thread {
     pub fn new(name: String, captbl: Option<Captbl>, pgtbl: SharedPageTable) -> Arc<Thread> {
-        use paging::PageTableFlags as KernelFlags;
         let mut this = Arc::<Thread>::new_uninit();
         let this_mut = Arc::get_mut(&mut this).unwrap();
 
@@ -712,10 +711,11 @@ impl Thread {
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).private).write(SpinRwLock::new(
                 ThreadProtected {
                     captbl,
-                    root_pgtbl: pgtbl,
+                    root_pgtbl: Some(pgtbl),
                     asid: 1, // TODO
                     name,
                     hartid: u64::MAX,
+                    trapframe_addr: 0,
                 },
             ));
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).state)
@@ -726,39 +726,56 @@ impl Thread {
         // SAFETY: We have just initialized this.
         // - trapframe, stack, and context are zeroable.
         let this = unsafe { this.assume_init() };
-
-        {
-            let mut private = this.private.write();
-            let trapframe_virt =
-                VirtualConst::<_, Identity>::from_ptr(ptr::addr_of!(this.trapframe));
-            let (trapframe_phys, _) = { root_page_table().lock().walk(trapframe_virt).unwrap() };
-
-            // We only need to worry about the first page, as that's
-            // where the trapframe will be. Nothing else will be
-            // accessed from the user page tables.
-            private.root_pgtbl.map(
-                trapframe_phys.cast().into_identity(),
-                VirtualConst::from_usize(TRAPFRAME_ADDR),
-                KernelFlags::VAD | KernelFlags::RW,
-                PageSize::Base,
-            );
-
-            let trampoline_virt =
-                VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
-
-            private.root_pgtbl.map(
-                trampoline_virt.into_phys().into_identity(),
-                VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
-                KernelFlags::VAD | KernelFlags::RX,
-                PageSize::Base,
-            );
-        }
         {
             this.context.lock().ra = user_trap_ret as usize as u64;
             this.context.lock().sp = ptr::addr_of!(this.stack) as u64 + THREAD_STACK_SIZE as u64;
         }
 
         this
+    }
+
+    /// Map the trapframe into the page table.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the trapframe was not mapped in
+    /// kernel memory, or if there was no page table configured in the
+    /// process.
+    pub fn setup_page_table(&self) {
+        use paging::PageTableFlags as KernelFlags;
+
+        let mut private = self.private.write();
+        let trapframe_virt = VirtualConst::<_, Identity>::from_ptr(ptr::addr_of!(self.trapframe));
+        let (trapframe_phys, _) = { root_page_table().lock().walk(trapframe_virt).unwrap() };
+
+        let trapframe_mapped_addr = private
+            .root_pgtbl
+            .as_ref()
+            .unwrap()
+            .find_free_trapframe_addr()
+            .expect("Thread::setup_page_table: too many processes with the same page table");
+
+        // We only need to worry about the first page, as that's
+        // where the trapframe will be. Nothing else will be
+        // accessed from the user page tables.
+        private.root_pgtbl.as_mut().unwrap().map(
+            trapframe_phys.cast().into_identity(),
+            trapframe_mapped_addr,
+            KernelFlags::VAD | KernelFlags::RW,
+            PageSize::Base,
+        );
+
+        private.trapframe_addr = trapframe_mapped_addr.into_usize();
+
+        let trampoline_virt =
+            VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
+
+        private.root_pgtbl.as_mut().unwrap().map(
+            trampoline_virt.into_phys().into_identity(),
+            VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
+            KernelFlags::VAD | KernelFlags::RX,
+            PageSize::Base,
+        );
     }
 
     /// Yield this process's time to the scheduler.
@@ -801,10 +818,11 @@ impl fmt::Debug for Thread {
 #[derive(Debug)]
 pub struct ThreadProtected {
     pub captbl: Option<Captbl>,
-    pub root_pgtbl: SharedPageTable,
+    pub root_pgtbl: Option<SharedPageTable>,
     pub asid: u16,
     pub name: String,
     pub hartid: u64,
+    pub trapframe_addr: usize,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, FromPrimitive, IntoPrimitive, NoUninit)]

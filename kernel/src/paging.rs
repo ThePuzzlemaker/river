@@ -13,7 +13,7 @@ use bitflags::bitflags;
 use rille::{
     addr::{
         DirectMapped, Identity, PgOff, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual,
-        VirtualConst, VirtualMut,
+        VirtualConst, VirtualMut, Vpn,
     },
     capability::paging::PageSize,
     units::StorageUnits,
@@ -482,6 +482,55 @@ pub struct SharedPageTable {
 impl SharedPageTable {
     pub fn from_inner(x: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>) -> Self {
         Self { inner: x }
+    }
+
+    pub fn find_free_trapframe_addr(&self) -> Option<VirtualConst<u8, Identity>> {
+        let inner = self.inner.read();
+        let table = &**inner;
+        for l0 in 256..512 {
+            if let PTEKind::Branch(paddr) = table.ptes[l0].decode().kind() {
+                // SAFETY: By invariants
+                let table = unsafe { &*(paddr.into_virt().into_ptr_mut()) };
+                for l1 in 0..512 {
+                    if let PTEKind::Branch(paddr) = table.ptes[l1].decode().kind() {
+                        // SAFETY: By invariants
+                        let table = unsafe { &*(paddr.into_virt().into_ptr_mut()) };
+                        for l2 in 0..512 {
+                            if let PTEKind::Invalid = table.ptes[l2].decode().kind() {
+                                return Some(VirtualConst::from_components(
+                                    [
+                                        Vpn::from_usize_truncate(l2),
+                                        Vpn::from_usize_truncate(l1),
+                                        Vpn::from_usize_truncate(l0),
+                                    ],
+                                    None,
+                                ));
+                            }
+                        }
+                    } else {
+                        return Some(VirtualConst::from_components(
+                            [
+                                Vpn::from_usize_truncate(0),
+                                Vpn::from_usize_truncate(l1),
+                                Vpn::from_usize_truncate(l0),
+                            ],
+                            None,
+                        ));
+                    }
+                }
+            } else {
+                return Some(VirtualConst::from_components(
+                    [
+                        Vpn::from_usize_truncate(0),
+                        Vpn::from_usize_truncate(0),
+                        Vpn::from_usize_truncate(l0),
+                    ],
+                    None,
+                ));
+            }
+        }
+
+        None
     }
 
     /// Walk a virtual address (which does not have to be page-aligned) and find

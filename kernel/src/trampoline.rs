@@ -16,13 +16,11 @@ global_asm!(
 .global trampoline
 trampoline:
     // N.B. we start from U-mode, but are now in S-mode (but with a U-mode page
-    // table).
+    // table). sscratch holds our trapframe addr.
 
     // Save the user's t0 so it can be used to index into the trapframe.
-    csrw sscratch, t0
-
-    // Load the address of the trapframe into t0 
-    li t0, 0xffffffffffffd000
+    // At the same time, take the trapframe addr out of the sscratch CSR.
+    csrrw t0, sscratch, t0
 
     sd x1,    0(t0)
     sd x2,    8(t0)
@@ -58,8 +56,8 @@ trampoline:
 
     // Save the user's t0 (that we stored in sscratch) into the trapframe,
     // ensuring we don't clobber the t0 address we need (we can use t1, as we
-    // already saved it).
-    csrr t1, sscratch
+    // already saved it). At the same time, set sscratch = t0 (trapframe addr).
+    csrrw t1, sscratch, t0
     sd t1, 32(t0)
 
     ld sp, 248(t0)
@@ -89,13 +87,13 @@ ret_user:
     // Switch to U-mode from S-mode.
     //
     // N.B. a0 = U-mode satp
+    //      sscratch = trapframe addr in U-mode pgtbl
     
     sfence.vma
     csrw satp, a0
     sfence.vma
 
-    // Load the address of the trapframe into t0 
-    li t0, 0xffffffffffffd000
+    csrr t0, sscratch
 
     ld x1,    0(t0)
     ld x2,    8(t0)

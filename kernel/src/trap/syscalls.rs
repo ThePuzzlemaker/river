@@ -105,6 +105,8 @@ pub fn sys_debug_print(
         slice::from_raw_parts(
             private
                 .root_pgtbl
+                .as_mut()
+                .unwrap()
                 .walk(str_ptr)
                 .unwrap()
                 .0

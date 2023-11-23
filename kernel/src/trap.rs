@@ -420,9 +420,15 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
         trapframe.kernel_tp = asm::tp();
 
         asm::write_sepc(trapframe.user_epc);
+        asm::write_sscratch(private.trapframe_addr as u64);
         let satp = Satp {
             asid: 1,
-            ppn: private.root_pgtbl.as_physical_const().ppn(),
+            ppn: private
+                .root_pgtbl
+                .as_ref()
+                .unwrap()
+                .as_physical_const()
+                .ppn(),
         };
         satp.encode().as_usize()
     });

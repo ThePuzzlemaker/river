@@ -210,6 +210,12 @@ pub fn write_sepc(sepc: u64) {
 }
 
 #[inline]
+pub fn write_sscratch(sscratch: u64) {
+    // SAFETY: Writes to CSRs are atomic.
+    unsafe { asm!("csrw sscratch, {}", in(reg) sscratch, options(nostack)) }
+}
+
+#[inline]
 pub fn read_stval() -> u64 {
     let r: u64;
     // SAFETY: Reads from CSRs are atomic.
