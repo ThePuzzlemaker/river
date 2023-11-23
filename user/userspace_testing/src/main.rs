@@ -7,14 +7,15 @@ use core::{
     fmt,
 };
 
+use fdt::{node::FdtNode, Fdt};
 use rille::{
     addr::VirtualConst,
     capability::{
         paging::{BasePage, Page, PageTable, PageTableFlags},
-        Captr, RemoteCaptr,
+        Allocator, Captr, RemoteCaptr,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls::{self, ecall0, ecall1, SyscallNumber},
+    syscalls::{self, ecall1, SyscallNumber},
 };
 
 extern crate panic_handler;
@@ -62,19 +63,45 @@ done_clear_bss:
 "
 );
 
+fn print_node(node: FdtNode<'_, '_>, n_spaces: usize) {
+    (0..n_spaces).for_each(|_| print!(" "));
+    println!("{}/", node.name);
+
+    for property in node.properties() {
+        (0..n_spaces + 4).for_each(|_| print!(" "));
+
+        if let Some(v) = property.as_usize() {
+            println!("{}={}", property.name, v);
+        } else if let Some(v) = property.as_str() {
+            if v.is_ascii() && v.chars().all(|x| !x.is_ascii_control()) {
+                println!("{}={:?}", property.name, v);
+            } else {
+                println!("{}=...", property.name);
+            }
+        } else {
+            println!("{}=...", property.name);
+        }
+    }
+
+    for child in node.children() {
+        print_node(child, n_spaces + 4);
+    }
+}
+
 #[no_mangle]
-extern "C" fn entry(_init_info: *const BootInfo) -> ! {
+extern "C" fn entry(init_info: *const BootInfo) -> ! {
     let caps = unsafe { InitCapabilities::new() };
+    let init_info = unsafe { &*init_info };
 
-    let _root_captbl = RemoteCaptr::local(caps.captbl);
+    let root_captbl = RemoteCaptr::local(caps.captbl);
 
-    let pg: Captr<Page<BasePage>> = unsafe { Captr::from_raw_unchecked(2) };
-    let pgtbl: Captr<PageTable> = unsafe { Captr::from_raw_unchecked(3) };
-
-    // syscalls::debug::debug_dump_root();
+    let pg: Captr<Page<BasePage>> = caps
+        .allocator
+        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
+        .unwrap();
 
     pg.map(
-        pgtbl,
+        caps.pgtbl,
         VirtualConst::from_usize(0xDEAD0000),
         PageTableFlags::RW,
     )
@@ -82,11 +109,6 @@ extern "C" fn entry(_init_info: *const BootInfo) -> ! {
 
     unsafe { core::ptr::write_volatile(0xDEAD0000 as *mut u64, 0xC0DED00D) };
 
-    // println!("{:#x?}", unsafe {
-    //     core::ptr::read_volatile(0xDEAD0000 as *mut u64)
-    // });
-
-    // syscalls::debug::debug_dump_root();
     for i in 1..=6 {
         println!(
             "{i}: {:?}",
@@ -94,8 +116,13 @@ extern "C" fn entry(_init_info: *const BootInfo) -> ! {
         );
     }
 
+    println!("{:#?}", init_info);
+
+    let fdt = unsafe { Fdt::<'static>::from_ptr(init_info.fdt_ptr) }.unwrap();
+    print_node(fdt.find_node("/").unwrap(), 0);
+
     unsafe {
-        ecall1(SyscallNumber::ThreadSuspend, 5).unwrap();
+        ecall1(SyscallNumber::ThreadSuspend, caps.thread as u64).unwrap();
     }
 
     unreachable!();

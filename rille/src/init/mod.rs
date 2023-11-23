@@ -8,9 +8,11 @@ use crate::{
     addr::{Identity, PhysicalMut},
     capability::{
         paging::{BasePage, Page, PageCaptr, PageTable},
+        Allocator, //Untyped,
         Captbl,
         Captr,
-        CaptrRange, //Untyped,
+        CaptrRange,
+        Empty,
     },
 };
 
@@ -21,6 +23,12 @@ pub struct BootInfo {
     /// Pages of the initial userspace process memory, ordered by
     /// virtual address.
     pub init_pages: CaptrRange<Page<BasePage>>,
+    /// Pages of the FDT, ordered by virtual address.
+    pub fdt_pages: CaptrRange<Page<BasePage>>,
+    /// The first free slot.
+    pub free_slots: CaptrRange<Empty>,
+    /// Pointer to the FDT
+    pub fdt_ptr: *const u8,
     // pub untyped_caps: CaptrRange<Untyped>,
     // untyped_desc: [UntypedDescription; 0],
 }
@@ -35,6 +43,9 @@ pub struct UntypedDescription {
 pub struct InitCapabilities {
     pub captbl: Captr<Captbl>,
     pub pgtbl: Captr<PageTable>,
+    // TODO
+    pub thread: usize,
+    pub allocator: Captr<Allocator>,
     pub bootinfo_page: PageCaptr<BasePage>,
 }
 
@@ -49,7 +60,9 @@ impl InitCapabilities {
         Self {
             captbl: Captr::from_raw_unchecked(1),
             pgtbl: Captr::from_raw_unchecked(2),
-            bootinfo_page: Captr::from_raw_unchecked(3),
+            thread: 3,
+            allocator: Captr::from_raw_unchecked(4),
+            bootinfo_page: Captr::from_raw_unchecked(5),
         }
     }
 }

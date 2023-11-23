@@ -33,7 +33,7 @@
 use core::{
     cmp,
     convert::Infallible,
-    fmt::Debug,
+    fmt::{self, Debug},
     hash::{self, Hash},
     marker::PhantomData,
     num::NonZeroUsize,
@@ -52,12 +52,12 @@ pub trait Capability: Copy + Clone + Debug + private::Sealed {
     /// A value, with a maximum size of `u64` by convention, that
     /// provides size information for dynamically-sized kernel objects
     /// when retyping.
-    type RetypeSizeSpec;
+    type AllocateSizeSpec;
 
-    /// Convert a [`Self::RetypeSizeSpec`] into a [`usize`]. Because
+    /// Convert a [`Self::AllocateSizeSpec`] into a [`usize`]. Because
     /// of some funky type system stuff we don't just put an
-    /// [`Into<usize>`] bound on `RetypeSizeSpec`.
-    fn retype_size_spec(spec: Self::RetypeSizeSpec) -> usize;
+    /// [`Into<usize>`] bound on `AllocateSizeSpec`.
+    fn allocate_size_spec(spec: Self::AllocateSizeSpec) -> usize;
 
     /// What [`CapabilityType`] does this `Capability` correspond to?
     const CAPABILITY_TYPE: CapabilityType;
@@ -73,9 +73,7 @@ pub enum CapabilityType {
     Empty = 0,
     /// Capability tables, or [`Captbl`]s.
     Captbl = 1,
-    // /// [`Untyped`] memory blocks.
-    // Untyped = 2,
-    /// TODO
+    /// The [`Allocator`] capability.
     Allocator = 2,
     /// [`PageTable`][paging::PageTable]s.
     PgTbl = 3,
@@ -83,6 +81,7 @@ pub enum CapabilityType {
     /// [`PageTable`][paging::PageTable]s.
     Page = 4,
     /// Threads (WIP in rille).
+    /// TODO
     Thread = 5,
     /// Any capability type `>=32` is undefined, as the `cap_type`
     /// field in all capability slots only occupies 5 bits (`0` to
@@ -125,8 +124,8 @@ pub enum CapError {
     /// operation.
     InvalidType = 2,
 
-    /// Not enough memory was available in an [`Untyped`] or
-    /// [`Captbl`] capability to hold a given resource.
+    /// Not enough memory was available in a [`Captbl`] capability to
+    /// hold a given resource, or the system was out of memory.
     NotEnoughResources = 3,
 
     /// The provided size was invalid.
@@ -158,7 +157,7 @@ pub type CapResult<T> = Result<T, CapError>;
 ///
 /// [^1]: For more information on what this means, see the
 /// [module-level documentation][self].
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 #[repr(C)]
 pub struct Captr<C: Capability> {
     inner: Option<NonZeroUsize>,
@@ -299,17 +298,17 @@ impl<C: Capability> RemoteCaptr<C> {
 pub struct Captbl(#[doc(hidden)] Infallible);
 
 impl Capability for Captbl {
-    type RetypeSizeSpec = CaptblSizeSpec;
+    type AllocateSizeSpec = CaptblSizeSpec;
 
-    fn retype_size_spec(spec: Self::RetypeSizeSpec) -> usize {
+    fn allocate_size_spec(spec: Self::AllocateSizeSpec) -> usize {
         spec.n_slots_log2
     }
 
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Captbl;
 }
 
-/// Options for retyping an [`Untyped`] capability into a [`Captbl`]
-/// capability.
+/// Options for allocating from an [`Allocator`] capability into a
+/// [`Captbl`] capability.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct CaptblSizeSpec {
@@ -325,44 +324,33 @@ pub struct CaptblSizeSpec {
 pub struct Empty(#[doc(hidden)] Infallible);
 
 impl Capability for Empty {
-    /// Untyped memory cannot be retyped to Empty capabilities.
-    type RetypeSizeSpec = Infallible;
+    /// Allocators cannot allocate Empty capabilities.
+    type AllocateSizeSpec = Infallible;
 
-    fn retype_size_spec(_: Self::RetypeSizeSpec) -> usize {
+    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
         0
     }
 
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Empty;
 }
 
-// /// The untyped capability corresponds to a block of kernel memory
-// /// that can be allocated for many purposes; for example, [virtual
-// /// memory pages][paging::Page], [capability tables][Captbl], or even
-// /// smaller untyped capabilities.
-// ///
-// /// For more information on retyping, see [`Captr<Untyped>::retype`].
-// #[derive(Copy, Clone, Debug)]
-// pub struct Untyped(#[doc(hidden)] Infallible);
-
-// impl Capability for Untyped {
-//     type RetypeSizeSpec = UntypedSizeSpec;
-
-//     fn retype_size_spec(spec: Self::RetypeSizeSpec) -> usize {
-//         spec.n_bytes_log2
-//     }
-
-//     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Untyped;
-// }
-
-/// Options for retyping an [`Untyped`] capability into a child
-/// `Untyped` capability.
+/// The allocator capability corresponds to the privilege to allocate
+/// kernel memory for many purposes; for example, [virtual memory
+/// pages][paging::Page] and [capability tables][Captbl].
+///
+/// For more information on allocation, see [`Captr<Allocator>::allocate`].
 #[derive(Copy, Clone, Debug)]
-#[repr(transparent)]
-pub struct UntypedSizeSpec {
-    /// The base-2 logarithm of the byte size of the new [`Untyped`]
-    /// capability. This must be less than or equal to the size of the
-    /// parent untyped capability.
-    pub n_bytes_log2: usize,
+pub struct Allocator(#[doc(hidden)] Infallible);
+
+impl Capability for Allocator {
+    /// Allocators cannot allocate allocator capabilities.
+    type AllocateSizeSpec = Infallible;
+
+    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
+        0
+    }
+
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Allocator;
 }
 
 impl RemoteCaptr<Captbl> {
@@ -476,102 +464,102 @@ impl<C: Capability> RemoteCaptr<C> {
     }
 }
 
-// impl Captr<Untyped> {
-//     /// Allocate 1 or more capabilities from an [`Untyped`] capability.
-//     ///
-//     /// This will allocate `count` capabilities from this [`Untyped`]
-//     /// capability, putting the resulting capabilities into the slots
-//     /// starting at `into[starting_at]` to, but not including
-//     /// `into[starting_at + count]`. Note that all these slots within
-//     /// this range must be [`Empty`] capabilities.
-//     ///
-//     /// The resultant iterator provides [`Captr<C>`]'s over the range
-//     /// `starting_at..(starting_at + count)` from the empty
-//     /// `Captr<Empty>` range provided to the function.
-//     ///
-//     /// `size` and [`Capability::RetypeSizeSpec`] are used to
-//     /// determine the size of dynamic objects. See the capability's
-//     /// documentation for more information.
-//     ///
-//     /// # Errors
-//     ///
-//     /// TODO
-//     pub fn retype_many<C: Capability>(
-//         self,
-//         into: RemoteCaptr<Captbl>,
-//         starting_at: Captr<Empty>,
-//         count: usize,
-//         size: C::RetypeSizeSpec,
-//     ) -> CapResult<RetypeIter<C>> {
-//         syscalls::untyped::retype_many(
-//             self.into_raw(),
-//             into.reftbl().into_raw(),
-//             into.local_index().into_raw(),
-//             starting_at.into_raw(),
-//             count,
-//             C::CAPABILITY_TYPE,
-//             C::retype_size_spec(size),
-//         )?;
+impl Captr<Allocator> {
+    /// Allocate 1 or more capabilities from an [`Allocator`] capability.
+    ///
+    /// This will allocate `count` capabilities from this [`Allocator`]
+    /// capability, putting the resulting capabilities into the slots
+    /// starting at `into[starting_at]` to, but not including
+    /// `into[starting_at + count]`. Note that all these slots within
+    /// this range must be [`Empty`] capabilities.
+    ///
+    /// The resultant iterator provides [`Captr<C>`]'s over the range
+    /// `starting_at..(starting_at + count)` from the empty
+    /// `Captr<Empty>` range provided to the function.
+    ///
+    /// `size` and [`Capability::AllocateSizeSpec`] are used to
+    /// determine the size of dynamic objects. See the capability's
+    /// documentation for more information.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn allocate_many<C: Capability>(
+        self,
+        into: RemoteCaptr<Captbl>,
+        starting_at: Captr<Empty>,
+        count: usize,
+        size: C::AllocateSizeSpec,
+    ) -> CapResult<AllocateIter<C>> {
+        syscalls::allocator::allocate_many(
+            self.into_raw(),
+            into.reftbl().into_raw(),
+            into.local_index().into_raw(),
+            starting_at.into_raw(),
+            count,
+            C::CAPABILITY_TYPE,
+            C::allocate_size_spec(size),
+        )?;
 
-//         // SAFETY: We know that starting_at points to a valid
-//         // capability due to the invariants of the retype_many
-//         // syscall.
-//         let starting_at = unsafe { Captr::from_raw_unchecked(starting_at.into_raw()) };
+        // SAFETY: We know that starting_at points to a valid
+        // capability due to the invariants of the retype_many
+        // syscall.
+        let starting_at = unsafe { Captr::from_raw_unchecked(starting_at.into_raw()) };
 
-//         Ok(RetypeIter {
-//             starting_at,
-//             end: starting_at.add(count),
-//         })
-//     }
+        Ok(AllocateIter {
+            starting_at,
+            end: starting_at.add(count),
+        })
+    }
 
-//     /// Allocate a capability from an [`Untyped`] capability.
-//     ///
-//     /// This will allocate 1 capability from this [`Untyped`]
-//     /// capability, putting the resulting capabilities into the slot
-//     /// indexed by `into[at]`.
-//     ///
-//     /// The resultant [`Captr<C>`] is simply a casted version of `at`,
-//     /// with the capability now ensured to be present.
-//     ///
-//     /// `size` and [`Capability::RetypeSizeSpec`] are used to
-//     /// determine the size of dynamic objects. See the capability's
-//     /// documentation for more information.
-//     ///
-//     /// # Errors
-//     ///
-//     /// TODO
-//     pub fn retype<C: Capability>(
-//         self,
-//         into: RemoteCaptr<Captbl>,
-//         at: Captr<Empty>,
-//         size: C::RetypeSizeSpec,
-//     ) -> CapResult<Captr<C>> {
-//         syscalls::untyped::retype_many(
-//             self.into_raw(),
-//             into.reftbl().into_raw(),
-//             into.local_index().into_raw(),
-//             at.into_raw(),
-//             1,
-//             C::CAPABILITY_TYPE,
-//             C::retype_size_spec(size),
-//         )?;
+    /// Allocate a capability from an [`Allocator`] capability.
+    ///
+    /// This will allocate 1 capability from this [`Allocator`]
+    /// capability, putting the resulting capabilities into the slot
+    /// indexed by `into[at]`.
+    ///
+    /// The resultant [`Captr<C>`] is simply a casted version of `at`,
+    /// with the capability now ensured to be present.
+    ///
+    /// `size` and [`Capability::AllocateSizeSpec`] are used to
+    /// determine the size of dynamic objects. See the capability's
+    /// documentation for more information.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn allocate<C: Capability>(
+        self,
+        into: RemoteCaptr<Captbl>,
+        at: Captr<Empty>,
+        size: C::AllocateSizeSpec,
+    ) -> CapResult<Captr<C>> {
+        syscalls::allocator::allocate_many(
+            self.into_raw(),
+            into.reftbl().into_raw(),
+            into.local_index().into_raw(),
+            at.into_raw(),
+            1,
+            C::CAPABILITY_TYPE,
+            C::allocate_size_spec(size),
+        )?;
 
-//         // SAFETY: By the invariants of the retype_many syscall, this
-//         // is valid.
-//         let at = unsafe { Captr::from_raw_unchecked(at.into_raw()) };
-//         Ok(at)
-//     }
-// }
+        // SAFETY: By the invariants of the retype_many syscall, this
+        // is valid.
+        let at = unsafe { Captr::from_raw_unchecked(at.into_raw()) };
+        Ok(at)
+    }
+}
 
 /// An iterator that provides the resulting [`Captr`]s from a
-/// [`Captr::<Untyped>::retype_many`] invocation.
+/// [`Captr::<Allocator>::allocate_many`] invocation.
 #[derive(Clone, Debug)]
-pub struct RetypeIter<C: Capability> {
+pub struct AllocateIter<C: Capability> {
     starting_at: Captr<C>,
     end: Captr<C>,
 }
 
-impl<C: Capability> Iterator for RetypeIter<C> {
+impl<C: Capability> Iterator for AllocateIter<C> {
     type Item = Captr<C>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -590,7 +578,7 @@ impl<C: Capability> Iterator for RetypeIter<C> {
     }
 }
 
-impl<C: Capability> ExactSizeIterator for RetypeIter<C> {
+impl<C: Capability> ExactSizeIterator for AllocateIter<C> {
     fn len(&self) -> usize {
         self.end.into_raw() - self.starting_at.into_raw()
     }
@@ -603,7 +591,7 @@ impl<C: Capability> ExactSizeIterator for RetypeIter<C> {
 // const ROOT_CAPTBL: Captr<Captbl> = unsafe { Captr::from_raw_unchecked(1) };
 
 // fn test(ut: Captr<Untyped>) -> CapResult<()> {
-//     use paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PageTableFlags};
+//     use paging::{BasePage, GigaPage, MegaPage, Page, PageTableR, PageTableFlags};
 //     let free_nodes_start = captbl_alloc(ROOT_CAPTBL, 4)?;
 //     let mut iter = ut.retype_many(RemoteCaptr::local(ROOT_CAPTBL), free_nodes_start, 3, ())?;
 //     let pgtbl_l2: Captr<PageTable<BasePage>> = iter.next().unwrap().into();
@@ -627,13 +615,13 @@ impl<C: Capability> ExactSizeIterator for RetypeIter<C> {
 //     Ok(())
 // }
 
-/// An inclusive range of capability pointers.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+/// An exclusive range of capability pointers.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct CaptrRange<C: Capability> {
     /// The low end of the range.
     pub lo: Captr<C>,
-    /// The high end of the range, inclusive.
+    /// The high end of the range, exclusive.
     pub hi: Captr<C>,
 }
 
@@ -649,8 +637,7 @@ impl<C: Capability> CaptrRange<C> {
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Captbl,
-        Empty, //Untyped,
+        Allocator, Captbl, Empty,
     };
 
     pub trait Sealed {}
@@ -661,7 +648,7 @@ mod private {
     impl Sealed for PageTable {}
     impl Sealed for Captbl {}
     impl Sealed for Empty {}
-    //impl Sealed for Untyped {}
+    impl Sealed for Allocator {}
 }
 
 // These impls are just so Capability doesn't have to impl all these
@@ -707,5 +694,17 @@ impl<C: Capability> Hash for RemoteCaptr<C> {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         self.reftbl.hash(state);
         self.index.hash(state);
+    }
+}
+
+impl<C: Capability> fmt::Debug for Captr<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Captr({})", self.inner.map_or(0, NonZeroUsize::get))
+    }
+}
+
+impl<C: Capability> fmt::Debug for CaptrRange<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CaptrRange({:?}..{:?})", self.lo, self.hi)
     }
 }

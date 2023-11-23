@@ -11,3 +11,4 @@ rille = { path = "../../rille" }
 panic_handler = { path = "../panic_handler" }
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 owo-colors = "3.5.0"
+fdt = "0.1.5"

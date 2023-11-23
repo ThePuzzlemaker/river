@@ -319,7 +319,7 @@ unsafe extern "C" fn user_trap() -> ! {
 
             match trapframe.a0.into() {
                 SyscallNumber::CopyDeep => sys_copy_deep(&mut private, &mut trapframe),
-                //SyscallNumber::RetypeMany => sys_retype_many(&mut private, trapframe),
+                SyscallNumber::AllocateMany => sys_allocate_many(&mut private, &mut trapframe),
                 SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&mut private, &mut trapframe),
                 SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&mut private, &mut trapframe),
                 SyscallNumber::DebugPrint => sys_debug_print(&mut private, &mut trapframe),
@@ -644,7 +644,7 @@ define_syscall!(sys_debug_cap_slot, 2);
 define_syscall!(sys_debug_print, 2);
 define_syscall!(sys_copy_deep, 6);
 define_syscall!(sys_swap, 4);
-//define_syscall!(sys_retype_many, 7);
+define_syscall!(sys_allocate_many, 7);
 define_syscall!(sys_delete, 2);
 define_syscall!(sys_page_map, 4);
 // define_syscall!(sys_pgtbl_map, 4);

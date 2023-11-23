@@ -6,8 +6,8 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, FromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum SyscallNumber {
-    /// [`Captr::<Untyped>::retype_many`][crate::capability::Captr::<Untyped>::retype_many]
-    RetypeMany = 0,
+    /// [`Captr::<Allocator>::allocate_many`][crate::capability::Captr::<Allocator>::allocate_many]
+    AllocateMany = 0,
     /// [`RemoteCaptr::<Captbl>::copy_deep`][crate::capability::RemoteCaptr::<Captbl>::copy_deep]
     CopyDeep = 1,
     /// [`RemoteCaptr::<Captbl>::delete`][crate::capability::RemoteCaptr::<Captbl>::delete]
@@ -231,21 +231,21 @@ pub mod captbl {
     }
 }
 
-/// Syscalls relating to the [`Untyped`][super::capability::Untyped]
+/// Syscalls relating to the [`Allocator`][super::capability::Allocator]
 /// capability.
 #[allow(clippy::missing_errors_doc)]
-pub mod untyped {
+pub mod allocator {
     use crate::capability::{CapError, CapResult, CapabilityType};
 
     use super::SyscallNumber;
 
-    /// Allocate 1 or more capabilities from an [`Untyped`][2] capability.
+    /// Allocate 1 or more capabilities from an [`allocator`][2] capability.
     ///
-    /// See [`Captr::<Untyped>::retype_many`][1].
+    /// See [`Captr::<Allocator>::allocate_many`][1].
     ///
     /// # Description
     ///
-    /// - `untyped` must be a valid index to an [`Untyped`][2]
+    /// - `allocator` must be a valid index to an [`Allocator`][2]
     /// capability in the thread's root captbl.
     ///
     /// - `into_ref` may be a valid index to a [`Captbl`][3], or
@@ -272,11 +272,11 @@ pub mod untyped {
     /// `into_ref[into_index][starting_at + count]` are filled with
     /// new capabilities of the type requested.
     ///
-    /// [1]: crate::capability::Captr::<Untyped>::retype_many
-    /// [2]: crate::capability::Untyped
+    /// [1]: crate::capability::Captr::<Allocator>::allocate_many
+    /// [2]: crate::capability::Allocator
     /// [3]: crate::capability::Captbl
-    pub fn retype_many(
-        untyped: usize,
+    pub fn allocate_many(
+        allocator: usize,
         into_ref: usize,
         into_index: usize,
         starting_at: usize,
@@ -287,8 +287,8 @@ pub mod untyped {
         // SAFETY: retype_many is always safe.
         let res = unsafe {
             super::ecall7(
-                SyscallNumber::RetypeMany,
-                untyped as u64,
+                SyscallNumber::AllocateMany,
+                allocator as u64,
                 into_ref as u64,
                 into_index as u64,
                 starting_at as u64,

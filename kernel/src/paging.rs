@@ -582,6 +582,7 @@ impl SharedPageTable {
                     table = unsafe { &mut *(paddr.into_virt().into_ptr_mut()) }
                 }
                 PTEKind::Invalid => {
+                    // TODO: use try_ variants to make this not panic
                     let new_subtable = Box::leak(PageTable::new_table());
                     let subtable_phys: PhysicalMut<RawPageTable, DirectMapped> =
                         Virtual::from_ptr(new_subtable as *mut _).into_phys();

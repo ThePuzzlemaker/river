@@ -27,9 +27,9 @@ pub type PageCaptr<L> = Captr<Page<L>>;
 impl<L: PagingLevel> Capability for Page<L> {
     /// [`PagingLevel::PAGE_SIZE_LOG2`] gives us the bit-size of this
     /// retype operation.
-    type RetypeSizeSpec = ();
+    type AllocateSizeSpec = ();
 
-    fn retype_size_spec(_spec: Self::RetypeSizeSpec) -> usize {
+    fn allocate_size_spec(_spec: Self::AllocateSizeSpec) -> usize {
         L::PAGE_SIZE_LOG2
     }
 
@@ -41,7 +41,7 @@ impl<L: PagingLevel> Capability for Page<L> {
 /// part of the address translation hierarchy this page table
 /// occupies.
 ///
-/// See [`PgTblCaptr`] for operations on this capability.
+/// See [`Captr<PageTable>`] for operations on this capability.
 #[derive(Copy, Clone, Debug)]
 pub struct PageTable(#[doc(hidden)] Infallible);
 
@@ -118,9 +118,9 @@ impl PagingLevel for BasePage {
 
 impl Capability for PageTable {
     /// Page table sizes are constant, no matter the [`PagingLevel`].
-    type RetypeSizeSpec = ();
+    type AllocateSizeSpec = ();
 
-    fn retype_size_spec(_spec: Self::RetypeSizeSpec) -> usize {
+    fn allocate_size_spec(_spec: Self::AllocateSizeSpec) -> usize {
         0
     }
 
