@@ -91,31 +91,37 @@ impl Scheduler {
                     }
                 };
 
-                if proc
-                    .state
-                    .compare_exchange(
-                        ThreadState::Runnable,
-                        ThreadState::Running,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    drop(scheduler);
+                match proc.state.compare_exchange(
+                    ThreadState::Runnable,
+                    ThreadState::Running,
+                    Ordering::Relaxed,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        drop(scheduler);
 
-                    LOCAL_HART.with(move |hart| {
-                        *hart.thread.borrow_mut() = Some(proc);
+                        LOCAL_HART.with(move |hart| {
+                            *hart.thread.borrow_mut() = Some(proc);
 
-                        let proc = hart.thread.borrow().as_ref().cloned().unwrap();
+                            {
+                                let proc = hart.thread.borrow();
+                                let proc = proc.as_ref().unwrap();
+                                proc.hartid.store(hart.hartid.get(), Ordering::Relaxed);
 
-                        proc.hartid.store(hart.hartid.get(), Ordering::Relaxed);
-                        // SAFETY: Our caller guarantees these contexts are valid.
-                        unsafe { Context::switch(&proc.context, &hart.context) }
+                                // SAFETY: Our caller guarantees these contexts are valid.
+                                unsafe { Context::switch(&proc.context, &hart.context) }
+                            }
 
-                        *hart.thread.borrow_mut() = None;
-                    });
+                            *hart.thread.borrow_mut() = None;
+                        });
 
-                    continue 'outer;
+                        continue 'outer;
+                    }
+                    Err(ThreadState::Suspended) => {
+                        scheduler.run_queue.remove(&proc.tid);
+                        scheduler.procs.pop_back();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -134,7 +140,7 @@ impl Scheduler {
             .unwrap()
             .lock();
 
-        sched.run_queue.remove(&tid);
+        sched.run_queue.remove(&tid).unwrap();
         sched.procs.retain(|x| *x != tid);
     }
 
@@ -185,7 +191,7 @@ impl Scheduler {
                 .as_ref()
                 .cloned()
                 .expect("Scheduler::current_proc_wait: no process");
-            proc.state.store(ThreadState::Suspended, Ordering::Relaxed);
+            proc.state.store(ThreadState::Suspended, Ordering::Release);
             let pid = proc.tid;
 
             sched.run_queue.remove(&pid);

@@ -2,7 +2,7 @@ use core::{arch::global_asm, mem, ptr};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{ThreadState, THREAD_STACK_SIZE},
+    capability::{Thread, ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
@@ -86,10 +86,11 @@ unsafe extern "C" fn kernel_trap() {
                 // now.
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                drop(proc);
                 // SAFETY: This thread is currently running on
                 // this hart.
                 unsafe {
-                    proc.yield_to_scheduler();
+                    Thread::yield_to_scheduler();
                 }
             }
         }
@@ -292,7 +293,8 @@ unsafe extern "C" fn user_trap() -> ! {
         // before, we wouldn't have been able to interrupt unless
         // someone enabled interrupts while the lock was still held
         // (which is a bug itself).
-        let mut trapframe = proc.trapframe.lock();
+        let mut trapframe_lock = proc.trapframe.lock();
+        let trapframe = trapframe_lock.as_mut();
         trapframe.user_epc = asm::read_sepc();
 
         let scause = asm::read_scause();
@@ -315,35 +317,35 @@ unsafe extern "C" fn user_trap() -> ! {
             trapframe.user_epc += 4;
 
             match trapframe.a0.into() {
-                SyscallNumber::CopyDeep => sys_copy_deep(&proc, &mut trapframe),
-                SyscallNumber::AllocateMany => sys_allocate_many(&proc, &mut trapframe),
-                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&proc, &mut trapframe),
-                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&proc, &mut trapframe),
-                SyscallNumber::DebugPrint => sys_debug_print(&proc, &mut trapframe),
-                SyscallNumber::Swap => sys_swap(&proc, &mut trapframe),
-                SyscallNumber::Delete => sys_delete(&proc, &mut trapframe),
+                SyscallNumber::CopyDeep => sys_copy_deep(&proc, trapframe),
+                SyscallNumber::AllocateMany => sys_allocate_many(&proc, trapframe),
+                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&proc, trapframe),
+                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&proc, trapframe),
+                SyscallNumber::DebugPrint => sys_debug_print(&proc, trapframe),
+                SyscallNumber::Swap => sys_swap(&proc, trapframe),
+                SyscallNumber::Delete => sys_delete(&proc, trapframe),
                 // SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
-                SyscallNumber::PageMap => sys_page_map(&proc, &mut trapframe),
+                SyscallNumber::PageMap => sys_page_map(&proc, trapframe),
                 SyscallNumber::DebugCapIdentify => {
-                    sys_debug_cap_identify(&proc, &mut trapframe);
+                    sys_debug_cap_identify(&proc, trapframe);
                 }
-                SyscallNumber::ThreadSuspend => sys_thread_suspend(&proc, &mut trapframe),
-                SyscallNumber::ThreadConfigure => sys_thread_configure(&proc, &mut trapframe),
-                SyscallNumber::ThreadResume => sys_thread_resume(&proc, &mut trapframe),
+                SyscallNumber::ThreadSuspend => sys_thread_suspend(&proc, trapframe),
+                SyscallNumber::ThreadConfigure => sys_thread_configure(&proc, trapframe),
+                SyscallNumber::ThreadResume => sys_thread_resume(&proc, trapframe),
                 SyscallNumber::ThreadWriteRegisters => {
-                    sys_thread_write_registers(&proc, &mut trapframe);
+                    sys_thread_write_registers(&proc, trapframe);
                 }
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
             }
 
-            if proc.state.load(Ordering::Relaxed) == ThreadState::Suspended {
-                drop(trapframe);
+            if proc.state.load(Ordering::Acquire) == ThreadState::Suspended {
+                drop(trapframe_lock);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
-                    proc.yield_to_scheduler();
+                    proc.yield_to_scheduler_final();
                 }
             }
 
@@ -361,22 +363,23 @@ unsafe extern "C" fn user_trap() -> ! {
                 asm::read_stval(),
                 scause
             );
-            if proc.state.load(Ordering::Relaxed) == ThreadState::Suspended {
-                drop(trapframe);
+            if proc.state.load(Ordering::Acquire) == ThreadState::Suspended {
+                drop(trapframe_lock);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
-                    proc.yield_to_scheduler();
+                    proc.yield_to_scheduler_final();
                 }
             } else if kind == InterruptKind::Timer {
                 // Make sure we don't hold any locks while we context
                 // switch.
-                drop(trapframe);
+                drop(trapframe_lock);
                 proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
+                drop(proc);
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
-                    proc.yield_to_scheduler();
+                    Thread::yield_to_scheduler();
                 }
             }
         }
@@ -414,13 +417,13 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
         // process's context.
 
         let mut trapframe = proc.trapframe.lock();
-        trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
-        trapframe.kernel_sp =
-            (ptr::addr_of!(proc.stack) as usize as u64) + THREAD_STACK_SIZE as u64;
-        trapframe.kernel_trap = user_trap as usize as u64;
-        trapframe.kernel_tp = asm::tp();
+        trapframe.as_mut().kernel_satp = asm::get_satp().as_usize() as u64;
+        trapframe.as_mut().kernel_sp =
+            proc.stack.as_phys().into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64;
+        trapframe.as_mut().kernel_trap = user_trap as usize as u64;
+        trapframe.as_mut().kernel_tp = asm::tp();
 
-        asm::write_sepc(trapframe.user_epc);
+        asm::write_sepc(trapframe.as_ref().user_epc);
         asm::write_sscratch(private.trapframe_addr as u64);
         let satp = Satp {
             asid: 1,

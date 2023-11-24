@@ -5,7 +5,11 @@
 use core::{arch::global_asm, fmt};
 
 use rille::{
-    capability::{Captr, RemoteCaptr, Thread},
+    addr::VirtualConst,
+    capability::{
+        paging::{BasePage, Page, PageTableFlags},
+        Captr, RemoteCaptr, Thread,
+    },
     init::{BootInfo, InitCapabilities},
     syscalls::{self},
 };
@@ -56,9 +60,19 @@ done_clear_bss:
 );
 
 extern "C" fn thread_entry(_thread: Captr<Thread>) -> ! {
-    let _caps = unsafe { InitCapabilities::new() };
+    let caps = unsafe { InitCapabilities::new() };
+    caps.thread.suspend().unwrap();
+    RemoteCaptr::remote(caps.captbl, caps.thread)
+        .delete()
+        .unwrap();
+    syscalls::debug::debug_dump_root();
+
+    syscalls::debug::debug_cap_slot(caps.captbl.into_raw(), caps.thread.into_raw()).unwrap();
     loop {
-        print!("\rthread 2!");
+        unsafe {
+            core::arch::asm!("nop");
+        }
+        // print!("\rthread 2!");
     }
 }
 
@@ -75,6 +89,23 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         .allocator
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65534) }, ())
         .unwrap();
+
+    let pg: Captr<Page<BasePage>> = caps
+        .allocator
+        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
+        .unwrap();
+
+    pg.map(
+        caps.pgtbl,
+        VirtualConst::from_usize(0xDEAD0000),
+        PageTableFlags::RW,
+    )
+    .unwrap();
+
+    unsafe {
+        core::ptr::write_volatile(0xdead0000 as *mut u64, 0xc0ded00d);
+    }
+
     unsafe { thread.configure(Captr::null(), Captr::null()).unwrap() };
     unsafe {
         thread
@@ -87,10 +118,15 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             .unwrap()
     };
 
+    syscalls::debug::debug_dump_root();
+
     unsafe { thread.resume().unwrap() }
 
     loop {
-        print!("\rthread 1!");
+        // print!("\rthread 1!");
+        unsafe {
+            core::arch::asm!("nop");
+        }
     }
 }
 

@@ -253,9 +253,9 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             slot.replace(PgTbl::new(private.root_pgtbl.clone().unwrap()));
         }
         let mut trapframe = proc.trapframe.lock();
-        trapframe.user_epc = 0x1040_0000;
-        trapframe.sp = 0x1040_0000;
-        trapframe.a0 = 0x2000_0000;
+        trapframe.as_mut().user_epc = 0x1040_0000;
+        trapframe.as_mut().sp = 0x1040_0000;
+        trapframe.as_mut().a0 = 0x2000_0000;
         init_pages_range.start = free_slot_ctr;
         for i in 0..(init_padded / 4.kib() + (4.mib() / 4.kib())) {
             let phys = init.add(i * 4.kib());
@@ -394,7 +394,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .write(boot_info);
     }
 
-    LOCAL_HART.with(|hart| {
+    LOCAL_HART.with(move |hart| {
         //hart.push_off();
 
         info!("{}", r"  ___   .  _  _ __   ___".bright_purple());

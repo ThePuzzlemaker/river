@@ -43,7 +43,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::syscalls;
 
-use self::paging::PageTable;
+use self::paging::{PageTable, PageTableFlags};
 
 pub mod paging;
 
@@ -746,6 +746,30 @@ impl<C: Capability> CaptrRange<C> {
     /// TODO
     pub fn count(&self) -> usize {
         (self.hi.into_raw() - self.lo.into_raw()) + 1
+    }
+}
+
+bitflags::bitflags! {
+    pub struct CapRights: u64 {
+    const READ = 1 << 0;
+    const WRITE = 1 << 1;
+    const EXECUTE = 1 << 2;
+    }
+}
+
+impl CapRights {
+    pub fn into_pgtbl_mask(self) -> PageTableFlags {
+        let mut x = PageTableFlags::empty();
+        if self.contains(Self::READ) {
+            x |= PageTableFlags::READ;
+        }
+        if self.contains(Self::WRITE) {
+            x |= PageTableFlags::WRITE;
+        }
+        if self.contains(Self::EXECUTE) {
+            x |= PageTableFlags::EXECUTE;
+        }
+        x
     }
 }
 

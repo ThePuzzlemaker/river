@@ -5,7 +5,7 @@ use core::{
     ptr::{self, NonNull},
 };
 
-use rille::capability::CapResult;
+use rille::capability::{CapResult, CapabilityType};
 
 use crate::capability::RawCapability;
 
@@ -574,6 +574,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
         slot.slot.dtnode = DerivationTreeNode::default();
 
         slot.slot.cap = RawCapability { empty: EmptySlot };
+        slot.slot.cap_type = CapabilityType::Empty;
 
         slot
     }

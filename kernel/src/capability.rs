@@ -6,12 +6,13 @@ use core::{fmt, mem, ptr};
 use alloc::string::String;
 use alloc::sync::Arc;
 use atomic::{Atomic, Ordering};
+use bitfield::bitfield;
 use bytemuck::NoUninit;
 use num_enum::{FromPrimitive, IntoPrimitive};
 use rille::capability::paging::{
     BasePage, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel,
 };
-use rille::capability::{CapError, CapResult, CapabilityType, UserRegisters};
+use rille::capability::{CapError, CapResult, CapRights, CapabilityType, UserRegisters};
 
 use rille::addr::{DirectMapped, Identity, Physical, PhysicalMut, Ppn, VirtualConst};
 use rille::units::{self};
@@ -59,10 +60,10 @@ pub struct CapabilitySlot {
 #[derive(Default, PartialEq)]
 #[repr(C, align(8))]
 pub struct RawCapabilitySlot {
+    pub dtnode: DerivationTreeNode,
     pub cap: RawCapability,
     #[allow(clippy::missing_fields_in_debug)]
     pub cap_type: CapabilityType,
-    pub dtnode: DerivationTreeNode,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -216,8 +217,8 @@ pub enum AnyCap {
     Captbl(WeakCaptbl),
     Allocator,
     Page(Page),
-    PgTbl(ManuallyDrop<PgTblSlot>),
-    Thread(ManuallyDrop<ThreadSlot>),
+    PgTbl(PgTblSlot),
+    Thread(ThreadSlot),
     // TODO
 }
 
@@ -342,16 +343,25 @@ impl RawCapability {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmptySlot;
 
+bitfield! {
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    struct PpnSizeLog2(u64);
+    impl Debug;
+    pub u64, from into Ppn, get_ppn, set_ppn: 44, 0;
+    pub u8, get_size_log2, set_size_log2: 52, 45;
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PageSlot {
-    pub ppn: Ppn,
-    pub size_log2: u8,
+    ppn_size_log2: PpnSizeLog2,
+    pub rights: CapRights,
 }
 
 #[derive(Clone, Debug)]
 pub struct Page {
     phys: PhysicalMut<u8, DirectMapped>,
     size_log2: u8,
+    rights: CapRights,
 }
 
 impl Page {
@@ -363,7 +373,11 @@ impl Page {
     /// - `phys` must be valid for `1 << size_log2` bytes.
     /// - `phys` must be aligned to `1 << size_log2` bytes.
     pub unsafe fn new(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Self {
-        Self { phys, size_log2 }
+        Self {
+            phys,
+            size_log2,
+            rights: CapRights::all(),
+        }
     }
 }
 
@@ -378,8 +392,9 @@ impl Capability for Page {
         // SAFETY: By invariants.
         let slot = unsafe { slot.cap.page };
         Page {
-            phys: Physical::from_components(slot.ppn, None),
-            size_log2: slot.size_log2,
+            phys: Physical::from_components(slot.ppn_size_log2.get_ppn(), None),
+            size_log2: slot.ppn_size_log2.get_size_log2(),
+            rights: slot.rights,
         }
     }
 
@@ -392,8 +407,13 @@ impl Capability for Page {
             CapabilityType::Page,
             RawCapability {
                 page: PageSlot {
-                    ppn: meta.phys.ppn(),
-                    size_log2: meta.size_log2,
+                    ppn_size_log2: {
+                        let mut x = PpnSizeLog2(0);
+                        x.set_ppn(meta.phys.ppn());
+                        x.set_size_log2(meta.size_log2);
+                        x
+                    },
+                    rights: meta.rights,
                 },
             },
         )
@@ -443,7 +463,7 @@ impl PgTbl {
 }
 
 impl Capability for PgTbl {
-    type Metadata = ManuallyDrop<PgTblSlot>;
+    type Metadata = PgTblSlot;
 
     fn is_valid_type(cap_type: CapabilityType) -> bool {
         cap_type == CapabilityType::PgTbl
@@ -451,27 +471,26 @@ impl Capability for PgTbl {
 
     fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
         // SAFETY: By invariants.
-        unsafe { &slot.cap.pgtbl }.clone()
+        ManuallyDrop::into_inner(unsafe { &slot.cap.pgtbl }.clone())
     }
 
     fn into_meta(self) -> Self::Metadata {
-        ManuallyDrop::new(PgTblSlot { table: self.table })
+        PgTblSlot { table: self.table }
     }
 
     fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
         (
             CapabilityType::PgTbl,
             RawCapability {
-                pgtbl: meta.clone(),
+                pgtbl: ManuallyDrop::new(meta.clone()),
             },
         )
     }
 
     unsafe fn do_delete(
-        meta: Self::Metadata,
+        _meta: Self::Metadata,
         slot: &mut SpinRwLockWriteGuard<'_, RawCapabilitySlot>,
     ) {
-        drop(ManuallyDrop::into_inner(meta));
         let raw_slot = mem::replace(&mut slot.cap, RawCapability { empty: EmptySlot });
         // SAFETY: By invariants
         drop(ManuallyDrop::into_inner(unsafe { raw_slot.pgtbl }));
@@ -505,6 +524,8 @@ impl<'a> SlotRefMut<'a, PgTbl> {
         if addr.into_usize() % (1 << (page.meta.size_log2 as usize)) != 0 {
             return Err(CapError::InvalidSize);
         }
+
+        let flags = flags & page.meta.rights.into_pgtbl_mask();
 
         let flags =
             KernelFlags::from_bits_truncate(flags.bits()) | KernelFlags::VAD | KernelFlags::USER;
@@ -601,8 +622,11 @@ impl<'a> fmt::Debug for RawCapDebugAdapter<'a> {
             CapabilityType::PgTbl => unsafe { &self.0.cap.pgtbl }.fmt(f),
             // SAFETY: Type check.
             CapabilityType::Page => unsafe { &self.0.cap.page }.fmt(f),
-            // SAFETY: Type check.
-            CapabilityType::Thread => write!(f, "Thread(<opaque>)"),
+            CapabilityType::Thread => {
+                // SAFETY: Type check.
+                let x = unsafe { &self.0.cap.thread.inner };
+                write!(f, "Thread(<opaque:{:#p}>)", Arc::as_ptr(x),)
+            }
             CapabilityType::Unknown => f.debug_struct("InvalidCap").finish(),
         }
     }
@@ -637,7 +661,7 @@ pub struct ThreadSlot {
 }
 
 impl Capability for Arc<Thread> {
-    type Metadata = ManuallyDrop<ThreadSlot>;
+    type Metadata = ThreadSlot;
 
     fn is_valid_type(cap_type: CapabilityType) -> bool {
         cap_type == CapabilityType::Thread
@@ -645,18 +669,18 @@ impl Capability for Arc<Thread> {
 
     fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
         // SAFETY: By invariants
-        unsafe { slot.cap.thread.clone() }
+        ManuallyDrop::into_inner(unsafe { slot.cap.thread.clone() })
     }
 
     fn into_meta(self) -> Self::Metadata {
-        ManuallyDrop::new(ThreadSlot { inner: self })
+        ThreadSlot { inner: self }
     }
 
     fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
         (
             CapabilityType::Thread,
             RawCapability {
-                thread: meta.clone(),
+                thread: ManuallyDrop::new(meta.clone()),
             },
         )
     }
@@ -665,9 +689,14 @@ impl Capability for Arc<Thread> {
         meta: Self::Metadata,
         slot: &mut SpinRwLockWriteGuard<'_, RawCapabilitySlot>,
     ) {
+        let raw_slot = mem::replace(&mut slot.cap, RawCapability { empty: EmptySlot });
+
+        // SAFETY: By invariants
+        drop(ManuallyDrop::into_inner(unsafe { raw_slot.thread }));
+
         // If we're an orphan dtnode, extract our captbl and drop it
-        // first. This breaks any cycles that prevent us from being
-        // fully dropped.
+        // This breaks any cycles that prevent us from being fully
+        // dropped.
         if slot.dtnode.first_child.is_none()
             && slot.dtnode.next_sibling.is_none()
             && slot.dtnode.prev_sibling.is_none()
@@ -675,25 +704,26 @@ impl Capability for Arc<Thread> {
         {
             let mut private = meta.inner.private.write();
             drop(private.captbl.take());
+            drop(private);
+            drop(meta);
         }
-
-        drop(ManuallyDrop::into_inner(meta));
-        let raw_slot = mem::replace(&mut slot.cap, RawCapability { empty: EmptySlot });
-        // SAFETY: By invariants
-        drop(ManuallyDrop::into_inner(unsafe { raw_slot.thread }));
     }
 }
 
 impl<'a> SlotRef<'a, Arc<Thread>> {
     pub fn suspend(&self) {
-        self.meta
-            .inner
-            .state
-            .store(ThreadState::Suspended, Ordering::Relaxed);
         Scheduler::dequeue(
             self.meta.inner.hartid.load(Ordering::Relaxed),
             self.meta.inner.tid,
         );
+        // Release ordering ensures that the dequeue operation
+        // strictly happens-before this release operation, which then
+        // happens-before any accompanying Acquire load for suspend
+        // tests.
+        self.meta
+            .inner
+            .state
+            .store(ThreadState::Suspended, Ordering::Release);
     }
 
     /// Configure the captbl and page table of a thread.
@@ -704,8 +734,8 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
     ///
     /// [1]: rille::capability::Captr::<rille::capability::Thread>::configure
     pub fn configure(&self, captbl: Captbl, pgtbl: SharedPageTable) -> CapResult<()> {
-        if self.meta.inner.state.load(Ordering::Relaxed) != ThreadState::Suspended
-            && self.meta.inner.state.load(Ordering::Relaxed) != ThreadState::Uninit
+        if self.meta.inner.state.load(Ordering::Acquire) != ThreadState::Suspended
+            && self.meta.inner.state.load(Ordering::Acquire) != ThreadState::Uninit
         {
             return Err(CapError::InvalidOperation);
         }
@@ -723,7 +753,7 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
         self.meta
             .inner
             .state
-            .store(ThreadState::Suspended, Ordering::Relaxed);
+            .store(ThreadState::Suspended, Ordering::Release);
 
         Ok(())
     }
@@ -768,7 +798,7 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
     ) -> CapResult<()> {
         use paging::PageTableFlags as KernelFlags;
 
-        if self.meta.inner.state.load(Ordering::Relaxed) != ThreadState::Suspended {
+        if self.meta.inner.state.load(Ordering::Acquire) != ThreadState::Suspended {
             return Err(CapError::InvalidOperation);
         }
 
@@ -789,8 +819,8 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
 
         let mut trapframe = self.meta.inner.trapframe.lock();
         let trapframe = &mut *trapframe;
-        trapframe.user_epc = registers.ra;
-        *trapframe = Trapframe {
+        let old_trapframe = trapframe.as_ref();
+        *trapframe.as_mut() = Trapframe {
             ra: registers.ra,
             sp: registers.sp,
             gp: registers.gp,
@@ -823,16 +853,16 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
             t5: registers.t5,
             t6: registers.t6,
             user_epc: registers.pc,
-            ..*trapframe
+            ..*old_trapframe
         };
 
         Ok(())
     }
 }
 
-#[repr(C, align(4096))]
+#[repr(C)]
 pub struct Thread {
-    pub trapframe: SpinMutex<Trapframe>,
+    pub trapframe: SpinMutex<OwnedTrapframe>,
     pub stack: ThreadKernelStack,
     pub private: SpinRwLock<ThreadProtected>,
     pub context: SpinMutex<Context>,
@@ -840,6 +870,54 @@ pub struct Thread {
     pub tid: usize,
     pub hartid: AtomicU64,
 }
+
+pub struct OwnedTrapframe {
+    inner: PhysicalMut<Trapframe, DirectMapped>,
+}
+
+impl OwnedTrapframe {
+    pub fn new() -> Self {
+        let mut pma = PMAlloc::get();
+        Self {
+            inner: pma.allocate(0).unwrap().cast(),
+        }
+    }
+
+    pub fn as_phys(&self) -> PhysicalMut<Trapframe, DirectMapped> {
+        self.inner
+    }
+
+    // TODO: make these Deref/Mut?
+    pub fn as_ref(&self) -> &Trapframe {
+        // SAFETY: By invariants.
+        unsafe { &*self.inner.into_virt().into_ptr_mut() }
+    }
+
+    pub fn as_mut(&mut self) -> &mut Trapframe {
+        // SAFETY: By invariants.
+        unsafe { &mut *self.inner.into_virt().into_ptr_mut() }
+    }
+}
+
+impl Default for OwnedTrapframe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for OwnedTrapframe {
+    fn drop(&mut self) {
+        let mut pma = PMAlloc::get();
+        // SAFETY: By invariants.
+        unsafe { pma.deallocate(self.inner.cast(), 0) }
+    }
+}
+
+// SAFETY: A trapframe is just some numbers. Any mutable access
+// requires a mutable ref.
+unsafe impl Sync for OwnedTrapframe {}
+// SAFETY: See above.
+unsafe impl Send for OwnedTrapframe {}
 
 impl Thread {
     #[allow(clippy::missing_panics_doc)]
@@ -855,6 +933,9 @@ impl Thread {
 
         // SAFETY: These initialization addresses are valid.
         unsafe {
+            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).trapframe)
+                .write(SpinMutex::new(OwnedTrapframe::new()));
+            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).stack).write(ThreadKernelStack::new());
             ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).private).write(SpinRwLock::new(
                 ThreadProtected {
                     captbl,
@@ -871,11 +952,12 @@ impl Thread {
         }
 
         // SAFETY: We have just initialized this.
-        // - trapframe, stack, and context are zeroable.
+        // - context is zeroable.
         let this = unsafe { this.assume_init() };
         {
             this.context.lock().ra = user_trap_ret as usize as u64;
-            this.context.lock().sp = ptr::addr_of!(this.stack) as u64 + THREAD_STACK_SIZE as u64;
+            this.context.lock().sp =
+                this.stack.inner.into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64;
         }
 
         this
@@ -892,8 +974,7 @@ impl Thread {
         use paging::PageTableFlags as KernelFlags;
 
         let mut private = self.private.write();
-        let trapframe_virt = VirtualConst::<_, Identity>::from_ptr(ptr::addr_of!(self.trapframe));
-        let (trapframe_phys, _) = { root_page_table().lock().walk(trapframe_virt).unwrap() };
+        let trapframe_phys = self.trapframe.lock().as_phys();
 
         let trapframe_mapped_addr = private
             .root_pgtbl
@@ -906,7 +987,7 @@ impl Thread {
         // where the trapframe will be. Nothing else will be
         // accessed from the user page tables.
         private.root_pgtbl.as_mut().unwrap().map(
-            trapframe_phys.cast().into_identity(),
+            trapframe_phys.into_const().cast().into_identity(),
             trapframe_mapped_addr,
             KernelFlags::VAD | KernelFlags::RW,
             PageSize::Base,
@@ -915,11 +996,41 @@ impl Thread {
         private.trapframe_addr = trapframe_mapped_addr.into_usize();
     }
 
-    /// Yield this process's time to the scheduler.
+    /// Yield the provided process's time to the scheduler, terminally.
     ///
     /// # Safety
     ///
-    /// The provided thread must be running on the current hart.
+    /// TODO
+    ///
+    /// # Panics
+    ///
+    /// TODO
+    pub unsafe fn yield_to_scheduler_final(mut self: Arc<Thread>) {
+        LOCAL_HART.with(|hart| {
+            let intena = hart.intena.get();
+
+            let this = Arc::get_mut(&mut self).unwrap();
+            let ctx = mem::take(&mut this.context);
+            drop(self);
+            {
+                // SAFETY: The scheduler context is always valid, as
+                // guaranteed by the scheduler.
+                unsafe { Context::switch(&hart.context, &ctx) }
+            }
+
+            hart.intena.set(intena);
+        });
+    }
+
+    /// Yield the running process's time to the scheduler.
+    ///
+    /// # Safety
+    ///
+    /// A valid thread must be running on the current hart.
+    ///
+    /// # Panics
+    ///
+    /// See above.
     ///
     /// # Guarantees and Deadlocks
     ///
@@ -929,13 +1040,26 @@ impl Thread {
     /// The scheduler will constrain the user thread's stream of
     /// execution to the current hart. To allow a thread to be stolen
     /// by another hart, the waitlist must be used.
-    pub unsafe fn yield_to_scheduler(&self) {
+    pub unsafe fn yield_to_scheduler() {
         LOCAL_HART.with(|hart| {
             let intena = hart.intena.get();
 
-            // SAFETY: The scheduler context is always valid, as
-            // guaranteed by the scheduler.
-            unsafe { Context::switch(&hart.context, &self.context) }
+            let ctx_ptr = {
+                let proc = hart.thread.borrow();
+                let proc = proc.as_ref().unwrap();
+                core::ptr::addr_of!(proc.context)
+            };
+
+            {
+                // SAFETY: As the scheduler is currently running this
+                // process, it retains an `Arc` to it (We cannot
+                // safely dequeue a process without it being suspended
+                // first). Thus, this pointer remains valid.
+                let context = unsafe { &*ctx_ptr };
+                // SAFETY: The scheduler context is always valid, as
+                // guaranteed by the scheduler.
+                unsafe { Context::switch(&hart.context, context) }
+            }
 
             hart.intena.set(intena);
         });
@@ -952,13 +1076,23 @@ impl fmt::Debug for Thread {
     }
 }
 
-#[derive(Debug)]
 pub struct ThreadProtected {
     pub captbl: Option<Captbl>,
     pub root_pgtbl: Option<SharedPageTable>,
     pub asid: u16,
     pub name: String,
     pub trapframe_addr: usize,
+}
+
+impl fmt::Debug for ThreadProtected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadProtected")
+            .field("root_pgtbl", &self.root_pgtbl)
+            .field("asid", &self.asid)
+            .field("name", &self.name)
+            .field("trapframe_addr", &self.trapframe_addr)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, FromPrimitive, IntoPrimitive, NoUninit)]
@@ -972,9 +1106,50 @@ pub enum ThreadState {
     Running = 4,
 }
 
-#[repr(C, align(4096))]
+#[repr(C)]
 pub struct ThreadKernelStack {
-    inner: [u8; THREAD_STACK_SIZE],
+    inner: PhysicalMut<[u8; THREAD_STACK_SIZE], DirectMapped>,
+}
+
+impl ThreadKernelStack {
+    pub fn new() -> Self {
+        let mut pma = PMAlloc::get();
+        Self {
+            inner: pma
+                .allocate(kalloc::phys::what_order(THREAD_STACK_SIZE))
+                .unwrap()
+                .cast(),
+        }
+    }
+
+    pub fn as_phys(&self) -> PhysicalMut<[u8; THREAD_STACK_SIZE], DirectMapped> {
+        self.inner
+    }
+}
+
+impl Default for ThreadKernelStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// SAFETY: The pointer is valid when send across threads, and is only
+// accessible as mutable if the pointer is accessible as mutable.
+unsafe impl Send for ThreadKernelStack {}
+// SAFETY: See above.
+unsafe impl Sync for ThreadKernelStack {}
+
+impl Drop for ThreadKernelStack {
+    fn drop(&mut self) {
+        let mut pma = PMAlloc::get();
+        // SAFETY: By invariants.
+        unsafe {
+            pma.deallocate(
+                self.inner.cast(),
+                kalloc::phys::what_order(THREAD_STACK_SIZE),
+            )
+        }
+    }
 }
 
 // TODO: guard page
