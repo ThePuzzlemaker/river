@@ -568,26 +568,3 @@ pub fn sys_thread_write_registers(
 
     Ok(())
 }
-
-// pub fn sys_pgtbl_map(
-//     private: &mut ProcPrivate,
-//     from_pgtbl: u64,
-//     into_pgtbl: u64,
-//     vpn: Vpn,
-//     flags: PageTableFlags,
-// ) -> CapResult<()> {
-//     let (from_pgtbl, into_pgtbl) = (from_pgtbl as usize, into_pgtbl as usize);
-
-//     let root_hdr = &private.captbl;
-
-//     if from_pgtbl == into_pgtbl {
-//         return Err(CapError::InvalidOperation);
-//     }
-
-//     let mut from_pgtbl = root_hdr.get_mut::<PgTbl>(from_pgtbl)?;
-//     let mut into_pgtbl = root_hdr.get_mut::<PgTbl>(into_pgtbl)?;
-
-//     into_pgtbl.map_pgtbl(&mut from_pgtbl, vpn, flags)?;
-
-//     Ok(())
-// }

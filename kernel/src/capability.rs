@@ -791,7 +791,7 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
         let trapframe = &mut *trapframe;
         trapframe.user_epc = registers.ra;
         *trapframe = Trapframe {
-            ra: 0,
+            ra: registers.ra,
             sp: registers.sp,
             gp: registers.gp,
             tp: registers.tp,
@@ -822,7 +822,7 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
             t4: registers.t4,
             t5: registers.t5,
             t6: registers.t6,
-            user_epc: registers.ra,
+            user_epc: registers.pc,
             ..*trapframe
         };
 
