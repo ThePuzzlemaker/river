@@ -79,7 +79,6 @@ impl PMAlloc {
             n_bits: calc_bitree_bits(pma.max_order),
             max_order: pma.max_order,
         };
-        let bitree_n_pages = calc_bitree_pages(pma.max_order);
         pma.size = size;
         for page_idx in 0..bitree_n_pages {
             // SAFETY: Our caller guarantees that that this area is safe to modify.
@@ -316,7 +315,7 @@ const fn calc_max_order(size: usize) -> u32 {
 
 #[inline(always)]
 fn calc_bitree_pages(max_order: u32) -> usize {
-    util::round_up_pow2(calc_bitree_bits(max_order).div_ceil(8), 4096)
+    util::round_up_pow2(calc_bitree_bits(max_order).div_ceil(8), 4096) / 4096
 }
 
 #[inline(always)]
