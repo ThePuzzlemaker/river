@@ -14,15 +14,19 @@ pub enum SyscallNumber {
     Delete = 2,
     /// [`RemoteCaptr::<Captbl>::swap`][crate::capability::RemoteCaptr::<Captbl>::swap]
     Swap = 3,
-    /// [`Captr::<Page<L>>::map`][crate::capability::Captr::<Page<L>>::map`]
+    /// [`Captr::<Page<L>>::map`][crate::capability::Captr::<Page<L>>::map]
     PageMap = 4,
-    /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::map`]
+    /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::map]
     PageTableMap = 5,
-    /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap`]
+    /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap]
     PageTableUnmap = 6,
+    /// [`Captr::<Thread>::suspend`][crate::capability::Captr::<Thread>::suspend]
     ThreadSuspend = 7,
+    /// [`Captr::<Thread>::configure`][crate::capability::Captr::<Thread>::configure]
     ThreadConfigure = 8,
+    /// [`Captr::<Thread>::resume`][crate::capability::Captr::<Thread>::resume]
     ThreadResume = 9,
+    /// [`Captr::<Thread>::write_registers`][crate::capability::Captr::<Thread>::write_registers]
     ThreadWriteRegisters = 10,
     /// Print the debug representation of a capability to the kernel
     /// console.
@@ -274,6 +278,24 @@ pub mod allocator {
     /// `into_ref[into_index][starting_at + count]` are filled with
     /// new capabilities of the type requested.
     ///
+    /// # Errors
+    ///
+    /// - This function will return [`CapError::NotPresent`] if any
+    /// required capability was not present.
+    ///
+    /// - This function will return [`CapError::InvalidType`] if any
+    /// capability was not of the correct type.
+    ///
+    /// - This function will return [`CapError::InvalidOperation`] if
+    /// the capability requested cannot be allocated.
+    ///
+    /// - This function will return [`CapError::NotEnoughResources`]
+    /// if the capability table or allocator did not have enough space
+    /// for the requested capabilities.
+    ///
+    /// - This function will return [`CapError::InvalidSize`] if
+    /// `size` was invalid.
+    ///    
     /// [1]: crate::capability::Captr::<Allocator>::allocate_many
     /// [2]: crate::capability::Allocator
     /// [3]: crate::capability::Captbl
@@ -450,11 +472,19 @@ pub mod debug {
     }
 }
 
+/// Syscalls relating to threads. See the [`Thread`][1] capability for
+/// more details.
+///
+/// [1]: crate::capability::Thread
 pub mod thread {
+    #[allow(unused_imports)]
+    use crate::capability::Captr;
     use crate::capability::{CapError, CapResult, UserRegisters};
 
     use super::SyscallNumber;
 
+    /// See [`Captr::<Thread>::suspend`].
+    #[allow(clippy::missing_errors_doc)]
     pub fn suspend(thread: usize) -> CapResult<()> {
         // SAFETY: thread_suspend is always safe
         let res = unsafe { super::ecall1(SyscallNumber::ThreadSuspend, thread as u64) };
@@ -465,8 +495,10 @@ pub mod thread {
         }
     }
 
-    pub fn resume(thread: usize) -> CapResult<()> {
-        // SAFETY: thread_suspend is always safe
+    /// See [`Captr::<Thread>::resume`].
+    #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
+    pub unsafe fn resume(thread: usize) -> CapResult<()> {
+        // SAFETY: By invariants.
         let res = unsafe { super::ecall1(SyscallNumber::ThreadResume, thread as u64) };
 
         match res {
@@ -475,6 +507,8 @@ pub mod thread {
         }
     }
 
+    /// See [`Captr::<Thread>::configure`].
+    #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
     pub unsafe fn configure(thread: usize, captbl: usize, pgtbl: usize) -> CapResult<()> {
         // SAFETY: By invariants.
         let res = unsafe {
@@ -492,9 +526,10 @@ pub mod thread {
         }
     }
 
-    pub fn write_registers(thread: usize, registers: *const UserRegisters) -> CapResult<()> {
-        // SAFETY: write_registers is always safe, as it can only
-        // write the registers of a suspended process.
+    /// See [`Captr::<Thread>::write_registers`].
+    #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
+    pub unsafe fn write_registers(thread: usize, registers: *const UserRegisters) -> CapResult<()> {
+        // SAFETY: By invariants.
         let res = unsafe {
             super::ecall2(
                 SyscallNumber::ThreadWriteRegisters,

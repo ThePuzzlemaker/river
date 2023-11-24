@@ -31,13 +31,11 @@ extern crate alloc;
 pub mod asm;
 pub mod boot;
 pub mod capability;
-pub mod elf;
 pub mod hart_local;
 pub mod kalloc;
 pub mod paging;
 pub mod plic;
 pub mod proc;
-pub mod symbol;
 pub mod sync;
 pub mod syslog;
 pub mod trampoline;
@@ -52,7 +50,7 @@ extern "C" {
 
 use core::{
     alloc::{GlobalAlloc, Layout},
-    arch::{asm, global_asm},
+    arch::asm,
     mem::MaybeUninit,
     panic::PanicInfo,
     slice,
@@ -67,6 +65,7 @@ use rille::{
     addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
     capability::{paging::PageSize, Captr, CaptrRange},
     init::BootInfo,
+    symbol,
     units::StorageUnits,
 };
 use uart::UART;
@@ -198,9 +197,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         }
         page_virt
     };
-    //println!("{:#p}", captbl_mem);
-    assert_eq!(captbl_mem.into_usize() & ((1 << 9) - 1), 0, "oops!");
 
+    // SAFETY: We have just initialized this memory and it is valid for this amount of slots.
     let captbl = unsafe { Captbl::new(captbl_mem, 16) };
 
     {
@@ -547,11 +545,11 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
         core::hint::spin_loop();
     }
 
-    loop {
-        asm::nop();
-    }
+    // loop {
+    //     asm::nop();
+    // }
     // SAFETY: The scheduler is only started once on the main hart.
-    //unsafe { Scheduler::start() }
+    unsafe { Scheduler::start() }
 }
 
 #[panic_handler]

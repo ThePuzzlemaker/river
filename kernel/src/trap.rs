@@ -14,7 +14,6 @@ use atomic::Ordering;
 use rille::{
     capability::{CapError, CapabilityType},
     syscalls::SyscallNumber,
-    units::StorageUnits,
 };
 
 mod syscalls;
@@ -381,7 +380,7 @@ unsafe extern "C" fn user_trap() -> ! {
                 }
             }
         }
-    } // guards: trapframe, private
+    } // guards: trapframe
 
     LOCAL_HART.with(|hart| hart.trap.set(false));
     // SAFETY: We are calling this function in the context of a valid

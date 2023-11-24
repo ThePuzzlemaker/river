@@ -13,17 +13,17 @@ use rille::capability::paging::{
 };
 use rille::capability::{CapError, CapResult, CapabilityType, UserRegisters};
 
-use rille::addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Ppn, VirtualConst};
-use rille::units::{self, StorageUnits};
+use rille::addr::{DirectMapped, Identity, Physical, PhysicalMut, Ppn, VirtualConst};
+use rille::units::{self};
 
 use crate::hart_local::LOCAL_HART;
+use crate::kalloc;
 use crate::kalloc::phys::PMAlloc;
 use crate::paging::{self, root_page_table, SharedPageTable};
 use crate::proc::{Context, Scheduler};
 use crate::sync::{SpinMutex, SpinRwLock, SpinRwLockWriteGuard};
 use crate::trampoline::Trapframe;
 use crate::trap::user_trap_ret;
-use crate::{kalloc, symbol};
 
 use self::captbl::{Captbl, CaptblSlot, WeakCaptbl};
 use self::derivation::DerivationTreeNode;
@@ -608,16 +608,16 @@ impl<'a> fmt::Debug for RawCapDebugAdapter<'a> {
     }
 }
 
-static NEXT_ASID: AtomicU16 = AtomicU16::new(1);
+// static NEXT_ASID: AtomicU16 = AtomicU16::new(1);
 
-fn next_asid() -> u16 {
-    let v = NEXT_ASID.fetch_add(1, Ordering::Relaxed);
-    assert!(
-        core::intrinsics::likely(v != u16::MAX),
-        "oops! ran out of ASIDs"
-    );
-    v
-}
+// fn next_asid() -> u16 {
+//     let v = NEXT_ASID.fetch_add(1, Ordering::Relaxed);
+//     assert!(
+//         core::intrinsics::likely(v != u16::MAX),
+//         "oops! ran out of ASIDs"
+//     );
+//     v
+// }
 
 static NEXT_TID: AtomicU16 = AtomicU16::new(1);
 
@@ -690,14 +690,26 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
             .inner
             .state
             .store(ThreadState::Suspended, Ordering::Relaxed);
-        // TODO: notify the hart running the thread to stop its execution, or not?
         Scheduler::dequeue(
             self.meta.inner.hartid.load(Ordering::Relaxed),
             self.meta.inner.tid,
         );
     }
 
-    pub fn configure(&self, captbl: Captbl, pgtbl: SharedPageTable) {
+    /// Configure the captbl and page table of a thread.
+    ///
+    /// # Errors
+    ///
+    /// See [`Captr::<Thread>::configure`][1].
+    ///
+    /// [1]: rille::capability::Captr::<rille::capability::Thread>::configure
+    pub fn configure(&self, captbl: Captbl, pgtbl: SharedPageTable) -> CapResult<()> {
+        if self.meta.inner.state.load(Ordering::Relaxed) != ThreadState::Suspended
+            && self.meta.inner.state.load(Ordering::Relaxed) != ThreadState::Uninit
+        {
+            return Err(CapError::InvalidOperation);
+        }
+
         let mut private = self.meta.inner.private.write();
         private.captbl = Some(captbl);
         let old_pgtbl = private.root_pgtbl.replace(pgtbl);
@@ -712,8 +724,17 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
             .inner
             .state
             .store(ThreadState::Suspended, Ordering::Relaxed);
+
+        Ok(())
     }
 
+    /// Resume a thread.
+    ///
+    /// # Errors
+    ///
+    /// See [`Captr::<Thread>::resume`][1].
+    ///
+    /// [1]: rille::capability::Captr::<rille::capability::Thread>::resume
     pub fn resume(&self) -> CapResult<()> {
         let cont = {
             let private = self.meta.inner.private.read();
@@ -733,6 +754,14 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
         Ok(())
     }
 
+    /// Write the trapframe a thread.
+    ///
+    /// # Errors
+    ///
+    /// See [`Captr::<Thread>::write_regsters`][1].
+    ///
+    /// [1]: rille::capability::Captr::<rille::capability::Thread>::write_registers
+    ///
     pub fn write_registers(
         &self,
         registers: VirtualConst<UserRegisters, Identity>,
@@ -744,7 +773,12 @@ impl<'a> SlotRef<'a, Arc<Thread>> {
         }
 
         let private = self.meta.inner.private.read();
-        let Some((addr, flags)) = private.root_pgtbl.as_ref().unwrap().walk(registers) else {
+        let Some((addr, flags)) = private
+            .root_pgtbl
+            .as_ref()
+            .ok_or(CapError::InvalidOperation)?
+            .walk(registers)
+        else {
             return Err(CapError::InvalidOperation);
         };
         if !flags.contains(KernelFlags::USER) {
@@ -808,6 +842,7 @@ pub struct Thread {
 }
 
 impl Thread {
+    #[allow(clippy::missing_panics_doc)]
     pub fn new(
         name: String,
         captbl: Option<Captbl>,

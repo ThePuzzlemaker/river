@@ -2,20 +2,27 @@
 #![no_main]
 #![feature(panic_info_message)]
 
-use core::{
-    arch::{asm, global_asm},
-    fmt,
-};
+use core::{arch::global_asm, fmt};
 
-use fdt::{node::FdtNode, Fdt};
+//use fdt::{node::FdtNode, Fdt};
 use rille::{
-    addr::VirtualConst,
+    //addr::VirtualConst,
     capability::{
-        paging::{BasePage, Page, PageTable, PageTableFlags},
-        Allocator, Captr, RemoteCaptr, Thread,
+        paging::{
+            BasePage,
+            Page,
+            //PageTable, PageTableFlags
+        },
+        //Allocator,
+        Captr,
+        RemoteCaptr,
+        Thread,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls::{self, ecall1, SyscallNumber},
+    syscalls::{
+        self,
+        //ecall1, SyscallNumber
+    },
 };
 
 extern crate panic_handler;
@@ -63,32 +70,32 @@ done_clear_bss:
 "
 );
 
-fn print_node(node: FdtNode<'_, '_>, n_spaces: usize) {
-    (0..n_spaces).for_each(|_| print!(" "));
-    println!("{}/", node.name);
+// fn print_node(node: FdtNode<'_, '_>, n_spaces: usize) {
+//     (0..n_spaces).for_each(|_| print!(" "));
+//     println!("{}/", node.name);
 
-    for property in node.properties() {
-        (0..n_spaces + 4).for_each(|_| print!(" "));
+//     for property in node.properties() {
+//         (0..n_spaces + 4).for_each(|_| print!(" "));
 
-        if let Some(v) = property.as_usize() {
-            println!("{}={}", property.name, v);
-        } else if let Some(v) = property.as_str() {
-            if v.is_ascii() && v.chars().all(|x| !x.is_ascii_control()) {
-                println!("{}={:?}", property.name, v);
-            } else {
-                println!("{}=...", property.name);
-            }
-        } else {
-            println!("{}=...", property.name);
-        }
-    }
+//         if let Some(v) = property.as_usize() {
+//             println!("{}={}", property.name, v);
+//         } else if let Some(v) = property.as_str() {
+//             if v.is_ascii() && v.chars().all(|x| !x.is_ascii_control()) {
+//                 println!("{}={:?}", property.name, v);
+//             } else {
+//                 println!("{}=...", property.name);
+//             }
+//         } else {
+//             println!("{}=...", property.name);
+//         }
+//     }
 
-    for child in node.children() {
-        print_node(child, n_spaces + 4);
-    }
-}
+//     for child in node.children() {
+//         print_node(child, n_spaces + 4);
+//     }
+// }
 
-extern "C" fn thread_entry(thread: usize) -> ! {
+extern "C" fn thread_entry(_thread: Captr<Thread>) -> ! {
     let _caps = unsafe { InitCapabilities::new() };
     //let thread = unsafe { Captr::from_raw_unchecked(thread) };
     loop {
@@ -106,11 +113,11 @@ static THREAD_STACK: &[u8; 1024 * 1024] = &[0; 1024 * 1024];
 #[no_mangle]
 extern "C" fn entry(init_info: *const BootInfo) -> ! {
     let caps = unsafe { InitCapabilities::new() };
-    let init_info = unsafe { &*init_info };
+    let _init_info = unsafe { &*init_info };
 
     let root_captbl = RemoteCaptr::local(caps.captbl);
 
-    let pg: Captr<Page<BasePage>> = caps
+    let _pg: Captr<Page<BasePage>> = caps
         .allocator
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
         .unwrap();
@@ -120,14 +127,16 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65534) }, ())
         .unwrap();
     unsafe { thread.configure(Captr::null(), Captr::null()).unwrap() };
-    thread
-        .write_registers(&rille::capability::UserRegisters {
-            ra: thread_entry as usize as u64,
-            sp: THREAD_STACK.as_ptr().wrapping_add(1024 * 1024) as usize as u64,
-            a0: 65534,
-            ..Default::default()
-        })
-        .unwrap();
+    unsafe {
+        thread
+            .write_registers(&rille::capability::UserRegisters {
+                pc: thread_entry as usize as u64,
+                sp: THREAD_STACK.as_ptr().wrapping_add(1024 * 1024) as usize as u64,
+                a0: 65534,
+                ..Default::default()
+            })
+            .unwrap()
+    };
 
     // pg.map(
     //     caps.pgtbl,
@@ -150,7 +159,7 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     // let fdt = unsafe { Fdt::<'static>::from_ptr(init_info.fdt_ptr) }.unwrap();
     // print_node(fdt.find_node("/").unwrap(), 0);
 
-    thread.resume().unwrap();
+    unsafe { thread.resume().unwrap() }
 
     // thread.resume().unwrap();
 
@@ -163,70 +172,6 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     // }
 
     // unreachable!();
-
-    // let slot_2 = root_captbl
-    //     .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
-    //         Captr::from_raw_unchecked(2)
-    //     })
-    //     .unwrap();
-
-    // let _slot_3 = root_captbl
-    //     .copy_deep(root_captbl.local_index(), root_captbl, unsafe {
-    //         Captr::from_raw_unchecked(3)
-    //     })
-    //     .unwrap();
-
-    // let _slot_4 = root_captbl
-    //     .copy_deep(slot_2, root_captbl, unsafe { Captr::from_raw_unchecked(5) })
-    //     .unwrap();
-
-    // let mut total_order = ["root", "2", "3", "2a"];
-
-    // let mut rand = SmallRng::seed_from_u64(0xDEADBEEF);
-
-    // for i in 0..10_000 {
-    //     let n1 = (rand.next_u64() % 3 + 1) as usize;
-    //     let n2 = (rand.next_u64() % 3 + 1) as usize;
-    //     print!("\rRound {}: Swapping {} with {}", i + 1, n1, n2);
-    //     total_order.swap(n1 - 1, n2 - 1);
-    //     RemoteCaptr::remote(root_captbl.local_index(), unsafe {
-    //         Captr::<Captbl>::from_raw_unchecked(n1)
-    //     })
-    //     .swap(RemoteCaptr::remote(root_captbl.local_index(), unsafe {
-    //         Captr::<Captbl>::from_raw_unchecked(n2)
-    //     }))
-    //     .unwrap();
-    // }
-
-    // println!("\nTotal order: {:?}", total_order);
-    //    let untyped = unsafe { Captr::<Untyped>::from_raw_unchecked(4) };
-
-    // let page: PageCaptr<BasePage> = untyped
-    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(2) }, ())
-    //     .unwrap();
-
-    // let pg_l0: PgTblCaptr<GigaPage> = untyped
-    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(5) }, ())
-    //     .unwrap();
-    // let pg_l1: PgTblCaptr<MegaPage> = untyped
-    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(6) }, ())
-    //     .unwrap();
-    // let pg_l2: PgTblCaptr<BasePage> = untyped
-    //     .retype(root_captbl, unsafe { Captr::from_raw_unchecked(7) }, ())
-    //     .unwrap();
-
-    // page.map(pg_l2, Vpn::from(126u16), PageTableFlags::RW)
-    //     .unwrap();
-    // pg_l2
-    //     .map(pg_l1, Vpn::from(126u16), PageTableFlags::RW)
-    //     .unwrap();
-    // pg_l1
-    //     .map(pg_l0, Vpn::from(126u16), PageTableFlags::RW)
-    //     .unwrap();
-
-    loop {
-        unsafe { asm!("pause") };
-    }
 }
 
 struct DebugPrint;

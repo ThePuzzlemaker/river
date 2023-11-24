@@ -77,10 +77,10 @@ pub enum CapabilityType {
     Captbl = 1,
     /// The [`Allocator`] capability.
     Allocator = 2,
-    /// [`PageTable`][paging::PageTable]s.
+    /// [`PageTable`]s.
     PgTbl = 3,
     /// [`Page`][paging::Page]s that can be mapped into
-    /// [`PageTable`][paging::PageTable]s.
+    /// [`PageTable`]s.
     Page = 4,
     /// Threads (WIP in rille).
     /// TODO
@@ -485,7 +485,21 @@ impl Captr<Allocator> {
     ///
     /// # Errors
     ///
-    /// TODO
+    /// - This function will return [`CapError::NotPresent`] if any
+    /// required capability was not present.
+    ///
+    /// - This function will return [`CapError::InvalidType`] if any
+    /// capability was not of the correct type.
+    ///
+    /// - This function will return [`CapError::InvalidOperation`] if
+    /// the capability requested cannot be allocated.
+    ///
+    /// - This function will return [`CapError::NotEnoughResources`]
+    /// if the capability table or allocator did not have enough space
+    /// for the requested capabilities.
+    ///
+    /// - This function will return [`CapError::InvalidSize`] if
+    /// `size` was invalid.
     pub fn allocate_many<C: Capability>(
         self,
         into: RemoteCaptr<Captbl>,
@@ -586,6 +600,13 @@ impl<C: Capability> ExactSizeIterator for AllocateIter<C> {
     }
 }
 
+/// A capabiltiy representing a thread.
+///
+/// Threads must have a [page table][PageTable], but are not required
+/// to have a [capability table][Captbl]. A thread without a captbl
+/// has no ability to receive or hold capabilities.
+///
+/// See [`Captr<Thread>`] for operations on this capability.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Thread {}
 
@@ -600,14 +621,50 @@ impl Capability for Thread {
 }
 
 impl Captr<Thread> {
+    /// Suspend the thread referred to by this Captr.
+    ///
+    /// # Errors
+    ///
+    /// TODO
     pub fn suspend(&self) -> CapResult<()> {
         syscalls::thread::suspend(self.into_raw())
     }
 
-    pub fn resume(&self) -> CapResult<()> {
+    /// Resume the thread referred to by this captr.
+    ///
+    /// # Requirements
+    ///
+    /// - Threads must have a page table configured via
+    ///   [`Captr::<Thread>::configure`].
+    /// - The thread must be suspended.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    ///
+    /// # Safety
+    ///
+    /// When resumed, the thread must not cause undefined behaviour
+    /// with respect to the current thread.
+    pub unsafe fn resume(&self) -> CapResult<()> {
         syscalls::thread::resume(self.into_raw())
     }
 
+    /// Configure a thread's page table and capability table.
+    ///
+    /// # Requirements
+    ///
+    /// - The thread must be suspended.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    ///
+    /// # Safety
+    ///
+    /// The capabiltiy table and page table, when configured for the
+    /// thread, must not cause the thread to perform undefined
+    /// behaviour with respect to the running thread when resumed.
     pub unsafe fn configure(
         &self,
         captbl: Captr<Captbl>,
@@ -617,7 +674,22 @@ impl Captr<Thread> {
         unsafe { syscalls::thread::configure(self.into_raw(), captbl.into_raw(), pgtbl.into_raw()) }
     }
 
-    pub fn write_registers(&self, registers: &UserRegisters) -> CapResult<()> {
+    /// Write registers of a suspended thread.
+    ///
+    /// # Requirements
+    ///
+    /// - The thread must be suspended.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    ///
+    /// # Safety
+    ///
+    /// The registers, when written to the thread, must not cause the
+    /// thread to perform undefined behaviour with respect to the
+    /// running thread when resumed.
+    pub unsafe fn write_registers(&self, registers: &UserRegisters) -> CapResult<()> {
         syscalls::thread::write_registers(self.into_raw(), registers as *const _)
     }
 }
@@ -626,69 +698,39 @@ impl Captr<Thread> {
 #[derive(Copy, Clone, Debug, Default)]
 #[allow(missing_docs)]
 pub struct UserRegisters {
-    /*   0 */ pub ra: u64,
-    /*   8 */ pub sp: u64,
-    /*  16 */ pub gp: u64,
-    /*  24 */ pub tp: u64,
-    /*  32 */ pub t0: u64,
-    /*  40 */ pub t1: u64,
-    /*  48 */ pub t2: u64,
-    /*  56 */ pub s0: u64,
-    /*  64 */ pub s1: u64,
-    /*  72 */ pub a0: u64,
-    /*  80 */ pub a1: u64,
-    /*  88 */ pub a2: u64,
-    /*  96 */ pub a3: u64,
-    /* 104 */ pub a4: u64,
-    /* 112 */ pub a5: u64,
-    /* 120 */ pub a6: u64,
-    /* 128 */ pub a7: u64,
-    /* 136 */ pub s2: u64,
-    /* 144 */ pub s3: u64,
-    /* 152 */ pub s4: u64,
-    /* 160 */ pub s5: u64,
-    /* 168 */ pub s6: u64,
-    /* 176 */ pub s7: u64,
-    /* 184 */ pub s8: u64,
-    /* 192 */ pub s9: u64,
-    /* 200 */ pub s10: u64,
-    /* 208 */ pub s11: u64,
-    /* 216 */ pub t3: u64,
-    /* 224 */ pub t4: u64,
-    /* 232 */ pub t5: u64,
-    /* 240 */ pub t6: u64,
+    pub ra: u64,
+    pub sp: u64,
+    pub gp: u64,
+    pub tp: u64,
+    pub t0: u64,
+    pub t1: u64,
+    pub t2: u64,
+    pub s0: u64,
+    pub s1: u64,
+    pub a0: u64,
+    pub a1: u64,
+    pub a2: u64,
+    pub a3: u64,
+    pub a4: u64,
+    pub a5: u64,
+    pub a6: u64,
+    pub a7: u64,
+    pub s2: u64,
+    pub s3: u64,
+    pub s4: u64,
+    pub s5: u64,
+    pub s6: u64,
+    pub s7: u64,
+    pub s8: u64,
+    pub s9: u64,
+    pub s10: u64,
+    pub s11: u64,
+    pub t3: u64,
+    pub t4: u64,
+    pub t5: u64,
+    pub t6: u64,
+    pub pc: u64,
 }
-
-// fn captbl_alloc(captbl: Captr<Captbl>, n: usize) -> CapResult<Captr<Empty>> {
-//     todo!()
-// }
-
-// const ROOT_CAPTBL: Captr<Captbl> = unsafe { Captr::from_raw_unchecked(1) };
-
-// fn test(ut: Captr<Untyped>) -> CapResult<()> {
-//     use paging::{BasePage, GigaPage, MegaPage, Page, PageTableR, PageTableFlags};
-//     let free_nodes_start = captbl_alloc(ROOT_CAPTBL, 4)?;
-//     let mut iter = ut.retype_many(RemoteCaptr::local(ROOT_CAPTBL), free_nodes_start, 3, ())?;
-//     let pgtbl_l2: Captr<PageTable<BasePage>> = iter.next().unwrap().into();
-//     let pgtbl_l1: Captr<PageTable<MegaPage>> = iter.next().unwrap().into();
-//     let pgtbl_l0: Captr<PageTable<GigaPage>> = iter.next().unwrap();
-
-//     let page = ut.retype::<Page<BasePage>>(
-//         RemoteCaptr::local(ROOT_CAPTBL),
-//         free_nodes_start.offset(3),
-//         (),
-//     )?;
-
-//     page.map(
-//         pgtbl_l2,
-//         Vpn((0x10000usize >> 12) as u16),
-//         PageTableFlags::RW,
-//     )?;
-//     pgtbl_l2.map(pgtbl_l1, Vpn(0), PageTableFlags::RW)?;
-//     pgtbl_l1.map(pgtbl_l0, Vpn(0), PageTableFlags::RW)?;
-
-//     Ok(())
-// }
 
 /// An exclusive range of capability pointers.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]

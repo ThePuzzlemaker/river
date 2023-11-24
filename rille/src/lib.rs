@@ -39,6 +39,7 @@
 
 pub mod addr;
 pub mod capability;
+pub mod elf;
 pub mod init;
 pub mod io_traits;
 pub mod symbol;

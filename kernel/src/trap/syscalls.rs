@@ -18,7 +18,7 @@ use rille::{
 use crate::{
     capability::{
         captbl::Captbl, slotref::SlotRefMut, AllocatorSlot, AnyCap, CapToOwned, EmptySlot, Page,
-        PgTbl, Thread, ThreadProtected,
+        PgTbl, Thread,
     },
     kalloc::{self, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
@@ -341,25 +341,25 @@ pub fn sys_allocate_many(
         CapabilityType::Captbl => {
             for i in 0..count {
                 let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
-                perform_captbl_retype(size, slot)?;
+                perform_captbl_alloc(size, slot)?;
             }
         }
         CapabilityType::Page => {
             for i in 0..count {
                 let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
-                perform_page_retype(size, slot)?;
+                perform_page_alloc(size, slot)?;
             }
         }
         CapabilityType::PgTbl => {
             for i in 0..count {
                 let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
-                perform_pgtbl_retype(slot)?;
+                perform_pgtbl_alloc(slot)?;
             }
         }
         CapabilityType::Thread => {
             for i in 0..count {
                 let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
-                perform_thread_retype(slot)?;
+                perform_thread_alloc(slot)?;
             }
         }
 
@@ -369,10 +369,7 @@ pub fn sys_allocate_many(
     Ok(())
 }
 
-fn perform_captbl_retype(
-    n_slots_log2: u8,
-    slot: SlotRefMut<'_, EmptySlot>,
-) -> Result<(), CapError> {
+fn perform_captbl_alloc(n_slots_log2: u8, slot: SlotRefMut<'_, EmptySlot>) -> Result<(), CapError> {
     let size_bytes_log2 = n_slots_log2 + 6;
     if !(12..=64).contains(&size_bytes_log2) {
         return Err(CapError::InvalidSize);
@@ -397,7 +394,7 @@ fn perform_captbl_retype(
     Ok(())
 }
 
-fn perform_page_retype(size_log2: u8, slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
+fn perform_page_alloc(size_log2: u8, slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
     if ![
         BasePage::PAGE_SIZE_LOG2 as u8,
         MegaPage::PAGE_SIZE_LOG2 as u8,
@@ -428,7 +425,7 @@ fn perform_page_retype(size_log2: u8, slot: SlotRefMut<'_, EmptySlot>) -> CapRes
     Ok(())
 }
 
-fn perform_pgtbl_retype(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
+fn perform_pgtbl_alloc(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
     use crate::paging::PageTableFlags as KernelFlags;
 
     // SAFETY: The page is zeroed and thus is well-defined and valid.
@@ -452,7 +449,7 @@ fn perform_pgtbl_retype(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
     Ok(())
 }
 
-fn perform_thread_retype(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
+fn perform_thread_alloc(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
     let thread = Thread::new(String::new(), None, None);
 
     let _ = slot.replace(thread);
@@ -545,7 +542,7 @@ pub fn sys_thread_configure(
         root_hdr.get::<PgTbl>(pgtbl)?.table().clone()
     };
 
-    thread_cap.configure(captbl, pgtbl);
+    thread_cap.configure(captbl, pgtbl)?;
 
     Ok(())
 }

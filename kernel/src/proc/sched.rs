@@ -84,6 +84,7 @@ impl Scheduler {
                         let (pid, proc) = wait_queue.remove_entry(&entry.tid).unwrap();
                         scheduler.run_queue.insert(pid, Arc::clone(&proc));
                         scheduler.procs.push_back(pid);
+                        proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
                         (pid, proc)
                     } else {
                         continue 'outer;

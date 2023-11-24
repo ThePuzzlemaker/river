@@ -21,7 +21,7 @@ use core::mem;
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use rille::io_traits::{Read, Seek, SeekFrom};
+use crate::io_traits::{Read, Seek, SeekFrom};
 
 use self::raw::FileIdent;
 
@@ -32,9 +32,12 @@ use self::raw::FileIdent;
 /// `e_machine`.
 pub const MACHINE_TYPE_RISCV: u16 = 243;
 
+/// An ELF file.
 #[derive(Debug)]
 pub struct Elf {
+    /// What type of ELF file is this?
     pub filety: FileType,
+    /// What is the entry address of this ELF file?
     pub entry_addr: usize,
     sec_hdr_offset: usize,
     sec_hdr_count: u16,
@@ -48,7 +51,8 @@ pub mod raw;
 impl Elf {
     /// # Errors
     ///
-    /// TODO
+    /// This will return an error if any read or seek operation
+    /// failed, or if the header was invalid.
     pub fn parse_header<R: Read + Seek>(reader: &mut R) -> Result<Self, ParseError> {
         let mut elf = Self {
             filety: FileType::None,
@@ -98,11 +102,13 @@ impl Elf {
         Ok(elf)
     }
 
-    /// TODO
+    /// Parse sections into an iterator.
     ///
     /// # Errors
     ///
-    /// TODO
+    /// This function will return an error if any read or seek
+    /// operation failed. The inner iterator will contain an error if
+    /// parsing a section header failed.
     pub fn parse_sections<'r, R: Read + Seek>(
         &mut self,
         reader: &'r mut R,
@@ -114,11 +120,13 @@ impl Elf {
         Ok((0..self.sec_hdr_count).map(|_| Section::parse(reader)))
     }
 
-    /// TODO
+    /// Parse segments into an iterator.
     ///
     /// # Errors
     ///
-    /// TODO
+    /// This function will return an error if any read or seek
+    /// operation failed. The inner iterator will contain an error if
+    /// parsing a program header failed.
     pub fn parse_segments<'r, R: Read + Seek>(
         &mut self,
         reader: &'r mut R,
@@ -131,39 +139,60 @@ impl Elf {
     }
 }
 
+/// What type of ELF file is this?
 #[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u16)]
 pub enum FileType {
+    /// Unknown file type.
     None = 0,
+    /// Relocatable file.
     Rel = 1,
+    /// Executable file.
     Exec = 2,
+    /// Shared object.
     Dyn = 3,
+    /// Core dump file.
     Core = 4,
 }
 
+/// A struct representing a parse error. At the moment, this has no
+/// information on what error occured.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ParseError;
 
+/// An ELF section.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Section {
     name_offset: u32,
+    /// What type of section is this?
     pub sec_type: SectionType,
+    /// Flags relating to this section.
     pub flags: SectionFlags,
+    /// The virtual address of this section.
     pub virt_addr: usize,
+    /// The offset of this section into the file.
     pub offset: usize,
+    /// The size of this section in bytes.
     pub size: usize,
+    /// The alignment of this section. Zero and one both refer to no
+    /// alignment.
     pub addr_align: usize,
+    /// For fixed-size entry tables, this contains the size in bytes
+    /// of each entry.
     pub ent_size: usize,
+    /// The interpretation of `info` depends on the section type.
     pub info: u32,
+    /// The interpretation of `link` depends on the section type.
     pub link: u32,
 }
 
 impl Section {
-    /// TODO
+    /// Try to parse a section.
     ///
     /// # Errors
     ///
-    /// TODO
+    /// This function will return an error if any read or seek
+    /// operation failed, or if the section header was invalid.
     pub fn parse<R: Read + Seek>(reader: &mut R) -> Result<Self, ParseError> {
         let mut sec = Section {
             name_offset: 0,
@@ -205,46 +234,78 @@ impl Section {
     }
 }
 
+/// What type of section is this?
 #[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 pub enum SectionType {
+    /// Inactive.
     Null = 0,
+    /// Program data; the interpretation depends on the type of file.
     ProgBits = 1,
+    /// Symbol table.
     SymTab = 2,
+    /// String table.
     StrTab = 3,
+    /// Relocation entries.
     Rela = 4,
+    /// Symbol hash table for dynamic linking.
     Hash = 5,
+    /// Information for dynamic linking.
     Dynamic = 6,
+    /// Notes.
     Note = 7,
+    /// Occupies no space in the file, but is otherwise equivalent to
+    /// [`Self::ProgBits`].
     NoBits = 8,
+    /// Relocation offsets.
     Rel = 9,
+    /// Reserved.
     ShLib = 10,
+    /// Dynamic linking symbols.
     DynSym = 11,
+    /// Attributes of RISC-V ELF files
     RVAttributes = 0x7000_0003,
 }
 
 // rustfmt keeps messing this up idk why
 #[rustfmt::skip]
 bitflags! {
+    /// Section flags.
     #[repr(C)]
     pub struct SectionFlags: u64 {
+	/// Writable at runtime.
 	const WRITE = 1;
+	/// Occupies memory during runtime.
 	const ALLOC = 2;
+	/// Contains executable instructions.
 	const EXEC_INSTR = 4;
+	/// All bits in this mask are reserved for OS-specific
+	/// semantics.
 	const MASK_OS = 0x0F00_0000;
+	/// All bits in this mask are reserved for processor-specific
+	/// semantics.
 	const MASK_PROC = 0xF000_0000;
     }
 }
 
+/// What type of segment is this?
 #[derive(Copy, Clone, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 pub enum SegmentType {
+    /// Undefined.
     Null = 0,
+    /// Loadable segment, mapped into memory.
     Load = 1,
+    /// Dynamic linking information.
     Dynamic = 2,
+    /// Specifies the location and size to a null-terminated path of a
+    /// dynamic interpreter.
     Interp = 3,
+    /// Specifies the location of notes.
     Note = 4,
+    /// Reserved.
     Shlib = 5,
+    /// Specifies the location and size of the program header table.
     Phdr = 6,
     /// "Last PT_GNU_STACK program header defines userspace stack
     /// executability (since Linux 2.6.6). Other PT_GNU_STACK headers
@@ -253,38 +314,60 @@ pub enum SegmentType {
     ///
     /// [1]: https://docs.kernel.org/next/userspace-api/ELF.html
     GNUStack = 0x6474_E551,
+    /// Attributes of RISC-V ELF files
     RVAttributes = 0x7000_0003,
 }
 
 #[rustfmt::skip]
 bitflags! {
+    /// Flags for segments.
     #[repr(C)]
     pub struct SegmentFlags: u32 {
+	/// Executable
 	const EXEC = 1;
+	/// Writable
 	const WRITE = 2;
+	/// Readable
 	const READ = 4;
+	/// All bits in this mask are reserved for OS-specific
+	/// semantics.
 	const MASK_OS = 0x00FF_0000;
+	/// All bits in this mask are reserved for processor-specific
+	/// semantics.
 	const MASK_PROC = 0xFF00_0000;
     }
 }
 
+/// An ELF segment, representing a runtime memory region.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Segment {
+    /// What type of segment is this?
     pub seg_type: SegmentType,
+    /// Flags related to segments, typically a subset of the typical
+    /// RWX.
     pub flags: SegmentFlags,
+    /// Offset of this segment in the file.
     pub offset: usize,
+    /// Virtual address of this segment.
     pub virt_addr: usize,
+    /// Size of this segment in the file.
     pub file_size: usize,
+    /// Size of this segment at runtime. The difference, if any,
+    /// between `mem_size` and [`Self::file_size`] is filled with
+    /// zeroes.
     pub mem_size: usize,
+    /// Alignment of this segment. Zero and one are both equivalent to
+    /// no alignment constraints.
     pub align: usize,
 }
 
 impl Segment {
-    /// TODO
+    /// Parse a segment.
     ///
     /// # Errors
     ///
-    /// TODO
+    /// This function will return an error if any read or seek
+    /// operation failed, or if the segment headere was invalid.
     pub fn parse<R: Read + Seek>(reader: &mut R) -> Result<Self, ParseError> {
         let mut seg = Segment {
             seg_type: SegmentType::Null,

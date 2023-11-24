@@ -1,5 +1,10 @@
+//! Raw representation of some ELF structs, as `#[repr(C)]`
+//! structures.
+
+/// ELF file header. Equivalent to `Elf64_EHdr` in `elf.h`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
+#[allow(missing_docs)]
 pub struct FileHdr {
     pub ident: FileIdent,
     pub filety: u16,
@@ -17,8 +22,11 @@ pub struct FileHdr {
     pub sec_strtab_index: u16,
 }
 
+/// ELF file identifier. Equivalent to `e_ident` in `Elf64_EHdr` in
+/// `elf.h`
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C, align(16))]
+#[allow(missing_docs)]
 pub struct FileIdent {
     pub magic: [u8; 4],
     pub class: u8,
@@ -28,16 +36,25 @@ pub struct FileIdent {
     pub abi_version: u8,
 }
 
+/// Magic number (`b"\x7FELF"`).
 pub const MAGIC: [u8; 4] = *b"\x7fELF";
+/// 64-bit files.
 pub const ELFCLASS64: u8 = 2;
+/// Two's complement, little-endian.
 pub const ELFDATA2LSB: u8 = 1;
+/// System-V ABI.
 pub const ELFOSABI_SYSV: u8 = 0;
+/// Current ELF version.
 pub const EV_CURRENT: u32 = 1;
+/// RISC-V architecture.
 pub const EM_RISCV: u16 = 243;
+/// Undefined section header
 pub const SH_UNDEF: u16 = 0;
 
+/// Section header. Equivalent to `Elf64_Shdr` in `elf.h`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
+#[allow(missing_docs)]
 pub struct SectionHdr {
     pub name_offset: u32,
     pub sec_type: u32,
@@ -51,8 +68,10 @@ pub struct SectionHdr {
     pub entry_size: usize,
 }
 
+/// Program header. Equivalent to `Elf64_Phdr` in `elf.h`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
+#[allow(missing_docs)]
 pub struct ProgramHdr {
     pub seg_type: u32,
     pub flags: u32,

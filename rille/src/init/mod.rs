@@ -1,24 +1,23 @@
-// TODO
-#![allow(missing_docs)]
 //! This module provides some structures and utilities for
 //! initialization. Some of this module is opinionated; the rest is
 //! simply the information the kernel provides to the init process.
 
-use crate::{
-    addr::{Identity, PhysicalMut},
-    capability::{
-        paging::{BasePage, Page, PageCaptr, PageTable},
-        Allocator, //Untyped,
-        Captbl,
-        Captr,
-        CaptrRange,
-        Empty,
-    },
+use crate::capability::{
+    paging::{BasePage, Page, PageCaptr, PageTable},
+    Allocator, //Untyped,
+    Captbl,
+    Captr,
+    CaptrRange,
+    Empty,
+    Thread,
 };
 
+/// Information provided to the initial process.
 #[derive(Debug)]
 #[repr(C)]
 pub struct BootInfo {
+    /// The size of the initial process's captbl, in number of slots
+    /// log2.
     pub captbl_size_log2: u8,
     /// Pages of the initial userspace process memory, ordered by
     /// virtual address.
@@ -29,23 +28,19 @@ pub struct BootInfo {
     pub free_slots: CaptrRange<Empty>,
     /// Pointer to the FDT
     pub fdt_ptr: *const u8,
-    // pub untyped_caps: CaptrRange<Untyped>,
-    // untyped_desc: [UntypedDescription; 0],
 }
 
-#[repr(C, align(8))]
-#[derive(Debug)]
-pub struct UntypedDescription {
-    pub phys_addr: PhysicalMut<u8, Identity>,
-    pub size_log2: u8,
-}
-
+/// Fixed-offset capabilities provided to the initial process.
 pub struct InitCapabilities {
+    /// The initial process's captbl.
     pub captbl: Captr<Captbl>,
+    /// The initial process's page table.
     pub pgtbl: Captr<PageTable>,
-    // TODO
-    pub thread: usize,
+    /// The initial process's thread capability.
+    pub thread: Captr<Thread>,
+    /// The kernel allocator.
     pub allocator: Captr<Allocator>,
+    /// The page backing the [`BootInfo`] passed to the init proces.
     pub bootinfo_page: PageCaptr<BasePage>,
 }
 
@@ -60,7 +55,7 @@ impl InitCapabilities {
         Self {
             captbl: Captr::from_raw_unchecked(1),
             pgtbl: Captr::from_raw_unchecked(2),
-            thread: 3,
+            thread: Captr::from_raw_unchecked(3),
             allocator: Captr::from_raw_unchecked(4),
             bootinfo_page: Captr::from_raw_unchecked(5),
         }
