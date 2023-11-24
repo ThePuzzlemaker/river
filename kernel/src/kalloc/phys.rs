@@ -73,8 +73,9 @@ impl PMAlloc {
         pma.init = true;
         pma.base = base;
         pma.max_order = calc_max_order(size);
+        let bitree_n_pages = calc_bitree_pages(pma.max_order);
         pma.bitree = Bitree {
-            base: base.cast(),
+            base: base.add(size).sub(bitree_n_pages * 4096).cast(),
             n_bits: calc_bitree_bits(pma.max_order),
             max_order: pma.max_order,
         };
@@ -82,7 +83,14 @@ impl PMAlloc {
         pma.size = size;
         for page_idx in 0..bitree_n_pages {
             // SAFETY: Our caller guarantees that that this area is safe to modify.
-            unsafe { pma.mark_used(base.cast().add(4096 * page_idx), 0) };
+            unsafe {
+                pma.mark_used(
+                    base.add(size)
+                        .sub(bitree_n_pages * 4096)
+                        .add(4096 * page_idx),
+                    0,
+                );
+            }
         }
     }
 }
@@ -134,6 +142,8 @@ impl PMAllocInner {
         // Set the bit of this order and all above
         self.bitree.set(ix, true);
         self.set_above(ix);
+        // Set below, also.
+        self.set_below(ix, true);
     }
 
     fn set_above(&mut self, ix: usize) {

@@ -162,6 +162,30 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
         Self::try_from_usize(paddr)
     }
 
+    /// Decrement an address `by` bytes.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the resulting address is outside of the
+    /// [`Mapping`]'s range.
+    #[allow(clippy::should_implement_trait)]
+    #[track_caller]
+    #[must_use]
+    pub fn sub(self, by: usize) -> Self {
+        match self.checked_sub(by) {
+            Some(paddr) => paddr,
+            None => panic!("Physical::sub out of range: self={:#p}, by={:#x}", self, by),
+        }
+    }
+
+    /// Decrement an address `by` bytes, returning [`None`] if the
+    /// resulting address is outside of the [`Mapping`]'s range.
+    pub fn checked_sub(self, by: usize) -> Option<Self> {
+        let paddr = self.into_usize();
+        let paddr = paddr.checked_sub(by)?;
+        Self::try_from_usize(paddr)
+    }
+
     /// Convert this address into a [`Virtual`] address using its [`Mapping`].
     ///
     /// # Panics

@@ -97,33 +97,33 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
     let start = memory_region.starting_address as usize;
     let size = memory_region.size.unwrap();
 
+    // Fixup size: make it a pow of 2
+    let size = 1 << size.ilog2();
+
     let kernel_end_ptr = kernel_end as *mut u8;
 
     let pma_start = if fdt_ptr >= kernel_end_ptr {
         // round up to nearest multiple of 4096
         let ptr = fdt_ptr as usize + fdt.total_size();
-        round_up_pow2(ptr, 4096) as *mut u8
+        round_up_pow2(ptr, 4096)
     } else {
-        round_up_pow2(kernel_end_ptr as usize, 4096) as *mut u8
+        round_up_pow2(kernel_end_ptr as usize, 4096)
     };
-
-    // fixup size
-    let size = size - (pma_start as usize - start);
-    let size = size - (size % 4096);
-    let size = size.next_power_of_two() >> 1;
 
     // Initialize the allocator starting at the end of the kernel, and
     // ending at the end of physical memory.
     //
     // SAFETY: pma_start is known to be non-zero and aligned (our
-    // kernel cannot be loaded at 0x0).
-    //
-    // N.B.: This is a bit wasteful. But PMAlloc makes some
-    // assumptions about how the memory is laid out and assumes it can
-    // clobber a bunch of pages at the start for its bitree.
-    //
-    // TODO: make this better in the future?
-    unsafe { PMAlloc::init(PhysicalMut::from_ptr(pma_start), size) }
+    // kernel cannot be loaded at 0x0). We also know the end of phymem
+    // can be used to hold the bitree.
+    unsafe { PMAlloc::init(PhysicalMut::from_usize(start), size) }
+
+    for addr in (start..pma_start).step_by(4096) {
+        let addr: PhysicalMut<_, DirectMapped> = PhysicalMut::from_usize(addr);
+        // SAFETY: This memory is actually used.
+        unsafe { PMAlloc::get().mark_used(addr, 0) };
+    }
+
     // SAFETY: Hart-local data has not been initialized at all as of
     // yet.
     unsafe { hart_local::init() }
