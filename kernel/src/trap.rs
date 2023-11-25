@@ -354,6 +354,14 @@ unsafe extern "C" fn user_trap() -> ! {
                         }
                     };
 
+                    let x = notification.word().swap(0, Ordering::AcqRel);
+                    if x != 0 {
+                        trapframe.a0 = CapError::NoError.into();
+                        trapframe.a1 = x;
+
+                        break 'syscall;
+                    }
+
                     let ptr = Arc::as_ptr(notification.word());
                     atomic::fence(Ordering::Release);
                     proc.state.store(ThreadState::Blocking, Ordering::Relaxed);
@@ -411,11 +419,6 @@ unsafe extern "C" fn user_trap() -> ! {
                     Thread::yield_to_scheduler();
                 }
             }
-
-            // println!(
-            //     "user trap! a0={} epc={:#x}",
-            //     trapframe.a0, trapframe.user_epc
-            // );
         } else {
             let kind = device_interrupt(scause);
             assert!(

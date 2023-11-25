@@ -1050,19 +1050,20 @@ impl Thread {
     /// # Panics
     ///
     /// TODO
-    pub unsafe fn yield_to_scheduler_final(mut self: Arc<Thread>) {
+    pub unsafe fn yield_to_scheduler_final(self: Arc<Thread>) {
         LOCAL_HART.with(|hart| {
             let intena = hart.intena.get();
 
-            let this = Arc::get_mut(&mut self).unwrap();
-            let ctx = mem::replace(
-                &mut this.context,
-                SpinMutex::new(Context {
+            let mut ctx_lock = self.context.lock();
+            let ctx = SpinMutex::new(mem::replace(
+                &mut *ctx_lock,
+                Context {
                     ra: user_trap_ret as usize as u64,
-                    sp: this.stack.inner.into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64,
+                    sp: self.stack.inner.into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64,
                     ..Context::default()
-                }),
-            );
+                },
+            ));
+            drop(ctx_lock);
             drop(self);
             {
                 // SAFETY: The scheduler context is always valid, as

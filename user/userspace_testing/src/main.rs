@@ -61,6 +61,7 @@ done_clear_bss:
 
 extern "C" fn thread_entry(_thread: Captr<Thread>) -> ! {
     let caps = unsafe { InitCapabilities::new() };
+    _thread.suspend().unwrap();
     // caps.thread.suspend().unwrap();
     // RemoteCaptr::remote(caps.captbl, caps.thread)
     //     .delete()
@@ -69,7 +70,7 @@ extern "C" fn thread_entry(_thread: Captr<Thread>) -> ! {
 
     // syscalls::debug::debug_cap_slot(caps.captbl.into_raw(), caps.thread.into_raw()).unwrap();
 
-    println!("\nthread 2 waiting to recv");
+    println!("thread 2 waiting to recv");
     println!("{:#x?}", unsafe {
         ecall1(SyscallNumber::NotificationWait, 65533)
     });
@@ -155,6 +156,8 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
 
     unsafe { ecall1(SyscallNumber::NotificationSignal, 65532) };
     println!("\nthread 1 sent!");
+
+    unsafe { thread.resume().unwrap() }
 
     loop {
         // print!("\rthread 1!");
