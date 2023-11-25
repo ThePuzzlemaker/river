@@ -60,7 +60,7 @@ pub struct CapabilitySlotInner {
 }
 
 #[repr(u8)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum CapabilityKind {
     Empty = CapabilityType::Empty as u8,
     Captbl(WeakCaptbl) = CapabilityType::Captbl as u8,
@@ -69,6 +69,20 @@ pub enum CapabilityKind {
     Page(Page) = CapabilityType::Page as u8,
     Thread(Arc<Thread>) = CapabilityType::Thread as u8,
     Notification(Arc<AtomicU64>) = CapabilityType::Notification as u8,
+}
+
+impl fmt::Debug for CapabilityKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "Empty"),
+            Self::Captbl(captbl) => f.debug_tuple("Captbl").field(captbl).finish(),
+            Self::Allocator => write!(f, "Allocator"),
+            Self::PgTbl(pgtbl) => f.debug_tuple("PgTbl").field(pgtbl).finish(),
+            Self::Page(page) => f.debug_tuple("Page").field(page).finish(),
+            Self::Thread(thread) => write!(f, "Thread(<opaque:{:#p}>", Arc::as_ptr(thread)),
+            Self::Notification(notif) => f.debug_tuple("Notification").field(notif).finish(),
+        }
+    }
 }
 
 impl CapabilityKind {
