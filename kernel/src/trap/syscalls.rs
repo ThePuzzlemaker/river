@@ -265,8 +265,6 @@ pub fn sys_grant(
     let mut into = into.replace(from.to_owned_cap());
     into.set_badge(badge);
     into.set_rights(rights);
-    crate::info!("granted!");
-    crate::info!("{:#?}", into);
 
     Ok(())
 }
