@@ -8,10 +8,10 @@ use rille::{
     addr::VirtualConst,
     capability::{
         paging::{BasePage, Page, PageTableFlags},
-        Captr, RemoteCaptr, Thread,
+        CapRights, Captr, Notification, RemoteCaptr, Thread,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls::{self},
+    syscalls::{self, ecall1, ecall6, SyscallNumber},
 };
 
 extern crate panic_handler;
@@ -61,13 +61,18 @@ done_clear_bss:
 
 extern "C" fn thread_entry(_thread: Captr<Thread>) -> ! {
     let caps = unsafe { InitCapabilities::new() };
-    caps.thread.suspend().unwrap();
-    RemoteCaptr::remote(caps.captbl, caps.thread)
-        .delete()
-        .unwrap();
-    syscalls::debug::debug_dump_root();
+    // caps.thread.suspend().unwrap();
+    // RemoteCaptr::remote(caps.captbl, caps.thread)
+    //     .delete()
+    //     .unwrap();
+    // syscalls::debug::debug_dump_root();
 
-    syscalls::debug::debug_cap_slot(caps.captbl.into_raw(), caps.thread.into_raw()).unwrap();
+    // syscalls::debug::debug_cap_slot(caps.captbl.into_raw(), caps.thread.into_raw()).unwrap();
+
+    println!("\nthread 2 waiting to recv");
+    println!("{:#x?}", unsafe {
+        ecall1(SyscallNumber::NotificationWait, 65533)
+    });
     loop {
         unsafe {
             core::arch::asm!("nop");
@@ -95,16 +100,38 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
         .unwrap();
 
-    pg.map(
-        caps.pgtbl,
-        VirtualConst::from_usize(0xDEAD0000),
-        PageTableFlags::RW,
-    )
-    .unwrap();
+    let notif: Captr<Notification> = caps
+        .allocator
+        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65533) }, ())
+        .unwrap();
 
     unsafe {
-        core::ptr::write_volatile(0xdead0000 as *mut u64, 0xc0ded00d);
+        ecall6(
+            SyscallNumber::Grant,
+            caps.captbl.into_raw() as u64,
+            notif.into_raw() as u64,
+            caps.captbl.into_raw() as u64,
+            65532,
+            CapRights::READ.bits(),
+            0xDEADBEEF,
+        )
+        .unwrap();
     }
+
+    syscalls::debug::debug_cap_slot(root_captbl.local_index().into_raw(), 65533).unwrap();
+    syscalls::debug::debug_cap_slot(root_captbl.local_index().into_raw(), 65532).unwrap();
+
+    // unsafe { Captr::<Page<BasePage>>::from_raw_unchecked(65533) }
+    //     .map(
+    //         caps.pgtbl,
+    //         VirtualConst::from_usize(0xDEAD0000),
+    //         PageTableFlags::RW,
+    //     )
+    //     .unwrap();
+
+    // unsafe {
+    //     core::ptr::write_volatile(0xdead0000 as *mut u64, 0xc0ded00d);
+    // }
 
     unsafe { thread.configure(Captr::null(), Captr::null()).unwrap() };
     unsafe {
@@ -121,6 +148,13 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     syscalls::debug::debug_dump_root();
 
     unsafe { thread.resume().unwrap() }
+
+    for i in 0..100_000 {
+        print!("\rthread 1 waiting to send");
+    }
+
+    unsafe { ecall1(SyscallNumber::NotificationSignal, 65532) };
+    println!("\nthread 1 sent!");
 
     loop {
         // print!("\rthread 1!");

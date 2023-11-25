@@ -80,12 +80,28 @@ impl Scheduler {
 
                     let v = (asm::read_time() as usize * 717) % wait_queue.len();
                     if let Some(entry) = wait_queue.values().nth(v).cloned() {
-                        crate::info!("adopting thread with tid={} from the wait queue", entry.tid);
-                        let (pid, proc) = wait_queue.remove_entry(&entry.tid).unwrap();
-                        scheduler.run_queue.insert(pid, Arc::clone(&proc));
-                        scheduler.procs.push_back(pid);
-                        proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
-                        (pid, proc)
+                        if entry
+                            .state
+                            .compare_exchange(
+                                ThreadState::Runnable,
+                                ThreadState::Running,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            // crate::info!(
+                            //     "adopting thread with tid={} from the wait queue",
+                            //     entry.tid
+                            // );
+                            let (pid, proc) = wait_queue.remove_entry(&entry.tid).unwrap();
+                            scheduler.run_queue.insert(pid, Arc::clone(&proc));
+                            scheduler.procs.push_back(pid);
+                            proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                            (pid, proc)
+                        } else {
+                            continue 'outer;
+                        }
                     } else {
                         continue 'outer;
                     }
@@ -191,7 +207,6 @@ impl Scheduler {
                 .as_ref()
                 .cloned()
                 .expect("Scheduler::current_proc_wait: no process");
-            proc.state.store(ThreadState::Suspended, Ordering::Release);
             let pid = proc.tid;
 
             sched.run_queue.remove(&pid);
@@ -201,5 +216,20 @@ impl Scheduler {
             let mut wait_queue = SCHED.wait_queue.lock();
             wait_queue.insert(pid, proc);
         });
+    }
+
+    pub fn wake_up_on(channel: u64) {
+        let wait_queue = SCHED.wait_queue.lock();
+
+        for thread in wait_queue.values() {
+            if thread
+                .waiting_on
+                .compare_exchange(channel, 0, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                thread.state.store(ThreadState::Runnable, Ordering::Release);
+                break;
+            }
+        }
     }
 }

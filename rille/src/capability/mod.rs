@@ -85,9 +85,8 @@ pub enum CapabilityType {
     /// Threads (WIP in rille).
     /// TODO
     Thread = 5,
-    /// Any capability type `>=32` is undefined, as the `cap_type`
-    /// field in all capability slots only occupies 5 bits (`0` to
-    /// `31`).
+    Notification = 6,
+    /// Any capability type `>=32` is undefined.
     #[num_enum(default)]
     Unknown = 32,
 }
@@ -339,6 +338,11 @@ impl Capability for Empty {
 /// The allocator capability corresponds to the privilege to allocate
 /// kernel memory for many purposes; for example, [virtual memory
 /// pages][paging::Page] and [capability tables][Captbl].
+///
+/// While this capabiltiy represents the ability to allocate large
+/// chunks of kernel memory, small allocations happen in the kernel
+/// with other operations. For this reason, river does not have as
+/// strong memory exhaustion guarantees as something like seL4.
 ///
 /// For more information on allocation, see [`Captr<Allocator>::allocate`].
 #[derive(Copy, Clone, Debug)]
@@ -694,6 +698,19 @@ impl Captr<Thread> {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Notification {}
+
+impl Capability for Notification {
+    type AllocateSizeSpec = ();
+
+    fn allocate_size_spec((): Self::AllocateSizeSpec) -> usize {
+        0
+    }
+
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Notification;
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 #[allow(missing_docs)]
@@ -757,6 +774,19 @@ bitflags::bitflags! {
     }
 }
 
+impl Default for CapRights {
+    /// All rights.
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl From<u64> for CapRights {
+    fn from(x: u64) -> Self {
+        CapRights::from_bits_truncate(x)
+    }
+}
+
 impl CapRights {
     pub fn into_pgtbl_mask(self) -> PageTableFlags {
         let mut x = PageTableFlags::empty();
@@ -778,7 +808,7 @@ impl CapRights {
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Allocator, Captbl, Empty, Thread,
+        Allocator, Captbl, Empty, Notification, Thread,
     };
 
     pub trait Sealed {}
@@ -791,6 +821,7 @@ mod private {
     impl Sealed for Empty {}
     impl Sealed for Allocator {}
     impl Sealed for Thread {}
+    impl Sealed for Notification {}
 }
 
 // These impls are just so Capability doesn't have to impl all these

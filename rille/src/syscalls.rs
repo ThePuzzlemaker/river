@@ -28,6 +28,9 @@ pub enum SyscallNumber {
     ThreadResume = 9,
     /// [`Captr::<Thread>::write_registers`][crate::capability::Captr::<Thread>::write_registers]
     ThreadWriteRegisters = 10,
+    Grant = 11,
+    NotificationWait = 12,
+    NotificationSignal = 13,
     /// Print the debug representation of a capability to the kernel
     /// console.
     DebugCapSlot = 0xFFFF_0000,

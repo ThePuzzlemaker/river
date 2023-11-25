@@ -3,6 +3,7 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU16, AtomicU64};
 use core::{fmt, mem, ptr};
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use atomic::{Atomic, Ordering};
@@ -42,6 +43,7 @@ pub union RawCapability {
     pub pgtbl: ManuallyDrop<PgTblSlot>,
     pub page: PageSlot,
     pub thread: ManuallyDrop<ThreadSlot>,
+    pub notification: ManuallyDrop<NotificationSlot>,
     raw: [u8; 16],
 }
 
@@ -219,6 +221,7 @@ pub enum AnyCap {
     Page(Page),
     PgTbl(PgTblSlot),
     Thread(ThreadSlot),
+    Notification(NotificationSlot),
     // TODO
 }
 
@@ -231,6 +234,7 @@ impl AnyCap {
             AnyCap::Page(_) => CapabilityType::Page,
             AnyCap::PgTbl(_) => CapabilityType::PgTbl,
             AnyCap::Thread(_) => CapabilityType::Thread,
+            AnyCap::Notification(_) => CapabilityType::Notification,
         }
     }
 }
@@ -251,7 +255,10 @@ impl Capability for AnyCap {
             CapabilityType::PgTbl => AnyCap::PgTbl(PgTbl::metadata_from_slot(slot)),
             CapabilityType::Page => AnyCap::Page(Page::metadata_from_slot(slot)),
             CapabilityType::Thread => AnyCap::Thread(Arc::<Thread>::metadata_from_slot(slot)),
-            CapabilityType::Unknown => todo!(),
+            CapabilityType::Notification => {
+                AnyCap::Notification(NotificationSlot::metadata_from_slot(slot))
+            }
+            CapabilityType::Unknown => unreachable!(),
         }
     }
 
@@ -267,6 +274,7 @@ impl Capability for AnyCap {
             AnyCap::Page(page) => Page::metadata_to_slot(page),
             AnyCap::PgTbl(pgtbl) => PgTbl::metadata_to_slot(pgtbl),
             AnyCap::Thread(thread) => Arc::<Thread>::metadata_to_slot(thread),
+            AnyCap::Notification(notification) => NotificationSlot::metadata_to_slot(notification),
         }
     }
 
@@ -284,6 +292,9 @@ impl Capability for AnyCap {
                 AnyCap::Page(pg) => Page::do_delete(pg, slot),
                 AnyCap::PgTbl(pgtbl) => PgTbl::do_delete(pgtbl, slot),
                 AnyCap::Thread(thread) => Arc::<Thread>::do_delete(thread, slot),
+                AnyCap::Notification(notification) => {
+                    NotificationSlot::do_delete(notification, slot);
+                }
             }
         }
     }
@@ -300,6 +311,7 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
             AnyCap::Page(page) => AnyCap::Page(page.clone()),
             AnyCap::PgTbl(pgtbl) => AnyCap::PgTbl(pgtbl.clone()),
             AnyCap::Thread(thread) => AnyCap::Thread(thread.clone()),
+            AnyCap::Notification(notification) => AnyCap::Notification(notification.clone()),
         }
     }
 }
@@ -315,6 +327,36 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
             AnyCap::Page(page) => AnyCap::Page(page.clone()),
             AnyCap::PgTbl(pgtbl) => AnyCap::PgTbl(pgtbl.clone()),
             AnyCap::Thread(thread) => AnyCap::Thread(thread.clone()),
+            AnyCap::Notification(notification) => AnyCap::Notification(notification.clone()),
+        }
+    }
+}
+
+impl<'a> SlotRefMut<'a, AnyCap> {
+    pub fn set_badge(&mut self, badge: u64) {
+        match &mut self.meta {
+            AnyCap::Notification(notification) => {
+                notification.badge_rights.0 = badge;
+                // SAFETY: Type check.
+                unsafe { (*self.slot.cap.notification).badge_rights.0 = badge };
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_rights(&mut self, rights: CapRights) {
+        match &mut self.meta {
+            AnyCap::Page(page) => {
+                page.rights &= rights;
+                // SAFETY: Type check.
+                unsafe { self.slot.cap.page.rights &= rights };
+            }
+            AnyCap::Notification(notification) => {
+                notification.badge_rights.1 &= rights;
+                // SAFETY: Type check.
+                unsafe { (*self.slot.cap.notification).badge_rights.1 &= rights };
+            }
+            _ => {}
         }
     }
 }
@@ -627,6 +669,8 @@ impl<'a> fmt::Debug for RawCapDebugAdapter<'a> {
                 let x = unsafe { &self.0.cap.thread.inner };
                 write!(f, "Thread(<opaque:{:#p}>)", Arc::as_ptr(x),)
             }
+            // SAFETY: Type check.
+            CapabilityType::Notification => unsafe { &self.0.cap.notification }.fmt(f),
             CapabilityType::Unknown => f.debug_struct("InvalidCap").finish(),
         }
     }
@@ -869,6 +913,7 @@ pub struct Thread {
     pub state: Atomic<ThreadState>,
     pub tid: usize,
     pub hartid: AtomicU64,
+    pub waiting_on: AtomicU64,
 }
 
 pub struct OwnedTrapframe {
@@ -1010,7 +1055,14 @@ impl Thread {
             let intena = hart.intena.get();
 
             let this = Arc::get_mut(&mut self).unwrap();
-            let ctx = mem::take(&mut this.context);
+            let ctx = mem::replace(
+                &mut this.context,
+                SpinMutex::new(Context {
+                    ra: user_trap_ret as usize as u64,
+                    sp: this.stack.inner.into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64,
+                    ..Context::default()
+                }),
+            );
             drop(self);
             {
                 // SAFETY: The scheduler context is always valid, as
@@ -1147,7 +1199,7 @@ impl Drop for ThreadKernelStack {
             pma.deallocate(
                 self.inner.cast(),
                 kalloc::phys::what_order(THREAD_STACK_SIZE),
-            )
+            );
         }
     }
 }
@@ -1159,3 +1211,56 @@ pub const THREAD_STACK_SIZE: usize = 4 * units::MIB;
 pub const THREAD_STACK_SIZE: usize = 512 * units::KIB;
 
 pub const TRAPFRAME_ADDR: usize = usize::MAX - 3 * 4 * units::KIB + 1;
+
+#[repr(C)]
+#[derive(Clone, Debug, Default)]
+pub struct NotificationSlot {
+    inner: Arc<AtomicU64>,
+    badge_rights: Box<(u64, CapRights)>,
+}
+
+impl Capability for NotificationSlot {
+    type Metadata = NotificationSlot;
+
+    fn is_valid_type(cap_type: CapabilityType) -> bool {
+        cap_type == CapabilityType::Notification
+    }
+
+    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
+        // SAFETY: By invariants.
+        ManuallyDrop::into_inner(unsafe { slot.cap.notification.clone() })
+    }
+
+    fn into_meta(self) -> Self::Metadata {
+        self
+    }
+
+    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
+        (
+            CapabilityType::Notification,
+            RawCapability {
+                notification: ManuallyDrop::new(meta.clone()),
+            },
+        )
+    }
+
+    unsafe fn do_delete(
+        _meta: Self::Metadata,
+        slot: &mut SpinRwLockWriteGuard<'_, RawCapabilitySlot>,
+    ) {
+        let raw_slot = mem::replace(&mut slot.cap, RawCapability { empty: EmptySlot });
+
+        // SAFETY: By invariants
+        drop(ManuallyDrop::into_inner(unsafe { raw_slot.thread }));
+    }
+}
+
+impl<'a> SlotRef<'a, NotificationSlot> {
+    pub fn word(&self) -> &Arc<AtomicU64> {
+        &self.meta.inner
+    }
+
+    pub fn badge(&self) -> u64 {
+        self.meta.badge_rights.0
+    }
+}

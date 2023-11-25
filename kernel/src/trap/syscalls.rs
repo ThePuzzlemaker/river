@@ -6,28 +6,45 @@
 use core::{mem::MaybeUninit, slice};
 
 use alloc::{boxed::Box, string::String, sync::Arc};
+use atomic::Ordering;
 use rille::{
     addr::{Identity, Kernel, VirtualConst},
     capability::{
         paging::{BasePage, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel},
-        CapError, CapResult, CapabilityType, UserRegisters,
+        CapError, CapResult, CapRights, CapabilityType, UserRegisters,
     },
     units::StorageUnits,
 };
 
 use crate::{
     capability::{
-        captbl::Captbl, slotref::SlotRefMut, AllocatorSlot, AnyCap, CapToOwned, EmptySlot, Page,
-        PgTbl, Thread,
+        captbl::Captbl, slotref::SlotRefMut, AllocatorSlot, AnyCap, CapToOwned, EmptySlot,
+        NotificationSlot, Page, PgTbl, Thread, ThreadState,
     },
     kalloc::{self, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
-    print, println, symbol,
+    print, println,
+    proc::Scheduler,
+    symbol,
     sync::SpinRwLock,
 };
 
 pub fn sys_debug_dump_root(thread: &Arc<Thread>) -> Result<(), CapError> {
-    crate::println!("{:#x?}", thread.private.read().captbl);
+    //crate::println!("{:#x?}", thread.private.read().captbl);
+    let (free, total) = {
+        let pma = PMAlloc::get();
+        (pma.num_free_pages(), pma.num_pages())
+    };
+    let used = total - free;
+    let free = free * 4.kib();
+    let used = used * 4.kib();
+    let total = total * 4.kib();
+    crate::info!(
+        "current memory usage: {}B / {}B ({}MiB free)",
+        used,
+        total,
+        free
+    );
     Ok(())
 }
 
@@ -184,21 +201,72 @@ pub fn sys_copy_deep(
 
     let into_index = into_tbl_index.get_mut::<EmptySlot>(into_index)?;
 
-    // if let Ok(mut cap) = from_tbl_index.get_mut::<Untyped>(from_index) {
-    //     // We can't retype if we are untyped and have a child or
-    //     // allocation.
-    //     if cap.free_addr() > cap.base_addr() || cap.has_child() {
-    //         return Err(CapError::RevokeFirst);
-    //     }
-
-    //     // Copying an Untyped acts like a retype.
-    //     cap.set_free_addr(cap.base_addr().add(1 << cap.size_log2()));
-    // }
-
     let mut from_index = from_tbl_index.get_mut::<AnyCap>(from_index)?;
 
     let mut into_index = into_index.replace(from_index.to_owned_cap());
     from_index.add_child(&mut into_index);
+
+    Ok(())
+}
+
+pub fn sys_grant(
+    thread: &Arc<Thread>,
+    from_table: u64,
+    from_index: u64,
+    into_table: u64,
+    into_index: u64,
+    rights: CapRights,
+    badge: u64,
+) -> CapResult<()> {
+    let (from_table, from_index, into_table, into_index) = (
+        from_table as usize,
+        from_index as usize,
+        into_table as usize,
+        into_index as usize,
+    );
+
+    let private = thread.private.read();
+
+    let root_hdr = &private
+        .captbl
+        .as_ref()
+        .cloned()
+        .ok_or(CapError::NotPresent)?;
+
+    if from_table == into_table && from_index == into_index {
+        // Captrs are aliased, this is a no-op
+        // TODO: mutate here
+        return Ok(());
+    }
+
+    let from_table = if from_table == 0 {
+        root_hdr.clone()
+    } else {
+        root_hdr
+            .get(from_table)?
+            .clone()
+            .upgrade()
+            .ok_or(CapError::NotPresent)?
+    };
+
+    let into_table = if into_table == 0 {
+        root_hdr.clone()
+    } else {
+        root_hdr
+            .get(into_table)?
+            .clone()
+            .upgrade()
+            .ok_or(CapError::NotPresent)?
+    };
+
+    let from = from_table.get_mut::<AnyCap>(from_index)?;
+    let into = into_table.get_mut::<EmptySlot>(into_index)?;
+
+    let mut into = into.replace(from.to_owned_cap());
+    into.set_badge(badge);
+    into.set_rights(rights);
+    crate::info!("granted!");
+    crate::info!("{:#?}", into);
 
     Ok(())
 }
@@ -362,6 +430,12 @@ pub fn sys_allocate_many(
                 perform_thread_alloc(slot)?;
             }
         }
+        CapabilityType::Notification => {
+            for i in 0..count {
+                let slot = into_index.get_mut::<EmptySlot>(starting_at + i)?;
+                perform_notification_alloc(slot)?;
+            }
+        }
 
         _ => return Err(CapError::InvalidOperation),
     }
@@ -453,6 +527,14 @@ fn perform_thread_alloc(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
     let thread = Thread::new(String::new(), None, None);
 
     let _ = slot.replace(thread);
+
+    Ok(())
+}
+
+fn perform_notification_alloc(slot: SlotRefMut<'_, EmptySlot>) -> CapResult<()> {
+    let notification = NotificationSlot::default();
+
+    let _ = slot.replace(notification);
 
     Ok(())
 }
@@ -565,6 +647,23 @@ pub fn sys_thread_write_registers(
     let thread_cap = root_hdr.get::<Arc<Thread>>(thread_cap)?;
 
     thread_cap.write_registers(regs_vaddr)?;
+
+    Ok(())
+}
+
+pub fn sys_notification_signal(thread: &Arc<Thread>, notification: u64) -> CapResult<()> {
+    let notification = notification as usize;
+
+    let root_hdr = {
+        let private = thread.private.read();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let notification = root_hdr.get::<NotificationSlot>(notification)?;
+
+    let word = notification.word();
+    word.fetch_or(notification.badge(), Ordering::Release);
+    Scheduler::wake_up_on(Arc::as_ptr(word) as u64);
 
     Ok(())
 }

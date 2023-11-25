@@ -2,14 +2,16 @@ use core::{arch::global_asm, mem, ptr};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{Thread, ThreadState, THREAD_STACK_SIZE},
+    capability::{NotificationSlot, Thread, ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
+    proc::Scheduler,
     sync::OnceCell,
     trampoline::{self, trampoline, Trapframe},
     uart,
 };
+use alloc::sync::Arc;
 use atomic::Ordering;
 use rille::{
     capability::{CapError, CapabilityType},
@@ -278,7 +280,7 @@ unsafe extern "C" fn user_trap() -> ! {
         asm::read_sstatus()
     );
 
-    {
+    'syscall: {
         let proc = LOCAL_HART.with(|hart| {
             hart.trap.set(true);
 
@@ -335,17 +337,78 @@ unsafe extern "C" fn user_trap() -> ! {
                 SyscallNumber::ThreadWriteRegisters => {
                     sys_thread_write_registers(&proc, trapframe);
                 }
+                SyscallNumber::Grant => sys_grant(&proc, trapframe),
+                SyscallNumber::NotificationWait => 'notif_wait: {
+                    let notification = trapframe.a1 as usize;
+
+                    let root_hdr = {
+                        let private = proc.private.read();
+                        private.captbl.as_ref().unwrap().clone()
+                    };
+
+                    let notification = match root_hdr.get::<NotificationSlot>(notification) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            trapframe.a0 = e.into();
+                            break 'notif_wait;
+                        }
+                    };
+
+                    let ptr = Arc::as_ptr(notification.word());
+                    atomic::fence(Ordering::Release);
+                    proc.state.store(ThreadState::Blocking, Ordering::Relaxed);
+                    proc.waiting_on.store(ptr as u64, Ordering::Relaxed);
+                    Scheduler::current_proc_wait();
+
+                    // Make sure we don't hold any locks while we context
+                    // switch.
+                    drop(trapframe_lock);
+                    LOCAL_HART.with(|hart| hart.trap.set(false));
+                    drop(proc);
+                    // SAFETY: This thread is currently running on this
+                    // hart, or is in the wait queue.
+                    unsafe {
+                        Thread::yield_to_scheduler();
+                    }
+
+                    let proc = LOCAL_HART.with(|hart| {
+                        hart.trap.set(true);
+
+                        hart.thread.borrow().as_ref().cloned().unwrap()
+                    });
+
+                    let mut trapframe_lock = proc.trapframe.lock();
+                    let trapframe = trapframe_lock.as_mut();
+
+                    trapframe.a0 = CapError::NoError.into();
+                    trapframe.a1 = notification.word().swap(0, Ordering::AcqRel);
+                    break 'syscall;
+                }
+                SyscallNumber::NotificationSignal => sys_notification_signal(&proc, trapframe),
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
             }
 
-            if proc.state.load(Ordering::Acquire) == ThreadState::Suspended {
+            let state = proc.state.load(Ordering::Acquire);
+            if state == ThreadState::Suspended {
                 drop(trapframe_lock);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
                     proc.yield_to_scheduler_final();
+                }
+            } else if state == ThreadState::Blocking {
+                // Make sure we don't hold any locks while we context
+                // switch.
+                drop(trapframe_lock);
+                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+                LOCAL_HART.with(|hart| hart.trap.set(false));
+                drop(proc);
+                // SAFETY: This thread is currently running on this
+                // hart, or is in the wait queue.
+                unsafe {
+                    Thread::yield_to_scheduler();
                 }
             }
 
@@ -363,21 +426,23 @@ unsafe extern "C" fn user_trap() -> ! {
                 asm::read_stval(),
                 scause
             );
-            if proc.state.load(Ordering::Acquire) == ThreadState::Suspended {
+            let state = proc.state.load(Ordering::Acquire);
+            if state == ThreadState::Suspended {
                 drop(trapframe_lock);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
                     proc.yield_to_scheduler_final();
                 }
-            } else if kind == InterruptKind::Timer {
+            } else if state == ThreadState::Blocking || kind == InterruptKind::Timer {
                 // Make sure we don't hold any locks while we context
                 // switch.
                 drop(trapframe_lock);
                 proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
                 LOCAL_HART.with(|hart| hart.trap.set(false));
                 drop(proc);
-                // SAFETY: This thread is currently running on this hart.
+                // SAFETY: This thread is currently running on this
+                // hart, or is in the wait queue.
                 unsafe {
                     Thread::yield_to_scheduler();
                 }
@@ -663,3 +728,5 @@ define_syscall!(sys_thread_suspend, 1);
 define_syscall!(sys_thread_configure, 3);
 define_syscall!(sys_thread_resume, 1);
 define_syscall!(sys_thread_write_registers, 2);
+define_syscall!(sys_grant, 6);
+define_syscall!(sys_notification_signal, 1);
