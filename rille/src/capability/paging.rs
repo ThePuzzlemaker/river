@@ -41,7 +41,8 @@ impl<L: PagingLevel> Capability for Page<L> {
 /// part of the address translation hierarchy this page table
 /// occupies.
 ///
-/// See [`Captr<PageTable>`] for operations on this capability.
+/// See [`Captr<PageTable>`][Captr#impl-Captr<PageTable>] for
+/// operations on this capability.
 #[derive(Copy, Clone, Debug)]
 pub struct PageTable(#[doc(hidden)] Infallible);
 
@@ -114,6 +115,15 @@ impl PagingLevel for MegaPage {
 pub struct BasePage(#[doc(hidden)] Infallible);
 impl PagingLevel for BasePage {
     const PAGE_SIZE_LOG2: usize = 12;
+}
+
+/// Paging level not known at compile-time. Used only in the kernel.
+#[cfg(any(doc, feature = "kernel"))]
+#[derive(Copy, Clone, Debug)]
+pub struct DynLevel(#[doc(hidden)] Infallible);
+#[cfg(any(doc, feature = "kernel"))]
+impl PagingLevel for DynLevel {
+    const PAGE_SIZE_LOG2: usize = 0;
 }
 
 impl Capability for PageTable {

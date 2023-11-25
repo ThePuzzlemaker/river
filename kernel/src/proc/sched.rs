@@ -211,7 +211,6 @@ impl Scheduler {
 
             sched.run_queue.remove(&pid);
             sched.procs.retain(|p| *p != pid);
-            // crate::println!("{:#?}", sched);
 
             let mut wait_queue = SCHED.wait_queue.lock();
             wait_queue.insert(pid, proc);

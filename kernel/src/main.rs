@@ -63,7 +63,7 @@ use fdt::Fdt;
 use paging::{root_page_table, PageTableFlags};
 use rille::{
     addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
-    capability::{paging::PageSize, Captr, CaptrRange},
+    capability::{paging::PageSize, Captr, CaptrRange, Empty},
     init::BootInfo,
     symbol,
     units::StorageUnits,
@@ -72,7 +72,7 @@ use uart::UART;
 
 use crate::{
     boot::HartBootData,
-    capability::{captbl::Captbl, AllocatorSlot, EmptySlot, Page, PgTbl, Thread, ThreadState},
+    capability::{captbl::Captbl, Page, Thread, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
@@ -202,10 +202,10 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let captbl = unsafe { Captbl::new(captbl_mem, 16) };
 
     {
-        let slot = captbl.get_mut::<EmptySlot>(1).unwrap();
-        slot.replace(Captbl::clone(&captbl));
-        let slot = captbl.get_mut::<EmptySlot>(4).unwrap();
-        slot.replace(AllocatorSlot);
+        let slot = captbl.get_mut::<Empty>(1).unwrap();
+        slot.replace(Captbl::clone(&captbl).downgrade());
+        let slot = captbl.get_mut::<Empty>(4).unwrap();
+        slot.replace(capability::Allocator);
     }
 
     let init_padded = INIT.len().next_multiple_of(4.kib());
@@ -248,14 +248,14 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 .captbl
                 .as_ref()
                 .unwrap()
-                .get_mut::<EmptySlot>(2)
+                .get_mut::<Empty>(2)
                 .unwrap();
-            slot.replace(PgTbl::new(private.root_pgtbl.clone().unwrap()));
+            slot.replace(private.root_pgtbl.clone().unwrap());
         }
         let mut trapframe = proc.trapframe.lock();
-        trapframe.as_mut().user_epc = 0x1040_0000;
-        trapframe.as_mut().sp = 0x1040_0000;
-        trapframe.as_mut().a0 = 0x2000_0000;
+        trapframe.user_epc = 0x1040_0000;
+        trapframe.sp = 0x1040_0000;
+        trapframe.a0 = 0x2000_0000;
         init_pages_range.start = free_slot_ctr;
         for i in 0..(init_padded / 4.kib() + (4.mib() / 4.kib())) {
             let phys = init.add(i * 4.kib());
@@ -271,7 +271,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                     .captbl
                     .as_ref()
                     .unwrap()
-                    .get_mut::<EmptySlot>(free_slot_ctr)
+                    .get_mut::<Empty>(free_slot_ctr)
                     .unwrap();
                 // SAFETY: This page is valid for 1 page size (12 address bits)
                 // TODO - this isn't entirely valid -- PMA dealloc
@@ -290,7 +290,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .captbl
             .as_ref()
             .unwrap()
-            .get_mut::<EmptySlot>(3)
+            .get_mut::<Empty>(3)
             .unwrap();
         slot.replace(proc.clone());
     }
@@ -329,7 +329,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 .captbl
                 .as_ref()
                 .unwrap()
-                .get_mut::<EmptySlot>(free_slot_ctr)
+                .get_mut::<Empty>(free_slot_ctr)
                 .unwrap();
             // SAFETY: This page is valid for 1 page size (12 address bits)
             // TODO: this isn't entirely valid--PMA dealloc
@@ -355,7 +355,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .captbl
             .as_ref()
             .unwrap()
-            .get_mut::<EmptySlot>(5)
+            .get_mut::<Empty>(5)
             .unwrap();
         // SAFETY: This page is valid for 1 page size (12 address bits)
         // TODO: this isn't entirely valid -- PMA dealloc

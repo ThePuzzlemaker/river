@@ -29,8 +29,12 @@ pub enum SyscallNumber {
     /// [`Captr::<Thread>::write_registers`][crate::capability::Captr::<Thread>::write_registers]
     ThreadWriteRegisters = 10,
     Grant = 11,
+    /// [`Captr::<Notification>::wait`][crate::capability::Captr::<Notification>::wait]
     NotificationWait = 12,
+    /// [`Captr::<Notification>::signal`][crate::capability::Captr::<Notification>::signal]
     NotificationSignal = 13,
+    /// [`Captr::<Notification>::poll`][crate::capability::Captr::<Notification>::poll]
+    NotificationPoll = 14,
     /// Print the debug representation of a capability to the kernel
     /// console.
     DebugCapSlot = 0xFFFF_0000,
@@ -544,6 +548,56 @@ pub mod thread {
         match res {
             Err(e) => Err(CapError::from(e)),
             Ok(_) => Ok(()),
+        }
+    }
+}
+
+/// Syscalls relating to notifications. See the [`Notification`][1]
+/// capability for more details.
+///
+/// [1]: crate::capability::Notification
+pub mod notification {
+    use core::num::NonZeroU64;
+
+    #[allow(unused_imports)]
+    use crate::capability::Captr;
+    use crate::capability::{CapError, CapResult};
+
+    use super::SyscallNumber;
+
+    /// See [`Captr::<Notification>::wait`].
+    #[allow(clippy::missing_errors_doc)]
+    pub fn wait(notification: usize) -> CapResult<Option<NonZeroU64>> {
+        // SAFETY: notification_wait is always safe
+        let res = unsafe { super::ecall1(SyscallNumber::NotificationWait, notification as u64) };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(v) => Ok(NonZeroU64::new(v)),
+        }
+    }
+
+    /// See [`Captr::<Notification>::signal`].
+    #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
+    pub fn signal(notification: usize) -> CapResult<()> {
+        // SAFETY: notification_signal is always safe.
+        let res = unsafe { super::ecall1(SyscallNumber::NotificationSignal, notification as u64) };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(_) => Ok(()),
+        }
+    }
+
+    /// See [`Captr::<Notification>::poll`].
+    #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
+    pub fn poll(notification: usize) -> CapResult<Option<NonZeroU64>> {
+        // SAFETY: notification_poll is always safe.
+        let res = unsafe { super::ecall1(SyscallNumber::NotificationPoll, notification as u64) };
+
+        match res {
+            Err(e) => Err(CapError::from(e)),
+            Ok(v) => Ok(NonZeroU64::new(v)),
         }
     }
 }

@@ -1,8 +1,8 @@
-use core::{arch::global_asm, mem, ptr};
+use core::{arch::global_asm, mem};
 
 use crate::{
     asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{NotificationSlot, Thread, ThreadState, THREAD_STACK_SIZE},
+    capability::{Thread, ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
@@ -14,7 +14,7 @@ use crate::{
 use alloc::sync::Arc;
 use atomic::Ordering;
 use rille::{
-    capability::{CapError, CapabilityType},
+    capability::{CapError, CapabilityType, Notification},
     syscalls::SyscallNumber,
 };
 
@@ -296,7 +296,7 @@ unsafe extern "C" fn user_trap() -> ! {
         // someone enabled interrupts while the lock was still held
         // (which is a bug itself).
         let mut trapframe_lock = proc.trapframe.lock();
-        let trapframe = trapframe_lock.as_mut();
+        let trapframe = &mut **trapframe_lock;
         trapframe.user_epc = asm::read_sepc();
 
         let scause = asm::read_scause();
@@ -346,7 +346,7 @@ unsafe extern "C" fn user_trap() -> ! {
                         private.captbl.as_ref().unwrap().clone()
                     };
 
-                    let notification = match root_hdr.get::<NotificationSlot>(notification) {
+                    let notification = match root_hdr.get::<Notification>(notification) {
                         Ok(v) => v,
                         Err(e) => {
                             trapframe.a0 = e.into();
@@ -359,7 +359,7 @@ unsafe extern "C" fn user_trap() -> ! {
                         trapframe.a0 = CapError::NoError.into();
                         trapframe.a1 = x;
 
-                        break 'syscall;
+                        break 'notif_wait;
                     }
 
                     let ptr = Arc::as_ptr(notification.word());
@@ -386,13 +386,14 @@ unsafe extern "C" fn user_trap() -> ! {
                     });
 
                     let mut trapframe_lock = proc.trapframe.lock();
-                    let trapframe = trapframe_lock.as_mut();
+                    let trapframe = &mut **trapframe_lock;
 
                     trapframe.a0 = CapError::NoError.into();
                     trapframe.a1 = notification.word().swap(0, Ordering::AcqRel);
                     break 'syscall;
                 }
                 SyscallNumber::NotificationSignal => sys_notification_signal(&proc, trapframe),
+                SyscallNumber::NotificationPoll => sys_notification_poll(&proc, trapframe),
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
@@ -485,13 +486,13 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
         // process's context.
 
         let mut trapframe = proc.trapframe.lock();
-        trapframe.as_mut().kernel_satp = asm::get_satp().as_usize() as u64;
-        trapframe.as_mut().kernel_sp =
+        trapframe.kernel_satp = asm::get_satp().as_usize() as u64;
+        trapframe.kernel_sp =
             proc.stack.as_phys().into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64;
-        trapframe.as_mut().kernel_trap = user_trap as usize as u64;
-        trapframe.as_mut().kernel_tp = asm::tp();
+        trapframe.kernel_trap = user_trap as usize as u64;
+        trapframe.kernel_tp = asm::tp();
 
-        asm::write_sepc(trapframe.as_ref().user_epc);
+        asm::write_sepc(trapframe.user_epc);
         asm::write_sscratch(private.trapframe_addr as u64);
         let satp = Satp {
             asid: 1,
@@ -733,3 +734,4 @@ define_syscall!(sys_thread_resume, 1);
 define_syscall!(sys_thread_write_registers, 2);
 define_syscall!(sys_grant, 6);
 define_syscall!(sys_notification_signal, 1);
+define_syscall!(sys_notification_poll, 1);

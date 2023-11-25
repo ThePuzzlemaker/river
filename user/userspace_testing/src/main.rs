@@ -5,9 +5,8 @@
 use core::{arch::global_asm, fmt};
 
 use rille::{
-    addr::VirtualConst,
     capability::{
-        paging::{BasePage, Page, PageTableFlags},
+        paging::{BasePage, Page},
         CapRights, Captr, Notification, RemoteCaptr, Thread,
     },
     init::{BootInfo, InitCapabilities},
@@ -61,19 +60,19 @@ done_clear_bss:
 
 extern "C" fn thread_entry(_thread: Captr<Thread>) -> ! {
     let caps = unsafe { InitCapabilities::new() };
-    _thread.suspend().unwrap();
-    // caps.thread.suspend().unwrap();
-    // RemoteCaptr::remote(caps.captbl, caps.thread)
-    //     .delete()
-    //     .unwrap();
-    // syscalls::debug::debug_dump_root();
+    // _thread.suspend().unwrap();
+    caps.thread.suspend().unwrap();
+    RemoteCaptr::remote(caps.captbl, caps.thread)
+        .delete()
+        .unwrap();
+    syscalls::debug::debug_dump_root();
 
     // syscalls::debug::debug_cap_slot(caps.captbl.into_raw(), caps.thread.into_raw()).unwrap();
 
-    println!("thread 2 waiting to recv");
-    println!("{:#x?}", unsafe {
-        ecall1(SyscallNumber::NotificationWait, 65533)
-    });
+    // println!("thread 2 waiting to recv");
+    // println!("{:#x?}", unsafe {
+    //     ecall1(SyscallNumber::NotificationWait, 65533)
+    // });
     loop {
         unsafe {
             core::arch::asm!("nop");
@@ -91,12 +90,18 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
 
     let root_captbl = RemoteCaptr::local(caps.captbl);
 
+    syscalls::debug::debug_cap_slot(
+        root_captbl.local_index().into_raw(),
+        caps.allocator.into_raw(),
+    )
+    .unwrap();
+
     let thread: Captr<Thread> = caps
         .allocator
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65534) }, ())
         .unwrap();
 
-    let pg: Captr<Page<BasePage>> = caps
+    let _pg: Captr<Page<BasePage>> = caps
         .allocator
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
         .unwrap();
@@ -150,14 +155,20 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
 
     unsafe { thread.resume().unwrap() }
 
-    for i in 0..100_000 {
-        print!("\rthread 1 waiting to send");
-    }
+    // for _ in 0..100_000_000 {
+    //     unsafe {
+    //         core::arch::asm!("pause");
+    //     }
+    // }
 
-    unsafe { ecall1(SyscallNumber::NotificationSignal, 65532) };
-    println!("\nthread 1 sent!");
+    // //unsafe { thread.resume().unwrap() }
 
-    unsafe { thread.resume().unwrap() }
+    // for i in 0..100_000 {
+    //     print!("\rthread 1 waiting to send: {i}");
+    // }
+
+    // unsafe { ecall1(SyscallNumber::NotificationSignal, 65532).unwrap() };
+    // println!("\nthread 1 sent!");
 
     loop {
         // print!("\rthread 1!");

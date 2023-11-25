@@ -1,7 +1,7 @@
 use core::{
     fmt,
-    mem::{ManuallyDrop, MaybeUninit},
-    ops::Deref,
+    marker::PhantomData,
+    mem::{self, ManuallyDrop, MaybeUninit},
     ptr::{self},
 };
 
@@ -9,18 +9,12 @@ use alloc::sync::{Arc, Weak};
 use itertools::Itertools;
 use rille::{
     addr::{DirectMapped, VirtualMut},
-    capability::CapabilityType,
+    capability::{self as rille_cap},
 };
 
-use crate::{
-    kalloc::{self, phys::PMAlloc},
-    sync::{SpinRwLock, SpinRwLockWriteGuard},
-};
+use crate::kalloc::{self, phys::PMAlloc};
 
-use super::{
-    CapToOwned, Capability, CapabilitySlot, CaptblHeader, RawCapability, RawCapabilitySlot,
-    SlotRef, SlotRefMut,
-};
+use super::{CapToOwned, Capability, CapabilitySlot, CaptblHeader, SlotRef, SlotRefMut};
 
 pub union CaptblInner {
     pub(super) slot: ManuallyDrop<CapabilitySlot>,
@@ -116,9 +110,7 @@ impl Captbl {
 
         for slot in captbl.iter_mut().skip(1) {
             slot.write(CaptblInner {
-                slot: ManuallyDrop::new(CapabilitySlot {
-                    lock: SpinRwLock::new(RawCapabilitySlot::default()),
-                }),
+                slot: ManuallyDrop::new(CapabilitySlot::default()),
             });
         }
 
@@ -129,41 +121,6 @@ impl Captbl {
         Self {
             inner: Arc::new(UnsafeCaptblPtr(captbl)),
         }
-    }
-}
-
-impl Capability for Captbl {
-    type Metadata = WeakCaptbl;
-
-    fn is_valid_type(cap_type: CapabilityType) -> bool {
-        cap_type == CapabilityType::Captbl
-    }
-
-    fn metadata_from_slot(slot: &RawCapabilitySlot) -> Self::Metadata {
-        // SAFETY: By our invariants, we must be of the proper type.
-        unsafe { &slot.cap.captbl }.weak.clone()
-    }
-
-    fn into_meta(self) -> Self::Metadata {
-        WeakCaptbl {
-            inner: Arc::downgrade(&self.inner),
-        }
-    }
-
-    fn metadata_to_slot(meta: &Self::Metadata) -> (CapabilityType, RawCapability) {
-        (
-            CapabilityType::Captbl,
-            RawCapability {
-                captbl: ManuallyDrop::new(CaptblSlot { weak: meta.clone() }),
-            },
-        )
-    }
-
-    unsafe fn do_delete(_: Self::Metadata, _: &mut SpinRwLockWriteGuard<'_, RawCapabilitySlot>) {
-        // We don't really need to worry about dropping anything, as
-        // we only have a weak reference. Even with a
-        // `ManuallyDrop<WeakCaptbl>` internally, this won't keep the
-        // captbl alive longer than necessary.
     }
 }
 
@@ -253,40 +210,44 @@ impl PartialEq for Captbl {
 
 impl Eq for Captbl {}
 
-impl<'a> CapToOwned for SlotRef<'a, Captbl> {
+impl<'a> CapToOwned for SlotRef<'a, rille_cap::Captbl> {
     type Target = WeakCaptbl;
 
     fn to_owned_cap(&self) -> Self::Target {
-        self.meta.clone()
+        self.cap.captbl().unwrap().clone()
     }
 }
 
-impl<'a> CapToOwned for SlotRefMut<'a, Captbl> {
+impl<'a> CapToOwned for SlotRefMut<'a, rille_cap::Captbl> {
     type Target = WeakCaptbl;
 
     fn to_owned_cap(&self) -> Self::Target {
-        self.meta.clone()
-    }
-}
-
-impl<'a> Deref for SlotRef<'a, Captbl> {
-    type Target = WeakCaptbl;
-
-    fn deref(&self) -> &WeakCaptbl {
-        &self.meta
-    }
-}
-
-impl<'a> Deref for SlotRefMut<'a, Captbl> {
-    type Target = WeakCaptbl;
-
-    fn deref(&self) -> &WeakCaptbl {
-        &self.meta
+        self.cap.captbl().unwrap().clone()
     }
 }
 
 impl fmt::Debug for CaptblSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("CaptblSlot").field(&self.weak).finish()
+    }
+}
+
+impl<'a, C: Capability> SlotRefMut<'a, C> {
+    pub fn swap<C2: Capability>(
+        mut self,
+        mut other: SlotRefMut<'a, C2>,
+    ) -> (SlotRefMut<'a, C2>, SlotRefMut<'a, C>) {
+        mem::swap(&mut *self.slot, &mut *other.slot);
+
+        let new_self = SlotRefMut {
+            slot: self.slot,
+            _phantom: PhantomData,
+        };
+        let new_other = SlotRefMut {
+            slot: other.slot,
+            _phantom: PhantomData,
+        };
+
+        (new_self, new_other)
     }
 }

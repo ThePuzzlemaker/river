@@ -36,7 +36,7 @@ use core::{
     fmt::{self, Debug},
     hash::{self, Hash},
     marker::PhantomData,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
 };
 
 use num_enum::{FromPrimitive, IntoPrimitive};
@@ -82,9 +82,9 @@ pub enum CapabilityType {
     /// [`Page`][paging::Page]s that can be mapped into
     /// [`PageTable`]s.
     Page = 4,
-    /// Threads (WIP in rille).
-    /// TODO
+    /// [`Thread`]s.
     Thread = 5,
+    /// [`Notification`]s.
     Notification = 6,
     /// Any capability type `>=32` is undefined.
     #[num_enum(default)]
@@ -344,7 +344,8 @@ impl Capability for Empty {
 /// with other operations. For this reason, river does not have as
 /// strong memory exhaustion guarantees as something like seL4.
 ///
-/// For more information on allocation, see [`Captr<Allocator>::allocate`].
+/// For more information on allocation, see
+/// [`Captr<Allocator>::allocate`].
 #[derive(Copy, Clone, Debug)]
 pub struct Allocator(#[doc(hidden)] Infallible);
 
@@ -610,7 +611,8 @@ impl<C: Capability> ExactSizeIterator for AllocateIter<C> {
 /// to have a [capability table][Captbl]. A thread without a captbl
 /// has no ability to receive or hold capabilities.
 ///
-/// See [`Captr<Thread>`] for operations on this capability.
+/// See [`Captr<Thread>`][Captr#impl-Captr<Thread>] for operations on
+/// this capability.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Thread {}
 
@@ -698,6 +700,14 @@ impl Captr<Thread> {
     }
 }
 
+/// A notification is a kernel-backed semaphore between threads, with
+/// the ability to block on signals.
+///
+/// Notifications can also be used by the kernel for things such as
+/// interrupts (WIP).
+///
+/// See [`Captr<Notification>`][Captr#impl-Captr<Notification>] for
+/// operations on this capability.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Notification {}
 
@@ -709,6 +719,57 @@ impl Capability for Notification {
     }
 
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Notification;
+}
+
+impl Captr<Notification> {
+    /// Read the semaphore without blocking. If the semaphore was
+    /// non-zero, clear it.
+    ///
+    /// # Errors
+    ///
+    /// - [`CapError::NotPresent`]: The notification capability was
+    ///   not present.
+    /// - [`CapError::InvalidType`]: The capabiltiy in the provided
+    ///   slot was not a notification.
+    pub fn poll(&self) -> CapResult<Option<NonZeroU64>> {
+        syscalls::notification::poll(self.into_raw())
+    }
+
+    /// Signal this notification, bitwise `or`ing the semaphore with
+    /// the capability's badge. Additionally, this operation will wake
+    /// up the first thread waiting on this notification, if any.
+    ///
+    /// If the capability is zero-badged (or is unbadged), this
+    /// operation will only wake up the first thread waiting on this
+    /// notification.
+    ///
+    /// # Errors
+    ///
+    /// - [`CapError::NotPresent`]: The notification capability was
+    ///   not present.
+    /// - [`CapError::InvalidType`]: The capabiltiy in the provided
+    ///   slot was not a notification.
+    pub fn signal(&self) -> CapResult<()> {
+        Ok(())
+    }
+
+    /// Wait until another thread signals this notification, or if
+    /// there are unread incoming signals, read those without
+    /// waiting. Then, clear the semaphore.
+    ///
+    /// This function may return `Ok(None)` as it is possible that
+    /// this thread is woken up by a [`Self::signal`] operation from
+    /// an unbadged capability.
+    ///
+    /// # Errors
+    ///
+    /// - [`CapError::NotPresent`]: The notification capability was
+    ///   not present.
+    /// - [`CapError::InvalidType`]: The capabiltiy in the provided
+    ///   slot was not a notification.
+    pub fn wait(&self) -> CapResult<Option<NonZeroU64>> {
+        syscalls::notification::wait(self.into_raw())
+    }
 }
 
 #[repr(C)]
@@ -767,9 +828,13 @@ impl<C: Capability> CaptrRange<C> {
 }
 
 bitflags::bitflags! {
+    /// Rights for capabilities.
     pub struct CapRights: u64 {
+    /// - [`Page`]: Can be mapped readable
     const READ = 1 << 0;
+    /// - [`Page`]: Can be mapped writable
     const WRITE = 1 << 1;
+    /// - [`Page`]: Can be mapped executable
     const EXECUTE = 1 << 2;
     }
 }
@@ -788,6 +853,7 @@ impl From<u64> for CapRights {
 }
 
 impl CapRights {
+    /// Convert these rights into a mask of [`PageTableFlags`].
     pub fn into_pgtbl_mask(self) -> PageTableFlags {
         let mut x = PageTableFlags::empty();
         if self.contains(Self::READ) {
@@ -803,18 +869,37 @@ impl CapRights {
     }
 }
 
+/// Dynamic capabilities.
+/// TODO
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AnyCap {}
+
+impl Capability for AnyCap {
+    /// Cannot allocate an `AnyCap`.
+    type AllocateSizeSpec = Infallible;
+
+    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
+        0
+    }
+
+    /// The capability type cannot be known at compile-time.
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Unknown;
+}
+
 // == Unimportant or boilerplate-y impls below ==
 
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Allocator, Captbl, Empty, Notification, Thread,
+        Allocator, AnyCap, Captbl, Empty, Notification, Thread,
     };
 
     pub trait Sealed {}
     impl Sealed for GigaPage {}
     impl Sealed for MegaPage {}
     impl Sealed for BasePage {}
+    #[cfg(any(doc, feature = "kernel"))]
+    impl Sealed for super::paging::DynLevel {}
     impl<L: PagingLevel> Sealed for Page<L> {}
     impl Sealed for PageTable {}
     impl Sealed for Captbl {}
@@ -822,6 +907,7 @@ mod private {
     impl Sealed for Allocator {}
     impl Sealed for Thread {}
     impl Sealed for Notification {}
+    impl Sealed for AnyCap {}
 }
 
 // These impls are just so Capability doesn't have to impl all these

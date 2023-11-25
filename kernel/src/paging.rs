@@ -479,6 +479,14 @@ pub struct SharedPageTable {
     inner: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>,
 }
 
+impl PartialEq for SharedPageTable {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for SharedPageTable {}
+
 impl SharedPageTable {
     pub fn from_inner(x: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>) -> Self {
         Self { inner: x }

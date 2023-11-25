@@ -1,28 +1,37 @@
-use core::{fmt, marker::PhantomData};
+use core::{
+    fmt,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+};
 
-use rille::capability::CapabilityType;
+use rille::capability::{AnyCap, CapabilityType};
 
 use crate::sync::{SpinRwLockReadGuard, SpinRwLockWriteGuard};
 
-use super::{AnyCap, Capability, RawCapabilitySlot};
+use super::{Capability, CapabilitySlotInner};
 
 pub struct SlotRef<'a, C: Capability> {
-    pub(super) slot: SpinRwLockReadGuard<'a, RawCapabilitySlot>,
-    pub(super) meta: C::Metadata,
+    pub(super) slot: SpinRwLockReadGuard<'a, CapabilitySlotInner>,
     pub(super) _phantom: PhantomData<C>,
+}
+
+impl<'a, C: Capability> Deref for SlotRef<'a, C> {
+    type Target = CapabilitySlotInner;
+
+    fn deref(&'_ self) -> &'_ Self::Target {
+        &self.slot
+    }
 }
 
 impl<'a> SlotRef<'a, AnyCap> {
     pub fn cap_type(&self) -> CapabilityType {
-        self.meta.cap_type()
+        self.cap.cap_type()
     }
 
     pub fn downcast<C: Capability>(self) -> Option<SlotRef<'a, C>> {
-        if C::is_valid_type(self.slot.cap_type) {
-            let meta = C::metadata_from_slot(&self.slot);
+        if C::is_valid_type(self.cap.cap_type()) {
             Some(SlotRef {
                 slot: self.slot,
-                meta,
                 _phantom: PhantomData,
             })
         } else {
@@ -33,36 +42,41 @@ impl<'a> SlotRef<'a, AnyCap> {
 
 impl<'a, C: Capability> SlotRef<'a, C> {
     pub fn upcast(self) -> SlotRef<'a, AnyCap> {
-        let meta = AnyCap::metadata_from_slot(&self.slot);
         SlotRef {
             slot: self.slot,
-            meta,
             _phantom: PhantomData,
         }
-    }
-
-    pub fn as_ptr(&self) -> *const RawCapabilitySlot {
-        &*self.slot
     }
 }
 
 pub struct SlotRefMut<'a, C: Capability> {
-    pub(super) slot: SpinRwLockWriteGuard<'a, RawCapabilitySlot>,
-    pub(super) meta: C::Metadata,
+    pub(super) slot: SpinRwLockWriteGuard<'a, CapabilitySlotInner>,
     pub(super) _phantom: PhantomData<C>,
+}
+
+impl<'a, C: Capability> DerefMut for SlotRefMut<'a, C> {
+    fn deref_mut(&'_ mut self) -> &'_ mut Self::Target {
+        &mut self.slot
+    }
+}
+
+impl<'a, C: Capability> Deref for SlotRefMut<'a, C> {
+    type Target = CapabilitySlotInner;
+
+    fn deref(&'_ self) -> &'_ Self::Target {
+        &self.slot
+    }
 }
 
 impl<'a> SlotRefMut<'a, AnyCap> {
     pub fn cap_type(&self) -> CapabilityType {
-        self.meta.cap_type()
+        self.slot.cap.cap_type()
     }
 
     pub fn downcast_mut<C: Capability>(self) -> Option<SlotRefMut<'a, C>> {
-        if C::is_valid_type(self.slot.cap_type) {
-            let meta = C::metadata_from_slot(&self.slot);
+        if C::is_valid_type(self.cap.cap_type()) {
             Some(SlotRefMut {
                 slot: self.slot,
-                meta,
                 _phantom: PhantomData,
             })
         } else {
@@ -73,16 +87,10 @@ impl<'a> SlotRefMut<'a, AnyCap> {
 
 impl<'a, C: Capability> SlotRefMut<'a, C> {
     pub fn upcast_mut(self) -> SlotRefMut<'a, AnyCap> {
-        let meta = AnyCap::metadata_from_slot(&self.slot);
         SlotRefMut {
             slot: self.slot,
-            meta,
             _phantom: PhantomData,
         }
-    }
-
-    pub fn as_ptr(&mut self) -> *mut RawCapabilitySlot {
-        &mut *self.slot
     }
 }
 
@@ -92,7 +100,6 @@ impl<'a, C: Capability> fmt::Debug for SlotRef<'a, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SlotRef")
             .field("slot", &self.slot)
-            .field("meta", &self.meta)
             .field("_phantom", &self._phantom)
             .finish()
     }
@@ -102,7 +109,6 @@ impl<'a, C: Capability> fmt::Debug for SlotRefMut<'a, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SlotRef")
             .field("slot", &self.slot)
-            .field("meta", &self.meta)
             .field("_phantom", &self._phantom)
             .finish()
     }
