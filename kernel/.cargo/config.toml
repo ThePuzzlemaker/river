@@ -1,6 +1,12 @@
 [build]
 target = "riscv64gc-unknown-none-elf"
-rustflags = ["-Ccode-model=medium", "-Cpanic=abort", "-Ctarget-feature=+zihintpause", "-Zthreads=0"]
+rustflags = [
+    "-Ccode-model=medium",
+    "-Cpanic=abort",
+    "-Ctarget-feature=+zihintpause",
+    "-Zthreads=0",
+    "-Ztls-model=local-exec",
+]
 
 # not sure if this ever worked.
 [unstable]
@@ -12,4 +18,7 @@ build-std-features = ["compiler-builtins-mem"]
 opt-level = 1
 # debug=2 is beefy, but **incredibly** helpful for debugging, esp. before paging
 # as it gives your debugger type layout info
-debug = 2
+debug = "full"
+# for profiling
+[profile.release]
+debug = "full"

@@ -1,12 +1,12 @@
 use core::{arch::global_asm, mem};
 
 use crate::{
-    asm::{self, hartid, intr_enabled, SCAUSE_INTR_BIT, SSTATUS_SPP},
+    asm::{self, hartid, InterruptDisabler, SCAUSE_INTR_BIT, SSTATUS_SPP},
     capability::{Thread, ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
-    proc::Scheduler,
+    sched::Scheduler,
     sync::OnceCell,
     trampoline::{self, trampoline, Trapframe},
     uart,
@@ -28,17 +28,8 @@ pub static IRQS: OnceCell<Irqs> = OnceCell::new();
 
 #[no_mangle]
 unsafe extern "C" fn kernel_trap() {
-    assert!(!intr_enabled(), "kernel_trap: interrupts enabled");
-    // N.B. LOCAL_HART is not SpinMutex-guarded, so interrupts will not be
-    // enabled during this line. And we catch if they were above.
-    //
-    // This value helps to make sure that `push_off` and `pop_off` don't
-    // accidentally re-enable interrupts during our handler by way of a
-    // `SpinMutexGuard` drop. (I originally tried to just set intena, but it was
-    // still enough of a race condition that it caused bursts of the same
-    // interrupt--not sure entirely why, this is a bit hacky but I suppose it
-    // works)
-    LOCAL_HART.with(|hart| hart.trap.set(true));
+    debug_assert!(!asm::intr_off(), "kernel_trap: interrupts enabled");
+    let mut intr = InterruptDisabler::new();
 
     let sepc = asm::read_sepc();
     let sstatus = asm::read_sstatus();
@@ -71,38 +62,60 @@ unsafe extern "C" fn kernel_trap() {
     );
 
     {
-        let proc = LOCAL_HART.with(|hart| {
-            if kind == InterruptKind::Timer {
-                hart.thread.borrow().as_ref().cloned()
-            } else {
-                None
-            }
-        });
+        let proc = if kind == InterruptKind::Timer || kind == InterruptKind::Software {
+            LOCAL_HART.thread.borrow().as_ref().cloned()
+        } else {
+            None
+        };
 
         if let Some(proc) = proc {
-            if proc.state.load(Ordering::Relaxed) == ThreadState::Running {
-                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+            let mut private = proc.private.lock();
+
+            let state = private.state;
+            if state == ThreadState::Running {
                 asm::write_sepc(sepc);
                 asm::write_sstatus(sstatus);
-                // Make sure we inform the HartCtx that it's fine to re-enable interrupts
-                // now.
-                LOCAL_HART.with(|hart| hart.trap.set(false));
-                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+
+                if private.prio.effective() < 0 {
+                    private.state = ThreadState::Runnable;
+                }
+                // Never reschedule the idle process.
+                if private.prio.effective() >= 0 && state != ThreadState::Blocking {
+                    if kind == InterruptKind::Timer {
+                        //Scheduler::debug();
+                        //crate::println!("=====^before^=====");
+                        let old_prio = private.prio.effective();
+                        Scheduler::dequeue_dl(&proc, &mut private);
+                        proc.prio_diminish_dl(&mut private);
+                        if private.prio.effective() > old_prio {
+                            Scheduler::enqueue_front_dl(&proc, Some(hartid()), &mut private);
+                        } else {
+                            Scheduler::enqueue_dl(&proc, Some(hartid()), &mut private);
+                        }
+                        //Scheduler::debug();
+                        //crate::println!("=====^after^=====");
+                        private.state = ThreadState::Runnable;
+                    } else if kind == InterruptKind::Software && state == ThreadState::Running {
+                        private.state = ThreadState::Runnable;
+                    }
+                }
+
+                drop(private);
                 drop(proc);
+                drop(intr);
                 // SAFETY: This thread is currently running on
                 // this hart.
                 unsafe {
                     Thread::yield_to_scheduler();
                 }
+                intr = InterruptDisabler::new();
             }
         }
     }
 
     asm::write_sepc(sepc);
     asm::write_sstatus(sstatus);
-    // Make sure we inform the HartCtx that it's fine to re-enable interrupts
-    // now.
-    LOCAL_HART.with(|hart| hart.trap.set(false));
+    drop(intr);
 }
 
 fn device_interrupt(scause: u64) -> InterruptKind {
@@ -129,12 +142,18 @@ fn device_interrupt(scause: u64) -> InterruptKind {
         InterruptKind::External
     } else if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 5 {
         asm::timer_intr_clear();
+        asm::timer_intr_off();
 
-        let interval = LOCAL_HART.with(|hart| hart.timer_interval.get());
+        let interval = LOCAL_HART.timer_interval.get();
         sbi::timer::set_timer(asm::read_time() + interval).unwrap();
         asm::timer_intr_on();
 
         InterruptKind::Timer
+    } else if scause & SCAUSE_INTR_BIT != 0 && scause & 0xff == 1 {
+        asm::software_intr_clear();
+        asm::software_intr_off();
+        asm::software_intr_on();
+        InterruptKind::Software
     } else {
         InterruptKind::Unknown
     }
@@ -212,6 +231,7 @@ kernel_trapvec:
     ld sp,    8(sp)
     ld gp,   16(sp)
     # not tp (contains hart-local data ptr), in case we moved CPUs
+    ld tp,   24(sp)
     ld t0,   32(sp)
     ld t1,   40(sp)
     ld t2,   48(sp)
@@ -270,22 +290,20 @@ pub fn describe_exception(id: u64) -> &'static str {
 
 #[link_section = ".init.user_trap"]
 unsafe extern "C" fn user_trap() -> ! {
+    LOCAL_HART.inhibit_intena.replace(true);
+    let mut intr = InterruptDisabler::new();
     // Make sure we interrupt into kernel_trapvec, now that we're in S-mode.
     // SAFETY: The address we provide is valid.
     unsafe { asm::write_stvec(kernel_trapvec as *const u8) }
 
-    assert!(
+    debug_assert!(
         asm::read_sstatus() & SSTATUS_SPP == 0,
         "user_trap: Did not trap from U-mode, sstatus={}",
         asm::read_sstatus()
     );
 
     'syscall: {
-        let proc = LOCAL_HART.with(|hart| {
-            hart.trap.set(true);
-
-            hart.thread.borrow().as_ref().cloned().unwrap()
-        });
+        let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
         // We cannot deadlock here. Full stop. Here's why:
         // 1. We are the user trap handler. If this lock was held by
@@ -342,7 +360,7 @@ unsafe extern "C" fn user_trap() -> ! {
                     let notification = trapframe.a1 as usize;
 
                     let root_hdr = {
-                        let private = proc.private.read();
+                        let private = proc.private.lock();
                         private.captbl.as_ref().unwrap().clone()
                     };
 
@@ -353,43 +371,49 @@ unsafe extern "C" fn user_trap() -> ! {
                             break 'notif_wait;
                         }
                     };
+                    let wq = &notification.cap.notification().unwrap().wait_queue;
+                    let mut wq_lock = wq.lock();
+                    let mut private = proc.private.lock();
 
-                    let x = notification.word().swap(0, Ordering::AcqRel);
+                    let x = notification.word().swap(0, Ordering::Relaxed);
                     if x != 0 {
                         trapframe.a0 = CapError::NoError.into();
                         trapframe.a1 = x;
 
+                        drop(wq_lock);
                         break 'notif_wait;
                     }
 
-                    let ptr = Arc::as_ptr(notification.word());
-                    atomic::fence(Ordering::Release);
-                    proc.state.store(ThreadState::Blocking, Ordering::Relaxed);
-                    proc.waiting_on.store(ptr as u64, Ordering::Relaxed);
-                    Scheduler::current_proc_wait();
+                    private.state = ThreadState::Blocking;
 
+                    Scheduler::dequeue_dl(&proc, &mut private);
+
+                    proc.blocked_on_wq.lock().replace(Arc::downgrade(wq));
+
+                    wq_lock.insert(private.prio.effective(), &proc);
+
+                    drop(wq_lock);
+                    drop(private);
                     // Make sure we don't hold any locks while we context
                     // switch.
                     drop(trapframe_lock);
-                    LOCAL_HART.with(|hart| hart.trap.set(false));
                     drop(proc);
+                    drop(intr);
                     // SAFETY: This thread is currently running on this
                     // hart, or is in the wait queue.
                     unsafe {
                         Thread::yield_to_scheduler();
                     }
+                    intr = InterruptDisabler::new();
 
-                    let proc = LOCAL_HART.with(|hart| {
-                        hart.trap.set(true);
+                    let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
-                        hart.thread.borrow().as_ref().cloned().unwrap()
-                    });
-
-                    let mut trapframe_lock = proc.trapframe.lock();
-                    let trapframe = &mut **trapframe_lock;
+                    // SAFETY: We are yet again running this process, so we can force unlock.
+                    let trapframe = unsafe { &mut *proc.trapframe.to_components().0 };
+                    let trapframe = &mut **trapframe;
 
                     trapframe.a0 = CapError::NoError.into();
-                    trapframe.a1 = notification.word().swap(0, Ordering::AcqRel);
+                    trapframe.a1 = notification.word().swap(0, Ordering::Relaxed);
                     break 'syscall;
                 }
                 SyscallNumber::NotificationSignal => sys_notification_signal(&proc, trapframe),
@@ -399,20 +423,21 @@ unsafe extern "C" fn user_trap() -> ! {
                 }
             }
 
-            let state = proc.state.load(Ordering::Acquire);
-            if state == ThreadState::Suspended {
+            let mut private = proc.private.lock();
+            if private.state == ThreadState::Suspended {
                 drop(trapframe_lock);
-                LOCAL_HART.with(|hart| hart.trap.set(false));
+                drop(private);
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
                     proc.yield_to_scheduler_final();
                 }
-            } else if state == ThreadState::Blocking {
+            } else if private.state == ThreadState::Blocking {
                 // Make sure we don't hold any locks while we context
                 // switch.
                 drop(trapframe_lock);
-                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
-                LOCAL_HART.with(|hart| hart.trap.set(false));
+
+                private.state = ThreadState::Runnable;
+                drop(private);
                 drop(proc);
                 // SAFETY: This thread is currently running on this
                 // hart, or is in the wait queue.
@@ -430,31 +455,68 @@ unsafe extern "C" fn user_trap() -> ! {
                 asm::read_stval(),
                 scause
             );
-            let state = proc.state.load(Ordering::Acquire);
+            let mut private = proc.private.lock();
+            let state = private.state;
             if state == ThreadState::Suspended {
                 drop(trapframe_lock);
-                LOCAL_HART.with(|hart| hart.trap.set(false));
+                drop(private);
+                drop(intr);
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
                     proc.yield_to_scheduler_final();
                 }
-            } else if state == ThreadState::Blocking || kind == InterruptKind::Timer {
+                intr = InterruptDisabler::new();
+            } else if state == ThreadState::Blocking
+                || kind == InterruptKind::Timer
+                || kind == InterruptKind::Software
+            {
                 // Make sure we don't hold any locks while we context
                 // switch.
                 drop(trapframe_lock);
-                proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
-                LOCAL_HART.with(|hart| hart.trap.set(false));
+
+                if private.prio.effective() < 0 {
+                    //                    crate::info!("hartid={} kind={:?}", hartid(), kind);
+                    private.state = ThreadState::Runnable;
+                }
+                // Never reschedule the idle process.
+                else if private.prio.effective() >= 0 && state != ThreadState::Blocking {
+                    log::trace!("timer, blocking, or IPI, thread={proc:?}, private={private:?}");
+
+                    if kind == InterruptKind::Timer {
+                        //Scheduler::debug();
+                        //crate::println!("=====^before^=====");
+
+                        let old_prio = private.prio.effective();
+                        Scheduler::dequeue_dl(&proc, &mut private);
+                        proc.prio_diminish_dl(&mut private);
+                        if private.prio.effective() > old_prio {
+                            Scheduler::enqueue_front_dl(&proc, Some(hartid()), &mut private);
+                        } else {
+                            Scheduler::enqueue_dl(&proc, Some(hartid()), &mut private);
+                        }
+                        //Scheduler::debug();
+                        //crate::println!("=====^after^=====");
+                        private.state = ThreadState::Runnable;
+                    } else if kind == InterruptKind::Software
+                        && private.state == ThreadState::Running
+                    {
+                        private.state = ThreadState::Runnable;
+                    }
+                }
+                drop(private);
                 drop(proc);
+                drop(intr);
                 // SAFETY: This thread is currently running on this
                 // hart, or is in the wait queue.
                 unsafe {
                     Thread::yield_to_scheduler();
                 }
+                intr = InterruptDisabler::new();
             }
         }
     } // guards: trapframe
 
-    LOCAL_HART.with(|hart| hart.trap.set(false));
+    drop(intr);
     // SAFETY: We are calling this function in the context of a valid
     // process.
     unsafe { user_trap_ret() }
@@ -471,16 +533,14 @@ unsafe extern "C" fn user_trap() -> ! {
 /// the local hart.
 #[inline(never)]
 pub unsafe extern "C" fn user_trap_ret() -> ! {
-    asm::intr_off();
-    LOCAL_HART.with(|hart| hart.trap.set(true));
-
+    let intr = InterruptDisabler::new();
     // SAFETY: The address we provide is valid.
     unsafe { asm::write_stvec(trampoline() as *const u8) };
 
-    let satp = LOCAL_HART.with(|hart| {
-        let proc = hart.thread.borrow().as_ref().cloned().unwrap();
+    let satp = {
+        let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
-        let private = proc.private.read();
+        let private = proc.private.lock();
 
         // SAFETY: Our caller guarantees that we are within a valid
         // process's context.
@@ -504,7 +564,7 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
                 .ppn(),
         };
         satp.encode().as_usize()
-    });
+    };
 
     // Enable interrupts in user mode
     asm::set_spie();
@@ -515,8 +575,9 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
     let ret_user = unsafe {
         mem::transmute::<usize, unsafe extern "C" fn(usize) -> !>(trampoline::ret_user())
     };
-    LOCAL_HART.with(|hart| hart.trap.set(false));
 
+    drop(intr);
+    LOCAL_HART.inhibit_intena.set(false);
     // SAFETY: The function address is valid and we have provided it with the proper values.
     unsafe { (ret_user)(satp) }
 }

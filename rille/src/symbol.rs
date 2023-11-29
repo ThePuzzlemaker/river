@@ -97,12 +97,15 @@ mod kernel_symbols {
         static __text_end: Symbol;
         static __tdata_start: Symbol;
         static __tdata_end: Symbol;
+        static __tbss_start: Symbol;
+        static __tbss_end: Symbol;
         static TRAMPOLINE_START: Symbol;
         static trampoline: Symbol;
         static ret_user: Symbol;
         static user_code_woo: Symbol;
     }
 
+    #[rustfmt::skip]
     impl_symbols![
         /// Start of all kernel data
         kernel_start; KERNEL_START,
@@ -133,6 +136,11 @@ mod kernel_symbols {
         tdata_start; __tdata_start,
         /// End of hart-local data `.tdata`
         tdata_end; __tdata_end,
+
+	/// Start of hart-local data `.tbss`
+	tbss_start; __tbss_start,
+	/// End of hart-local data `.tbss`
+	tbss_end; __tbss_end,
 
         /// Trampoline start
         trampoline_start; TRAMPOLINE_START,

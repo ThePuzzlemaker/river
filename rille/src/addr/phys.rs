@@ -43,20 +43,29 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     /// This function will panic if the address is not in the correct address
     /// space.
     #[track_caller]
+    #[inline]
     pub fn from_usize(addr: usize) -> Self {
-        match Self::try_from_usize(addr) {
-            Some(phys_addr) => phys_addr,
-            None => panic!(
-                "Physical::from_usize: not in address space: addr={:#p}, map={:?}, mut={:?}",
-                addr as *mut u8,
-                Map::default(),
-                Mut::default()
-            ),
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_from_usize(addr) {
+                Some(phys_addr) => phys_addr,
+                None => panic!(
+                    "Physical::from_usize: not in address space: addr={:#p}, map={:?}, mut={:?}",
+                    addr as *mut u8,
+                    Map::default(),
+                    Mut::default()
+                ),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(addr) }
         }
     }
 
     /// Create a [`Physical`] address from a [`usize`], checking whether it is in
     /// the correct address space.
+    #[inline]
     pub fn try_from_usize(addr: usize) -> Option<Self> {
         if !Map::paddr_space().contains(&addr) {
             return None;
@@ -68,6 +77,7 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
 
     /// Create a [`Physical`] address from a pointer, checking whether it is in
     /// the correct address space.
+    #[inline]
     pub fn try_from_ptr(ptr: Mut::RawPointer<T>) -> Option<Self> {
         let addr = Mut::into_usize(ptr);
         Self::try_from_usize(addr)
@@ -80,15 +90,23 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     /// This function will panic if the address is not in the correct address
     /// space.
     #[track_caller]
+    #[inline]
     pub fn from_ptr(ptr: Mut::RawPointer<T>) -> Self {
-        match Self::try_from_ptr(ptr) {
-            Some(paddr) => paddr,
-            None => panic!(
-                "Physical::from_ptr: not in address space: addr={:#p}, map={:?}, mut={:?}",
-                ptr,
-                Map::default(),
-                Mut::default()
-            ),
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_from_ptr(ptr) {
+                Some(paddr) => paddr,
+                None => panic!(
+                    "Physical::from_ptr: not in address space: addr={:#p}, map={:?}, mut={:?}",
+                    ptr,
+                    Map::default(),
+                    Mut::default()
+                ),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(Mut::into_usize(ptr)) }
         }
     }
 
@@ -147,10 +165,18 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     #[allow(clippy::should_implement_trait)]
     #[track_caller]
     #[must_use]
+    #[inline]
     pub fn add(self, by: usize) -> Self {
-        match self.checked_add(by) {
-            Some(paddr) => paddr,
-            None => panic!("Physical::add out of range: self={:#p}, by={:#x}", self, by),
+        #[cfg(debug_assertions)]
+        {
+            match self.checked_add(by) {
+                Some(paddr) => paddr,
+                None => panic!("Physical::add out of range: self={:#p}, by={:#x}", self, by),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(self.into_usize() + by) }
         }
     }
 
@@ -171,15 +197,24 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     #[allow(clippy::should_implement_trait)]
     #[track_caller]
     #[must_use]
+    #[inline]
     pub fn sub(self, by: usize) -> Self {
-        match self.checked_sub(by) {
-            Some(paddr) => paddr,
-            None => panic!("Physical::sub out of range: self={:#p}, by={:#x}", self, by),
+        #[cfg(debug_assertions)]
+        {
+            match self.checked_sub(by) {
+                Some(paddr) => paddr,
+                None => panic!("Physical::sub out of range: self={:#p}, by={:#x}", self, by),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(self.into_usize() - by) }
         }
     }
 
     /// Decrement an address `by` bytes, returning [`None`] if the
     /// resulting address is outside of the [`Mapping`]'s range.
+    #[inline]
     pub fn checked_sub(self, by: usize) -> Option<Self> {
         let paddr = self.into_usize();
         let paddr = paddr.checked_sub(by)?;
@@ -193,21 +228,30 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     /// This function will panic if the address is outside of the [`Mapping`]'s
     /// range.
     #[track_caller]
+    #[inline]
     pub fn into_virt(self) -> Virtual<T, Map, Mut> {
-        match self.try_into_virt() {
-            Some(vaddr) => vaddr,
-            None => panic!(
-                "Physical::into_virt out of range: self={:#p}, map={:?}, mut={:?}",
-                self,
-                Map::default(),
-                Mut::default()
-            ),
+        #[cfg(debug_assertions)]
+        {
+            match self.try_into_virt() {
+                Some(vaddr) => vaddr,
+                None => panic!(
+                    "Physical::into_virt out of range: self={:#p}, map={:?}, mut={:?}",
+                    self,
+                    Map::default(),
+                    Mut::default()
+                ),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Map::phys2virt_unchecked(self) }
         }
     }
 
     /// Try to convert this address into a [`Virtual`] address,
     /// returning [`None`] if the address is outside of the
     /// [`Mapping`]'s range.
+    #[inline]
     pub fn try_into_virt(self) -> Option<Virtual<T, Map, Mut>> {
         Map::phys2virt(self)
     }
@@ -240,16 +284,29 @@ impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     /// This function will panic if the address is outside of the [`Mapping`]'s
     /// range.
     #[track_caller]
+    #[inline]
     pub fn from_components(ppn: Ppn, pgoff: Option<PgOff>) -> Self {
-        match Self::try_from_components(ppn, pgoff) {
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_from_components(ppn, pgoff) {
             Some(paddr) => paddr,
             None => panic!("Physical::from_components: not in address space: ppn={:?}, pgoff={:?}, map={:?}, mut={:?}", ppn, pgoff, Map::default(), Mut::default())
+        }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe {
+                Self::from_usize_unchecked(
+                    ppn.into_usize() << 12 | pgoff.unwrap_or_default().into_usize(),
+                )
+            }
         }
     }
 
     /// Try to create an address from a physical page number and,
     /// optionally, an offset into the page. This function will return
     /// [`None`] if the address is outside of the [`Mapping`]'s range.
+    #[inline]
     pub fn try_from_components(ppn: Ppn, pgoff: Option<PgOff>) -> Option<Self> {
         let ppn = ppn.into_usize() << 12;
         let pgoff = pgoff.unwrap_or_default().into_usize();
@@ -306,30 +363,35 @@ impl Ppn {
     }
 
     /// Convert a [`Ppn`] into a [`usize`].
+    #[inline(always)]
     pub fn into_usize(self) -> usize {
         self.0
     }
 }
 
 impl From<u64> for Ppn {
+    #[inline]
     fn from(x: u64) -> Ppn {
         Ppn::from_usize_truncate(x as usize)
     }
 }
 
 impl From<Ppn> for u64 {
+    #[inline]
     fn from(x: Ppn) -> u64 {
         x.into_usize() as u64
     }
 }
 
 impl From<usize> for Ppn {
+    #[inline]
     fn from(x: usize) -> Ppn {
         Ppn::from_usize_truncate(x)
     }
 }
 
 impl From<Ppn> for usize {
+    #[inline]
     fn from(x: Ppn) -> usize {
         x.into_usize()
     }

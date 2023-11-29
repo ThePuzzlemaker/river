@@ -618,10 +618,10 @@ impl SharedPageTable {
             let entry = &mut table.ptes[vpn.into_usize()];
 
             if iter == 0 {
-                assert!(
-		    entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(),
-		    "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags
-		);
+                // assert!(
+                //     entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(),
+                //     "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags
+                // );
 
                 entry.update_in_place(|mut pte| {
                     pte.flags = flags;

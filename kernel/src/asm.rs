@@ -1,4 +1,6 @@
 use core::arch::asm;
+use core::intrinsics::unlikely;
+use core::sync::atomic::{self, Ordering};
 
 use crate::{
     hart_local::{self, LOCAL_HART},
@@ -26,7 +28,7 @@ pub fn write_sstatus(x: u64) {
 }
 
 #[inline]
-pub fn intr_enabled() -> bool {
+fn intr_enabled() -> bool {
     (read_sstatus() & SSTATUS_SIE) != 0
 }
 
@@ -63,7 +65,7 @@ pub fn clear_spp() -> bool {
 }
 
 /// Disable S-interrupts. Returns whether or not they were enabled before.
-#[inline]
+#[inline(always)]
 pub fn intr_off() -> bool {
     let r: u64;
     // SAFETY: Writes to CSRs are atomic.
@@ -72,15 +74,77 @@ pub fn intr_off() -> bool {
 }
 
 /// Enable S-interrupts. Returns whether or not they were enabled before.
-#[inline]
+#[inline(always)]
+#[track_caller]
 pub fn intr_on() -> bool {
+    debug_assert_eq!(
+        LOCAL_HART.holding_disabler.get(),
+        0,
+        "asm::intr_on: holding disabler"
+    );
     let r: u64;
     // SAFETY: Writes to CSRs are atomic.
     unsafe { asm!("csrrs {}, sstatus, {}", out(reg) r, in(reg) SSTATUS_SIE, options(nostack)) }
     r & SSTATUS_SIE != 0
 }
 
-#[inline]
+#[derive(Debug)]
+#[repr(C)]
+pub struct InterruptDisabler(u8);
+
+impl InterruptDisabler {
+    #[track_caller]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn new() -> Self {
+        let prev = intr_off();
+        if !hart_local::enabled() {
+            return Self(0);
+        }
+
+        atomic::compiler_fence(Ordering::SeqCst);
+
+        // DEBUG: If interrupts were previously disabled, make sure
+        // they didn't get enabled in the meantime.
+        debug_assert!(
+            !(prev && LOCAL_HART.holding_disabler.get() != 0),
+            "InterruptDisabler::new: interrupts were enabled when intena was previously disabled"
+        );
+        LOCAL_HART.holding_disabler.update(|x| x + 1);
+        if LOCAL_HART.holding_disabler.get() == 1 {
+            LOCAL_HART.intena.set(prev);
+        }
+        Self(0)
+    }
+}
+
+impl Default for InterruptDisabler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for InterruptDisabler {
+    fn drop(&mut self) {
+        debug_assert!(
+            !intr_enabled(),
+            "InterruptDisabler: interrupts were enabled"
+        );
+        if !hart_local::enabled() {
+            // Interrupts are disabled before hart-local data is enabled.
+            return;
+        }
+
+        atomic::compiler_fence(Ordering::SeqCst);
+        // TODO: figure out where this is trying to overflow
+        let new = LOCAL_HART.holding_disabler.update(|x| x - 1);
+
+        if LOCAL_HART.intena.get() && new == 0 && !LOCAL_HART.inhibit_intena.get() {
+            intr_on();
+        }
+    }
+}
+
+#[inline(always)]
 pub fn tp() -> u64 {
     let x: u64;
     // SAFETY: We are just reading some data to a known valid variable.
@@ -94,7 +158,7 @@ pub fn tp() -> u64 {
 ///
 /// This function is only safe if the thread pointer has not been set
 /// elsewhere and is being set to a valid address.
-#[inline]
+#[inline(always)]
 pub unsafe fn set_tp(v: usize) -> u64 {
     let tp = tp();
     // SAFETY: Our caller guarantees this is safe.
@@ -109,15 +173,18 @@ pub unsafe fn set_tp(v: usize) -> u64 {
 ///
 /// This function will panic if interrupts are enabled when called.
 #[track_caller]
+#[inline(always)]
 pub fn hartid() -> u64 {
     let tp = tp() as usize;
     // Before TLS is enabled, tp contains the hartid.
-    if hart_local::enabled() {
-        assert!(!intr_enabled(), "hartid: interrupts were enabled");
-        LOCAL_HART.with(|hart| hart.hartid.get())
-    } else {
-        tp as u64
+    if unlikely(!hart_local::enabled()) {
+        return tp as u64;
     }
+
+    // Prevent this load from getting moved up.
+    atomic::compiler_fence(Ordering::SeqCst);
+
+    LOCAL_HART.hartid.get()
 }
 
 #[inline]
@@ -179,13 +246,20 @@ pub fn timer_intr_off() -> bool {
 #[inline]
 pub fn timer_intr_clear() {
     // SAFETY: Writes to CSRs are atomic
-    unsafe { asm!("csrrc {}, sie, {}", out(reg) _, in(reg) SIP_STIP, options(nostack)) }
+    unsafe { asm!("csrrc {}, sip, {}", out(reg) _, in(reg) SIP_STIP, options(nostack)) }
+}
+
+#[inline]
+pub fn software_intr_clear() {
+    // SAFETY: Writes to CSRs are atomic
+    unsafe { asm!("csrrc {}, sip, {}", out(reg) _, in(reg) SIP_SSIP, options(nostack)) }
 }
 
 const SIE_SSIE: u64 = 1 << 1;
 const SIE_STIE: u64 = 1 << 5;
 const SIP_STIP: u64 = 1 << 5;
 const SIE_SEIE: u64 = 1 << 9;
+const SIP_SSIP: u64 = 1 << 1;
 
 #[inline]
 pub fn read_sepc() -> u64 {
@@ -258,6 +332,7 @@ pub fn read_stvec() -> u64 {
 /// # Safety
 ///
 /// The address provided must be a valid value for a trap handler.
+#[inline(always)]
 pub unsafe fn write_stvec(stvec: *const u8) {
     // SAFETY: Writes to CSRs are atomic, and our caller guarantees the value is valid.
     unsafe { asm!("csrw stvec, {}", in(reg) stvec, options(nostack)) }

@@ -129,6 +129,8 @@ ret_user:
 
     ld t0, 32(t0)
 
+//    csrs sstatus, 2 // Reenable interrupts
+
     // Return to U-mode. Our caller must have set stval and made sure SPP is
     // off.
     sret

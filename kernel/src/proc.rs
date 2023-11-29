@@ -23,9 +23,9 @@ use crate::{
 };
 
 mod context;
-mod sched;
+//mod sched;
 pub use context::*;
-pub use sched::*;
+//pub use sched::*;
 
 use self::mman::UserMemoryManager;
 
@@ -168,15 +168,12 @@ impl<'h> ProcToken<'h> {
     }
 
     pub fn yield_to_scheduler(&self) {
-        let intena = self.hart.intena.get();
         let proc = &self.proc;
 
         proc.set_state(ProcState::Runnable);
         // SAFETY: The scheduler context is always valid, as
         // guaranteed by the scheduler.
         unsafe { Context::switch(&self.hart.context, &proc.context) }
-
-        self.hart.intena.set(intena);
     }
 }
 

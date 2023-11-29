@@ -1,13 +1,14 @@
 use core::{
     cell::UnsafeCell,
     fmt, hint,
+    intrinsics::likely,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::{
-    asm::{self, hartid},
+    asm::{hartid, InterruptDisabler},
     hart_local::{self, LOCAL_HART},
 };
 
@@ -41,6 +42,8 @@ pub struct SpinRwLock<T> {
     /// The number of readers. If above [`u32::MAX`], then `state -
     /// u32::MAX` is the hart id of the current mutable lock holder.
     state: AtomicU64,
+    #[cfg(debug_assertions)]
+    readers_bitmap: AtomicU64,
 }
 
 // SAFETY: `SpinRwLock`s provide shared access if there is no
@@ -62,6 +65,8 @@ impl<T> SpinRwLock<T> {
         Self {
             state: AtomicU64::new(0),
             data: UnsafeCell::new(data),
+            #[cfg(debug_assertions)]
+            readers_bitmap: AtomicU64::new(0),
         }
     }
 
@@ -92,14 +97,14 @@ impl<T> SpinRwLock<T> {
     /// >=`usize::MAX-1`, or if it detects a deadlock.
     #[track_caller]
     pub fn try_read(&'_ self) -> Option<SpinRwLockReadGuard<'_, T>> {
-        // Disable interrupts to prevent deadlocks. Interrupts will
-        // always be disabled before TLS is enabled, as it's enabled
-        // very early (before paging, even)
-        let hartid = if hart_local::enabled() {
-            LOCAL_HART.with(|hart| {
-                hart.push_off();
-                hart.hartid.get()
-            })
+        // Disable interrupts to prevent deadlocks.
+        let intr = InterruptDisabler::new();
+
+        let hart_local_enabled = hart_local::enabled();
+        // TODO: just use `hartid()` for all of these here and in
+        // `SpinMutex`
+        let hartid = if likely(hart_local_enabled) {
+            LOCAL_HART.hartid.get()
         } else {
             hartid()
         };
@@ -158,8 +163,13 @@ li {error}, 1
         match error {
             0 => {
                 // We have acquired the lock.
+                #[cfg(debug_assertions)]
+                {
+                    self.readers_bitmap.fetch_or(1 << hartid, Ordering::Release);
+                }
                 Some(SpinRwLockReadGuard {
                     rwlock: self,
+                    _intr: intr,
                     _phantom: PhantomData,
                 })
             }
@@ -170,10 +180,6 @@ li {error}, 1
                     !(old >= u32::MAX as u64 && old == hartid + u32::MAX as u64),
                     "SpinRwLock::try_read: deadlock detected"
                 );
-                // Make sure we re-enable interrupts
-                if hart_local::enabled() {
-                    LOCAL_HART.with(hart_local::HartCtx::pop_off);
-                }
                 None
             }
             _ => unreachable!(),
@@ -189,14 +195,11 @@ li {error}, 1
     /// >=`usize::MAX-1`, or if it detects a deadlock.
     #[track_caller]
     pub fn read(&'_ self) -> SpinRwLockReadGuard<'_, T> {
-        // Disable interrupts to prevent deadlocks. Interrupts will
-        // always be disabled before TLS is enabled, as it's enabled
-        // very early (before paging, even)
-        let hartid = if hart_local::enabled() {
-            LOCAL_HART.with(|hart| {
-                hart.push_off();
-                hart.hartid.get()
-            })
+        // Disable interrupts to prevent deadlocks.
+        let intr = InterruptDisabler::new();
+        let hart_local_enabled = hart_local::enabled();
+        let hartid = if likely(hart_local_enabled) {
+            LOCAL_HART.hartid.get()
         } else {
             hartid()
         };
@@ -256,11 +259,17 @@ bnez t1, 2b
             "SpinRwLock::try_read: too many readers"
         );
 
+        #[cfg(debug_assertions)]
+        {
+            self.readers_bitmap.fetch_or(1 << hartid, Ordering::Release);
+        }
+
         // We have acquired the lock. If we had too many readers, the
         // above guard caught that. And we would've spun if we were
         // still locked.
         SpinRwLockReadGuard {
             rwlock: self,
+            _intr: intr,
             _phantom: PhantomData,
         }
     }
@@ -273,17 +282,20 @@ bnez t1, 2b
     /// This function will panic if it detects a deadlock.
     #[track_caller]
     pub fn try_write(&'_ self) -> Option<SpinRwLockWriteGuard<'_, T>> {
-        // Disable interrupts to prevent deadlocks. Interrupts will
-        // always be disabled before TLS is enabled, as it's enabled
-        // very early (before paging, even).
-        let hartid = if hart_local::enabled() {
-            LOCAL_HART.with(|hart| {
-                hart.push_off();
-                hart.hartid.get()
-            })
+        // Disable interrupts to prevent deadlocks.
+        let intr = InterruptDisabler::new();
+        let hart_local_enabled = hart_local::enabled();
+        let hartid = if likely(hart_local_enabled) {
+            LOCAL_HART.hartid.get()
         } else {
             hartid()
         };
+
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.readers_bitmap.load(Ordering::Acquire) & (1 << hartid) == 0,
+            "SpinRwLock::try_write: deadlock detected: already reading"
+        );
 
         // Try to set the state to locked-writable, if it was
         // unlocked.
@@ -310,15 +322,12 @@ bnez t1, 2b
                 !(e >= u32::MAX as u64 && e == hartid + u32::MAX as u64),
                 "SpinRwLock::try_write: deadlock detected"
             );
-            // Make sure we re-enable interrupts if we didn't lock.
-            if hart_local::enabled() {
-                LOCAL_HART.with(hart_local::HartCtx::pop_off);
-            }
             return None;
         }
 
         Some(SpinRwLockWriteGuard {
             rwlock: self,
+            _intr: intr,
             _phantom: PhantomData,
         })
     }
@@ -331,16 +340,18 @@ bnez t1, 2b
     #[track_caller]
     pub fn write(&'_ self) -> SpinRwLockWriteGuard<'_, T> {
         // Disable interrupts to prevent deadlocks.
-        // Interrupts will always be disabled before TLS is enabled,
-        // as it's enabled very early (before paging, even).
-        let hartid = if hart_local::enabled() {
-            LOCAL_HART.with(|hart| {
-                hart.push_off();
-                hart.hartid.get()
-            })
+        let intr = InterruptDisabler::new();
+        let hartid = if likely(hart_local::enabled()) {
+            LOCAL_HART.hartid.get()
         } else {
             hartid()
         };
+
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.readers_bitmap.load(Ordering::Acquire) & (1 << hartid) == 0,
+            "SpinRwLock::write: deadlock detected: already reading"
+        );
 
         // Try to set the locked state to locked-writable, if it was
         // unlocked. Spin if we can't.
@@ -372,6 +383,7 @@ bnez t1, 2b
 
         SpinRwLockWriteGuard {
             rwlock: self,
+            _intr: intr,
             _phantom: PhantomData,
         }
     }
@@ -386,7 +398,15 @@ impl<T: Default> Default for SpinRwLock<T> {
 impl<T: fmt::Debug> fmt::Debug for SpinRwLock<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.try_read() {
-            Some(lock) => f.debug_struct("SpinRwLock").field("data", &*lock).finish(),
+            Some(lock) => {
+                let mut x = f.debug_struct("SpinRwLock");
+                x.field("data", &*lock);
+                #[cfg(debug_assertions)]
+                {
+                    x.field("readers", &self.readers_bitmap.load(Ordering::Relaxed));
+                }
+                x.finish()
+            }
             None => f
                 .debug_struct("SpinRwLock")
                 .field("data", &"<locked>")
@@ -399,6 +419,7 @@ impl<T: fmt::Debug> fmt::Debug for SpinRwLock<T> {
 pub struct SpinRwLockReadGuard<'a, T> {
     rwlock: &'a SpinRwLock<T>,
     _phantom: PhantomData<&'a T>,
+    _intr: InterruptDisabler,
 }
 
 impl<'a, T: 'a> SpinRwLockReadGuard<'a, T> {
@@ -413,35 +434,36 @@ impl<'a, T: 'a> SpinRwLockReadGuard<'a, T> {
         }
     }
 
-    /// Try to atomically upgrade this guard to a writable guard,
-    /// blocking until it can.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if it detects a deadlock.
-    pub fn upgrade(self) -> SpinRwLockWriteGuard<'a, T> {
-        // Interrupts are already disabled by way of holding this lock.
-        let hartid = hartid();
+    // /// Try to atomically upgrade this guard to a writable guard,
+    // /// blocking until it can.
+    // ///
+    // /// # Panics
+    // ///
+    // /// This function will panic if it detects a deadlock.
+    // pub fn upgrade(self) -> SpinRwLockWriteGuard<'a, T> {
+    //     // Interrupts are already disabled by way of holding this lock.
+    //     let hartid = hartid();
 
-        // Try to acquire-store the locked guard into the state, if
-        // there was only 1 reader (us). Spin if we can't.
-        if let Err(e) = self.rwlock.state.compare_exchange(
-            1,
-            u32::MAX as u64 + hartid,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
-            assert!(
-                !(e >= u32::MAX as u64 && e == hartid + u32::MAX as u64),
-                "SpinRwLockReadGuard::upgrade: deadlock detected"
-            );
-            hint::spin_loop();
-        }
-        SpinRwLockWriteGuard {
-            rwlock: self.rwlock,
-            _phantom: PhantomData,
-        }
-    }
+    //     // Try to acquire-store the locked guard into the state, if
+    //     // there was only 1 reader (us). Spin if we can't.
+    //     if let Err(e) = self.rwlock.state.compare_exchange(
+    //         1,
+    //         u32::MAX as u64 + hartid,
+    //         Ordering::Acquire,
+    //         Ordering::Relaxed,
+    //     ) {
+    //         assert!(
+    //             !(e >= u32::MAX as u64 && e == hartid + u32::MAX as u64),
+    //             "SpinRwLockReadGuard::upgrade: deadlock detected"
+    //         );
+    //         hint::spin_loop();
+    //     }
+    //     SpinRwLockWriteGuard {
+    //         rwlock: self.rwlock,
+    //         intr: self.intr,
+    //         _phantom: PhantomData,
+    //     }
+    // }
 }
 
 impl<'a, T: 'a> Deref for SpinRwLockReadGuard<'a, T> {
@@ -457,19 +479,15 @@ impl<'a, T: 'a> Deref for SpinRwLockReadGuard<'a, T> {
 
 impl<'a, T: 'a> Drop for SpinRwLockReadGuard<'a, T> {
     fn drop(&mut self) {
-        // Make sure, just in case, that interrupts are still off.
-        asm::intr_off();
-
         // Decrease the number of readers by one. The Release ordering
         // ensures that this unlock happens-before any Acquire-load
         // locks.
         self.rwlock.state.fetch_sub(1, Ordering::Release);
-
-        // If interrupts were previously enabled, re-enable them.
-        // Interrupts will always be disabled before TLS is enabled,
-        // as it's enabled very early (before paging, even).
-        if hart_local::enabled() {
-            LOCAL_HART.with(hart_local::HartCtx::pop_off);
+        #[cfg(debug_assertions)]
+        {
+            self.rwlock
+                .readers_bitmap
+                .fetch_and(!(1 << hartid()), Ordering::Release);
         }
     }
 }
@@ -498,22 +516,22 @@ impl<'a, T: 'a, U: ?Sized + 'a> MappedSpinRwLockReadGuard<'a, T, U> {
         }
     }
 
-    /// Try to atomically upgrade this guard to a writable guard,
-    /// blocking until it can.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if it detects a deadlock.
-    pub fn upgrade(self) -> MappedSpinRwLockWriteGuard<'a, T, U> {
-        let guard = self.guard.upgrade();
-        MappedSpinRwLockWriteGuard {
-            guard,
-            // This pointer is valid, as we have just upgraded the
-            // guard to mutable, and doing so will not allow the
-            // underlying data to be moved or invalidated.
-            mapped: self.mapped.cast_mut(),
-        }
-    }
+    // /// Try to atomically upgrade this guard to a writable guard,
+    // /// blocking until it can.
+    // ///
+    // /// # Panics
+    // ///
+    // /// This function will panic if it detects a deadlock.
+    // pub fn upgrade(self) -> MappedSpinRwLockWriteGuard<'a, T, U> {
+    //     let guard = self.guard.upgrade();
+    //     MappedSpinRwLockWriteGuard {
+    //         guard,
+    //         // This pointer is valid, as we have just upgraded the
+    //         // guard to mutable, and doing so will not allow the
+    //         // underlying data to be moved or invalidated.
+    //         mapped: self.mapped.cast_mut(),
+    //     }
+    // }
 }
 
 impl<'a, T: 'a, U: ?Sized + 'a> Deref for MappedSpinRwLockReadGuard<'a, T, U> {
@@ -534,6 +552,7 @@ impl<'a, T: 'a, U: ?Sized + fmt::Debug + 'a> fmt::Debug for MappedSpinRwLockRead
 
 pub struct SpinRwLockWriteGuard<'a, T> {
     rwlock: &'a SpinRwLock<T>,
+    _intr: InterruptDisabler,
     _phantom: PhantomData<&'a mut T>,
 }
 
@@ -545,6 +564,7 @@ impl<'a, T: 'a> SpinRwLockWriteGuard<'a, T> {
         let mapped = f(&mut *this) as *mut _;
         MappedSpinRwLockWriteGuard {
             guard: this,
+
             mapped,
         }
     }
@@ -570,20 +590,10 @@ impl<'a, T: 'a> DerefMut for SpinRwLockWriteGuard<'a, T> {
 
 impl<'a, T: 'a> Drop for SpinRwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
-        // Make sure, just in case, that interrupts are still off.
-        asm::intr_off();
-
         // Set the lock status to unlocked. The Release ordering
         // ensures that this unlock happens-before any Acquire-load
         // locks.
         self.rwlock.state.store(0, Ordering::Release);
-
-        // If interrupts were previously enabled, re-enable them.
-        // Interrupts will always be disabled before TLS is enabled,
-        // as it's enabled very early (before paging, even).
-        if hart_local::enabled() {
-            LOCAL_HART.with(hart_local::HartCtx::pop_off);
-        }
     }
 }
 

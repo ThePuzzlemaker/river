@@ -63,20 +63,29 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     /// This function will panic if the address is not in the correct address
     /// space.
     #[track_caller]
+    #[inline]
     pub fn from_usize(addr: usize) -> Self {
-        match Self::try_from_usize(addr) {
-            Some(virt_addr) => virt_addr,
-            None => panic!(
-                "Virtual::from_usize: not in address space: addr={:#p}, map={:?}, mut={:?}",
-                addr as *mut u8,
-                Map::default(),
-                Mut::default()
-            ),
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_from_usize(addr) {
+                Some(virt_addr) => virt_addr,
+                None => panic!(
+                    "Virtual::from_usize: not in address space: addr={:#p}, map={:?}, mut={:?}",
+                    addr as *mut u8,
+                    Map::default(),
+                    Mut::default()
+                ),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(addr) }
         }
     }
 
     /// Create a [`Virtual`] address from a [`usize`], checking whether it is in
     /// the correct address space.
+    #[inline]
     pub fn try_from_usize(addr: usize) -> Option<Self> {
         let addr = canonicalize(addr);
         if !Map::vaddr_space().contains(&addr) {
@@ -89,6 +98,7 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
 
     /// Create a [`Virtual`] address from a pointer, checking whether it is in
     /// the correct address space.
+    #[inline]
     pub fn try_from_ptr(ptr: Mut::RawPointer<T>) -> Option<Self> {
         let addr = Mut::into_usize(ptr);
         Self::try_from_usize(addr)
@@ -101,15 +111,23 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     /// This function will panic if the address is not in the correct address
     /// space.
     #[track_caller]
+    #[inline]
     pub fn from_ptr(ptr: Mut::RawPointer<T>) -> Self {
-        match Self::try_from_ptr(ptr) {
-            Some(paddr) => paddr,
-            None => panic!(
-                "Virtual::from_ptr: not in address space: addr={:#p}, map={:?}, mut={:?}",
-                ptr,
-                Map::default(),
-                Mut::default()
-            ),
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_from_ptr(ptr) {
+                Some(paddr) => paddr,
+                None => panic!(
+                    "Virtual::from_ptr: not in address space: addr={:#p}, map={:?}, mut={:?}",
+                    ptr,
+                    Map::default(),
+                    Mut::default()
+                ),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(Mut::into_usize(ptr)) }
         }
     }
 
@@ -139,6 +157,7 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     /// i.e. the 0th is most significant, and the 2nd is least
     /// significant.
     // TODO: make this use Vpns
+    #[inline]
     pub fn vpns(self) -> [Vpn; 3] {
         // Remove the page offset by shifting 12 bits out.
         let addr_no_pgoff = self.addr >> 12;
@@ -160,16 +179,30 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     /// This function will panic if the resulting address is outside of the
     /// [`Mapping`]'s range.
     #[track_caller]
+    #[inline]
     pub fn from_components(vpns: [Vpn; 3], pgoff: Option<PgOff>) -> Self {
-        match Self::try_from_components(vpns, pgoff) {
+        #[cfg(debug_assertions)]
+        {
+            match Self::try_from_components(vpns, pgoff) {
             Some(vaddr) => vaddr,
             None => panic!("Virtual::from_components: not in address space: vpns={:?}, pgoff={:?}, map={:?}, mut={:?}", vpns, pgoff, Map::default(), Mut::default())
+        }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let [vpn_0, vpn_1, vpn_2] = vpns;
+            let vpn_2 = vpn_2.into_usize() << (9 * 2);
+            let vpn_1 = vpn_1.into_usize() << 9;
+            let vpn_0 = vpn_0.into_usize();
+            let pgoff = pgoff.unwrap_or_default().into_usize();
+            unsafe { Self::from_usize_unchecked(((vpn_2 | vpn_1 | vpn_0) << 12) | pgoff) }
         }
     }
 
     /// Create an address from virtual page numbers, and optionally,
     /// an offset into the page. This function will return [`None`] if
     /// the resulting address is outside of the [`Mapping`]'s range.
+    #[inline]
     pub fn try_from_components(vpns: [Vpn; 3], pgoff: Option<PgOff>) -> Option<Self> {
         let [vpn_0, vpn_1, vpn_2] = vpns;
         let vpn_2 = vpn_2.into_usize() << (9 * 2);
@@ -230,21 +263,30 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     /// This function will panic if the address is outside of the [`Mapping`]'s
     /// range.
     #[track_caller]
+    #[inline]
     pub fn into_phys(self) -> Physical<T, Map, Mut> {
-        match self.try_into_phys() {
-            Some(paddr) => paddr,
-            None => panic!(
-                "Virtual::into_virt out of range: self={:#p}, map={:?}, mut={:?}",
-                self,
-                Map::default(),
-                Mut::default()
-            ),
+        #[cfg(debug_assertions)]
+        {
+            match self.try_into_phys() {
+                Some(paddr) => paddr,
+                None => panic!(
+                    "Virtual::into_virt out of range: self={:#p}, map={:?}, mut={:?}",
+                    self,
+                    Map::default(),
+                    Mut::default()
+                ),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Map::virt2phys_unchecked(self) }
         }
     }
 
     /// Try to convert a virtual address into a physical address,
     /// returning [`None`] if the address is outside of the
     /// [`Mapping`]'s range.
+    #[inline]
     pub fn try_into_phys(self) -> Option<Physical<T, Map, Mut>> {
         Map::virt2phys(self)
     }
@@ -276,10 +318,18 @@ impl<T, Map: Mapping, Mut: Mutability> Virtual<T, Map, Mut> {
     #[allow(clippy::should_implement_trait)]
     #[track_caller]
     #[must_use]
+    #[inline]
     pub fn add(self, by: usize) -> Self {
-        match self.checked_add(by) {
-            Some(vaddr) => vaddr,
-            None => panic!("Virtual::add out of range: self={:#p}, by={:#x}", self, by),
+        #[cfg(debug_assertions)]
+        {
+            match self.checked_add(by) {
+                Some(vaddr) => vaddr,
+                None => panic!("Virtual::add out of range: self={:#p}, by={:#x}", self, by),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unsafe { Self::from_usize_unchecked(self.into_usize() + by) }
         }
     }
 
@@ -311,24 +361,28 @@ impl<T, Map: Mapping, Mut: Mutability> fmt::Pointer for Virtual<T, Map, Mut> {
 }
 
 impl<T, Map: Mapping, Mut: Mutability> From<u64> for Virtual<T, Map, Mut> {
+    #[inline]
     fn from(x: u64) -> Virtual<T, Map, Mut> {
         Self::from_usize(x as usize)
     }
 }
 
 impl<T, Map: Mapping, Mut: Mutability> From<usize> for Virtual<T, Map, Mut> {
+    #[inline]
     fn from(x: usize) -> Virtual<T, Map, Mut> {
         Self::from_usize(x)
     }
 }
 
 impl<T, Map: Mapping, Mut: Mutability> From<Virtual<T, Map, Mut>> for u64 {
+    #[inline]
     fn from(x: Virtual<T, Map, Mut>) -> u64 {
         x.into_usize() as u64
     }
 }
 
 impl<T, Map: Mapping, Mut: Mutability> From<Virtual<T, Map, Mut>> for usize {
+    #[inline]
     fn from(x: Virtual<T, Map, Mut>) -> usize {
         x.into_usize()
     }
@@ -350,35 +404,41 @@ impl Vpn {
     }
 
     /// Convert a Vpn into a [`usize`].
+    #[inline]
     pub fn into_usize(self) -> usize {
         self.0 as usize
     }
 
     /// Convert a Vpn into a [`u16`].
+    #[inline(always)]
     pub fn into_u16(self) -> u16 {
         self.0
     }
 }
 
 impl From<Vpn> for u16 {
+    #[inline]
     fn from(x: Vpn) -> u16 {
         x.into_u16()
     }
 }
 
 impl From<u16> for Vpn {
+    #[inline]
     fn from(x: u16) -> Vpn {
         Vpn::from_usize_truncate(x as usize)
     }
 }
 
 impl From<u64> for Vpn {
+    #[inline]
     fn from(x: u64) -> Vpn {
         Vpn::from_usize_truncate(x as usize)
     }
 }
 
 impl From<Vpn> for u64 {
+    #[inline]
     fn from(x: Vpn) -> u64 {
         x.into_u16() as u64
     }
@@ -401,18 +461,21 @@ impl fmt::Debug for Vpns {
 impl Deref for Vpns {
     type Target = [Vpn; 3];
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl DerefMut for Vpns {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
 impl From<Vpns> for u32 {
+    #[inline]
     fn from(x: Vpns) -> u32 {
         let [vpn0, vpn1, vpn2] = &*x;
         let vpn2 = vpn2.into_u16() as u32;
@@ -423,6 +486,7 @@ impl From<Vpns> for u32 {
 }
 
 impl From<u32> for Vpns {
+    #[inline]
     fn from(x: u32) -> Vpns {
         let x = x as usize;
         Vpns([

@@ -1,12 +1,14 @@
 use core::marker::PhantomData;
-use core::mem;
 use core::num::NonZeroU64;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU16, AtomicU64};
+use core::sync::atomic::{AtomicI8, AtomicU16, AtomicU64};
+use core::{cmp, mem};
 use core::{fmt, ptr};
 
+use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
 use num_enum::{FromPrimitive, IntoPrimitive};
@@ -22,17 +24,20 @@ pub use rille::capability::{
 
 pub type PageCap = rille::capability::paging::Page<DynLevel>;
 
-use rille::addr::{DirectMapped, Identity, PhysicalMut, VirtualConst};
-use rille::units::{self};
+use rille::addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst};
+use rille::symbol;
+use rille::units::{self, StorageUnits};
 
+use crate::asm::InterruptDisabler;
 use crate::hart_local::LOCAL_HART;
-use crate::kalloc;
 use crate::kalloc::phys::PMAlloc;
 use crate::paging::SharedPageTable;
-use crate::proc::{Context, Scheduler};
-use crate::sync::{SpinMutex, SpinRwLock, SpinRwLockWriteGuard};
+use crate::proc::Context;
+use crate::sched::Scheduler;
+use crate::sync::{SpinMutex, SpinMutexGuard, SpinRwLock, SpinRwLockWriteGuard};
 use crate::trampoline::Trapframe;
 use crate::trap::user_trap_ret;
+use crate::{asm, kalloc};
 
 use self::captbl::{Captbl, WeakCaptbl};
 use self::slotref::{SlotRef, SlotRefMut};
@@ -68,7 +73,7 @@ pub enum CapabilityKind {
     PgTbl(SharedPageTable) = CapabilityType::PgTbl as u8,
     Page(Page) = CapabilityType::Page as u8,
     Thread(Arc<Thread>) = CapabilityType::Thread as u8,
-    Notification(Arc<AtomicU64>) = CapabilityType::Notification as u8,
+    Notification(Arc<Notification>) = CapabilityType::Notification as u8,
 }
 
 impl fmt::Debug for CapabilityKind {
@@ -134,7 +139,7 @@ impl CapabilityKind {
         }
     }
 
-    pub fn notification(&self) -> Option<&Arc<AtomicU64>> {
+    pub fn notification(&self) -> Option<&Arc<Notification>> {
         if let Self::Notification(notif) = self {
             Some(notif)
         } else {
@@ -221,6 +226,7 @@ impl Captbl {
     /// If the capability at this slot was out of bounds,
     /// [`CapError::NotPresent`] will be returned. If the capability
     /// was of the wrong type, [`CapError::InvalidType`] is returned.
+    #[track_caller]
     pub fn get_mut<C: Capability>(&self, index: usize) -> CapResult<SlotRefMut<'_, C>> {
         if index == 0 {
             return Err(CapError::NotPresent);
@@ -271,7 +277,7 @@ pub enum AnyCapVal {
     Page(Page),
     PgTbl(SharedPageTable),
     Thread(Arc<Thread>),
-    Notification(Arc<AtomicU64>),
+    Notification(Arc<Notification>),
     // TODO
 }
 
@@ -383,13 +389,13 @@ impl CapabilityValue for Arc<Thread> {
         // dropped.
         if thread.slot_refcount.fetch_sub(1, Ordering::Release) == 1 {
             atomic::fence(Ordering::Acquire);
-            let mut private = thread.private.write();
+            let mut private = thread.private.lock();
             drop(private.captbl.take());
             drop(private);
         }
     }
 }
-impl CapabilityValue for Arc<AtomicU64> {
+impl CapabilityValue for Arc<Notification> {
     type Cap = NotificationCap;
     fn into_kind(self) -> CapabilityKind {
         CapabilityKind::Notification(self)
@@ -425,7 +431,7 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::PgTbl(_) => SharedPageTable::copy_hook(slot),
                 CapabilityKind::Page(_) => Page::copy_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::copy_hook(slot),
-                CapabilityKind::Notification(_) => Arc::<AtomicU64>::copy_hook(slot),
+                CapabilityKind::Notification(_) => Arc::<Notification>::copy_hook(slot),
             }
         }
     }
@@ -440,7 +446,7 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::PgTbl(_) => SharedPageTable::delete_hook(slot),
                 CapabilityKind::Page(_) => Page::delete_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::delete_hook(slot),
-                CapabilityKind::Notification(_) => Arc::<AtomicU64>::delete_hook(slot),
+                CapabilityKind::Notification(_) => Arc::<Notification>::delete_hook(slot),
             }
         }
     }
@@ -603,14 +609,8 @@ impl<'a> SlotRef<'a, ThreadCap> {
     pub fn suspend(&self) {
         // SAFETY: Type check.
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
-        Scheduler::dequeue(thread.hartid.load(Ordering::Relaxed), thread.tid);
-        // Release ordering ensures that the dequeue operation
-        // strictly happens-before this release operation, which then
-        // happens-before any accompanying Acquire load for suspend
-        // tests.
-        thread
-            .state
-            .store(ThreadState::Suspended, Ordering::Release);
+
+        thread.private.lock().state = ThreadState::Suspended;
     }
 
     /// Configure the captbl and page table of a thread.
@@ -621,27 +621,34 @@ impl<'a> SlotRef<'a, ThreadCap> {
     ///
     /// [1]: rille::capability::Captr::<rille::capability::Thread>::configure
     pub fn configure(&self, captbl: Captbl, pgtbl: SharedPageTable) -> CapResult<()> {
+        use crate::paging::PageTableFlags as KernelFlags;
         // SAFETY: Type check.
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
 
-        let state = thread.state.load(Ordering::Acquire);
-        if state != ThreadState::Suspended && state != ThreadState::Uninit {
+        let mut private = thread.private.lock();
+        if private.state != ThreadState::Suspended && private.state != ThreadState::Uninit {
             return Err(CapError::InvalidOperation);
         }
 
-        let mut private = thread.private.write();
         private.captbl = Some(captbl);
         let old_pgtbl = private.root_pgtbl.replace(pgtbl);
         if let Some(_pgtbl) = old_pgtbl {
             // TODO: pgtbl.unmap(VirtualConst::from(private.trapframe_addr))
         }
+        let trampoline_virt =
+            VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
+
+        private.root_pgtbl.as_mut().unwrap().map(
+            trampoline_virt.into_phys().into_identity(),
+            VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
+            KernelFlags::VAD | KernelFlags::RX,
+            PageSize::Base,
+        );
+
+        private.state = ThreadState::Suspended;
 
         drop(private);
-
         thread.setup_page_table();
-        thread
-            .state
-            .store(ThreadState::Suspended, Ordering::Release);
 
         Ok(())
     }
@@ -658,7 +665,7 @@ impl<'a> SlotRef<'a, ThreadCap> {
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
 
         let cont = {
-            let private = thread.private.read();
+            let private = thread.private.lock();
             private.root_pgtbl.is_some()
         };
 
@@ -666,8 +673,8 @@ impl<'a> SlotRef<'a, ThreadCap> {
             return Err(CapError::InvalidOperation);
         }
 
-        thread.state.store(ThreadState::Runnable, Ordering::Relaxed);
-        Scheduler::enqueue(thread.clone());
+        thread.private.lock().state = ThreadState::Runnable;
+        Scheduler::enqueue_dl(thread, None, &mut thread.private.lock());
 
         Ok(())
     }
@@ -679,7 +686,6 @@ impl<'a> SlotRef<'a, ThreadCap> {
     /// See [`Captr::<Thread>::write_regsters`][1].
     ///
     /// [1]: rille::capability::Captr::<rille::capability::Thread>::write_registers
-    ///
     pub fn write_registers(
         &self,
         registers: VirtualConst<UserRegisters, Identity>,
@@ -689,11 +695,12 @@ impl<'a> SlotRef<'a, ThreadCap> {
         // SAFETY: Type check.
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
 
-        if thread.state.load(Ordering::Acquire) != ThreadState::Suspended {
+        let private = thread.private.lock();
+
+        if private.state != ThreadState::Suspended {
             return Err(CapError::InvalidOperation);
         }
 
-        let private = thread.private.read();
         let Some((addr, flags)) = private
             .root_pgtbl
             .as_ref()
@@ -755,13 +762,243 @@ impl<'a> SlotRef<'a, ThreadCap> {
 pub struct Thread {
     pub trapframe: SpinMutex<OwnedTrapframe>,
     pub stack: ThreadKernelStack,
-    pub private: SpinRwLock<ThreadProtected>,
+    pub private: SpinMutex<ThreadProtected>,
     pub context: SpinMutex<Context>,
-    pub state: Atomic<ThreadState>,
     pub tid: usize,
-    pub hartid: AtomicU64,
     pub waiting_on: AtomicU64,
     pub slot_refcount: AtomicU64,
+    pub blocking_wqs: SpinMutex<Vec<OwnedWaitQueue>>,
+    pub blocked_on_wq: SpinMutex<Option<Weak<SpinMutex<WaitQueue>>>>,
+    pub affinity: SpinMutex<HartMask>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct HartMask(pub u64);
+
+impl Thread {
+    pub fn queue_pressure_changed(
+        self: Arc<Thread>,
+        mut old_prio: i8,
+        mut new_prio: i8,
+        accum_cpu_mask: &mut HartMask,
+    ) -> bool {
+        let inherited_prio = self.private.lock().prio.inherited_prio();
+        let mut local_resched = false;
+
+        let mut this = self;
+        loop {
+            if new_prio < old_prio {
+                // If the priority just dropped, but the old priority
+                // was strictly lower than the current inherited
+                // priority of the thread, then there is nothing to
+                // do. We can just stop. The maximum inherited
+                // priority must have come from a different wait
+                // queue.
+                if old_prio < inherited_prio {
+                    return local_resched;
+                }
+
+                // Prio dropped. We must recalculate the max from our
+                // blocking wait queues.
+                for wq in this.blocking_wqs.lock().iter() {
+                    let prio = wq.inner.lock().highest_prio();
+
+                    new_prio = cmp::max(new_prio, prio);
+                }
+
+                // If our new priority is still the same as our
+                // current inherited priority, then we are done.
+                if new_prio == inherited_prio {
+                    return local_resched;
+                }
+            } else {
+                // If the priority just went up, but it's not greater
+                // than our current inherited priority, then there is
+                // nothing to do.
+                if new_prio <= inherited_prio {
+                    return local_resched;
+                }
+            }
+
+            // let old_effec_prio = prios.effective();
+            // let old_inherited_prio = prios.inherited_prio;
+            let old_queue_prio =
+                if let Some(wq) = this.blocked_on_wq.lock().as_ref().and_then(Weak::upgrade) {
+                    wq.lock().highest_prio()
+                } else {
+                    -1
+                };
+
+            this.inherit_priority(new_prio, &mut local_resched, accum_cpu_mask);
+
+            let new_queue_prio =
+                if let Some(wq) = this.blocked_on_wq.lock().as_ref().and_then(Weak::upgrade) {
+                    wq.lock().highest_prio()
+                } else {
+                    -1
+                };
+
+            if old_queue_prio == new_queue_prio {
+                return local_resched;
+            }
+
+            let lock = this.blocked_on_wq.lock();
+            if let Some(wq) = lock.as_ref().and_then(Weak::upgrade) {
+                drop(lock);
+                if let Some(owner) = wq.lock().owner.as_ref().and_then(Weak::upgrade) {
+                    this = owner;
+                    old_prio = old_queue_prio;
+                    new_prio = new_queue_prio;
+                    continue;
+                }
+            } else {
+                drop(lock);
+            }
+        }
+    }
+
+    fn inherit_priority(
+        self: &Arc<Thread>,
+        mut prio: i8,
+        local_resched: &mut bool,
+        accum_cpu_mask: &mut HartMask,
+    ) {
+        prio = cmp::min(32, prio);
+
+        let prios = &mut self.private.lock().prio;
+        let old_eff_prio = prios.effective();
+        prios.inherited_prio = prio;
+        let eff_prio = prios.effective();
+        if old_eff_prio == eff_prio {
+            // same eff. prio, nothing to do
+            return;
+        }
+
+        crate::sched::Scheduler::prio_changed(
+            self,
+            old_eff_prio,
+            eff_prio,
+            local_resched,
+            accum_cpu_mask,
+            false,
+        );
+    }
+
+    #[track_caller]
+    pub fn wait_queue_priority_changed(
+        self: &Arc<Thread>,
+        old_prio: i8,
+        new_prio: i8,
+        propagate: bool,
+    ) {
+        let wq = {
+            self.blocked_on_wq
+                .lock()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .unwrap()
+        };
+
+        let mut lock = wq.lock();
+        lock.remove(old_prio, self);
+        lock.insert(new_prio, self);
+
+        if propagate {
+            WaitQueue::waiters_changed(lock, old_prio);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct OwnedWaitQueue {
+    inner: Arc<SpinMutex<WaitQueue>>,
+    owner: Weak<Thread>,
+}
+
+impl OwnedWaitQueue {
+    pub fn new(owner: Weak<Thread>) -> Self {
+        OwnedWaitQueue {
+            inner: Arc::new(SpinMutex::new(WaitQueue::new(Some(owner.clone())))),
+            owner,
+        }
+    }
+
+    pub fn enqueue(&self, thread: &Arc<Thread>, wq: &mut WaitQueue, prio: i8) {
+        wq.insert(prio, thread);
+    }
+
+    pub fn inner(&self) -> &Arc<SpinMutex<WaitQueue>> {
+        &self.inner
+    }
+}
+
+#[derive(Debug)]
+pub struct WaitQueue {
+    inner: BTreeMap<i8, VecDeque<Arc<Thread>>>,
+    owner: Option<Weak<Thread>>,
+}
+
+impl WaitQueue {
+    pub fn new(owner: Option<Weak<Thread>>) -> WaitQueue {
+        Self {
+            inner: BTreeMap::new(),
+            owner,
+        }
+    }
+
+    pub fn find_highest_thread(&mut self) -> Option<Arc<Thread>> {
+        let mut x = None;
+        for (_, queue) in self.inner.iter_mut().rev() {
+            if let Some(thread) = queue.pop_front() {
+                x = Some(thread);
+            }
+        }
+        x
+    }
+
+    fn highest_prio(&self) -> i8 {
+        let Some(queue) = self.inner.last_key_value() else {
+            return -1;
+        };
+        *queue.0
+    }
+
+    fn remove(&mut self, prio: i8, thread: &Arc<Thread>) {
+        self.inner
+            .get_mut(&prio)
+            .unwrap()
+            .retain(|x| !Arc::ptr_eq(x, thread));
+    }
+
+    pub fn insert(&mut self, prio: i8, thread: &Arc<Thread>) {
+        self.inner
+            .entry(prio)
+            .or_default()
+            .push_back(thread.clone());
+    }
+
+    fn waiters_changed(this: SpinMutexGuard<'_, Self>, old_prio: i8) -> bool {
+        if let Some(owner) = this.owner.as_ref().and_then(Weak::upgrade) {
+            if this.highest_prio() != old_prio {
+                let new_prio = this.highest_prio();
+                let mut mask = HartMask(0);
+                drop(this);
+                let local_resched = owner.queue_pressure_changed(old_prio, new_prio, &mut mask);
+                let cur_hart = asm::hartid();
+                let mut sbi_mask = sbi::HartMask::new(0);
+                for hart in mask.harts() {
+                    if hart != cur_hart {
+                        crate::info!("IPI to {hart}");
+                        sbi_mask = sbi_mask.with(hart as usize);
+                    }
+                }
+                sbi::ipi::send_ipi(sbi_mask).unwrap();
+                return local_resched;
+            }
+        }
+        false
+    }
 }
 
 pub struct OwnedTrapframe {
@@ -828,34 +1065,34 @@ impl Thread {
         captbl: Option<Captbl>,
         pgtbl: Option<SharedPageTable>,
     ) -> Arc<Thread> {
-        let mut this = Arc::<Thread>::new_uninit();
-        let this_mut = Arc::get_mut(&mut this).unwrap();
-
         let tid = next_tid();
 
-        // SAFETY: These initialization addresses are valid.
-        unsafe {
-            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).trapframe)
-                .write(SpinMutex::new(OwnedTrapframe::new()));
-            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).stack).write(ThreadKernelStack::new());
-            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).private).write(SpinRwLock::new(
-                ThreadProtected {
-                    captbl,
-                    root_pgtbl: pgtbl,
-                    asid: 1, // TODO
-                    name,
-                    trapframe_addr: 0,
+        let this = Arc::new(Thread {
+            trapframe: SpinMutex::new(OwnedTrapframe::new()),
+            stack: ThreadKernelStack::new(),
+            private: SpinMutex::new(ThreadProtected {
+                captbl,
+                root_pgtbl: pgtbl,
+                asid: 1, /*TODO*/
+                name,
+                trapframe_addr: 0,
+                prio: ThreadPriorities {
+                    base_prio: 0,
+                    inherited_prio: 0,
+                    prio_boost: 0,
                 },
-            ));
-            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).state)
-                .write(Atomic::new(ThreadState::Uninit));
-            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).tid).write(tid as usize);
-            ptr::addr_of_mut!((*((*this_mut).as_mut_ptr())).hartid).write(AtomicU64::new(u64::MAX));
-        }
+                state: ThreadState::Uninit,
+                hartid: u64::MAX,
+            }),
+            context: SpinMutex::new(Context::default()),
+            tid: tid as usize,
+            waiting_on: AtomicU64::new(0),
+            slot_refcount: AtomicU64::new(0),
+            blocking_wqs: SpinMutex::new(Vec::new()),
+            blocked_on_wq: SpinMutex::new(None),
+            affinity: SpinMutex::new(HartMask(0xFFFF_FFFF_FFFF_FFFF)),
+        });
 
-        // SAFETY: We have just initialized this.
-        // - context is zeroable.
-        let this = unsafe { this.assume_init() };
         {
             this.context.lock().ra = user_trap_ret as usize as u64;
             this.context.lock().sp =
@@ -875,7 +1112,7 @@ impl Thread {
     pub fn setup_page_table(&self) {
         use crate::paging::PageTableFlags as KernelFlags;
 
-        let mut private = self.private.write();
+        let mut private = self.private.lock();
         let trapframe_phys = self.trapframe.lock().as_phys();
 
         let trapframe_mapped_addr = private
@@ -908,28 +1145,24 @@ impl Thread {
     ///
     /// TODO
     pub unsafe fn yield_to_scheduler_final(self: Arc<Thread>) {
-        LOCAL_HART.with(|hart| {
-            let intena = hart.intena.get();
+        let intr = InterruptDisabler::new();
 
-            let mut ctx_lock = self.context.lock();
-            let ctx = SpinMutex::new(mem::replace(
-                &mut *ctx_lock,
-                Context {
-                    ra: user_trap_ret as usize as u64,
-                    sp: self.stack.inner.into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64,
-                    ..Context::default()
-                },
-            ));
-            drop(ctx_lock);
-            drop(self);
-            {
-                // SAFETY: The scheduler context is always valid, as
-                // guaranteed by the scheduler.
-                unsafe { Context::switch(&hart.context, &ctx) }
-            }
-
-            hart.intena.set(intena);
-        });
+        let mut ctx_lock = self.context.lock();
+        let ctx = SpinMutex::new(mem::replace(
+            &mut *ctx_lock,
+            Context {
+                ra: user_trap_ret as usize as u64,
+                sp: self.stack.inner.into_virt().into_usize() as u64 + THREAD_STACK_SIZE as u64,
+                ..Context::default()
+            },
+        ));
+        drop(ctx_lock);
+        drop(self);
+        {
+            // SAFETY: The scheduler context is always valid, as
+            // guaranteed by the scheduler.
+            unsafe { Context::switch(&LOCAL_HART.context, &ctx) }
+        }
     }
 
     /// Yield the running process's time to the scheduler.
@@ -950,29 +1183,26 @@ impl Thread {
     /// The scheduler will constrain the user thread's stream of
     /// execution to the current hart. To allow a thread to be stolen
     /// by another hart, the waitlist must be used.
+    #[track_caller]
     pub unsafe fn yield_to_scheduler() {
-        LOCAL_HART.with(|hart| {
-            let intena = hart.intena.get();
+        let intr = InterruptDisabler::new();
 
-            let ctx_ptr = {
-                let proc = hart.thread.borrow();
-                let proc = proc.as_ref().unwrap();
-                core::ptr::addr_of!(proc.context)
-            };
+        let ctx_ptr = {
+            let proc = LOCAL_HART.thread.borrow();
+            let proc = proc.as_ref().unwrap();
+            core::ptr::addr_of!(proc.context)
+        };
 
-            {
-                // SAFETY: As the scheduler is currently running this
-                // process, it retains an `Arc` to it (We cannot
-                // safely dequeue a process without it being suspended
-                // first). Thus, this pointer remains valid.
-                let context = unsafe { &*ctx_ptr };
-                // SAFETY: The scheduler context is always valid, as
-                // guaranteed by the scheduler.
-                unsafe { Context::switch(&hart.context, context) }
-            }
-
-            hart.intena.set(intena);
-        });
+        {
+            // SAFETY: As the scheduler is currently running this
+            // process, it retains an `Arc` to it (We cannot
+            // safely dequeue a process without it being suspended
+            // first). Thus, this pointer remains valid.
+            let context = unsafe { &*ctx_ptr };
+            // SAFETY: The scheduler context is always valid, as
+            // guaranteed by the scheduler.
+            unsafe { Context::switch(&LOCAL_HART.context, context) }
+        }
     }
 }
 
@@ -981,7 +1211,9 @@ impl fmt::Debug for Thread {
         f.debug_struct("Thread")
             .field("private", &self.private)
             .field("context", &self.context)
-            .field("state", &self.state)
+            .field("blocked_on_wq", &self.blocked_on_wq)
+            .field("blocking_wqs", &self.blocking_wqs)
+            .field("tid", &self.tid)
             .finish_non_exhaustive()
     }
 }
@@ -992,6 +1224,111 @@ pub struct ThreadProtected {
     pub asid: u16,
     pub name: String,
     pub trapframe_addr: usize,
+    pub prio: ThreadPriorities,
+    pub state: ThreadState,
+    pub hartid: u64,
+}
+
+#[derive(Debug)]
+pub struct ThreadPriorities {
+    pub base_prio: i8,
+    pub inherited_prio: i8,
+    pub prio_boost: i8,
+}
+
+impl Thread {
+    pub fn prio_boost(self: &Arc<Thread>) {
+        let mut private = self.private.lock();
+        let prio = &mut private.prio;
+        let old_eff_prio = prio.effective();
+        prio.boost();
+        let new_eff_prio = prio.effective();
+        drop(private);
+        if self
+            .blocked_on_wq
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some()
+        {
+            self.wait_queue_priority_changed(old_eff_prio, new_eff_prio, true);
+        }
+    }
+
+    pub fn prio_diminish_dl(self: &Arc<Thread>, private: &mut ThreadProtected) {
+        let prio = &mut private.prio;
+        let old_eff_prio = prio.effective();
+        prio.diminish();
+        let new_eff_prio = prio.effective();
+        if self
+            .blocked_on_wq
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some()
+        {
+            self.wait_queue_priority_changed(old_eff_prio, new_eff_prio, true);
+        }
+    }
+
+    pub fn prio_saturating_diminish(self: &Arc<Thread>) {
+        let prio = &mut self.private.lock().prio;
+        let old_eff_prio = prio.effective();
+        prio.saturating_diminish();
+        let new_eff_prio = prio.effective();
+
+        if self
+            .blocked_on_wq
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some()
+        {
+            self.wait_queue_priority_changed(old_eff_prio, new_eff_prio, true);
+        }
+    }
+}
+
+impl ThreadPriorities {
+    pub fn boost(&mut self) {
+        let prio_boost = self.prio_boost();
+        if prio_boost < 4 && (self.base_prio() + prio_boost) < 32 {
+            self.prio_boost += 1;
+        }
+    }
+
+    pub fn saturating_diminish(&mut self) {
+        let prio_boost = self.prio_boost();
+        if prio_boost > 0 && (self.base_prio() + prio_boost) > 0 {
+            self.prio_boost -= 1;
+        }
+    }
+
+    #[inline]
+    pub fn prio_boost(&self) -> i8 {
+        self.prio_boost
+    }
+
+    #[inline]
+    pub fn base_prio(&self) -> i8 {
+        self.base_prio
+    }
+
+    #[inline]
+    pub fn inherited_prio(&self) -> i8 {
+        self.inherited_prio
+    }
+
+    pub fn diminish(&mut self) {
+        let prio_boost = self.prio_boost();
+        if prio_boost > -4 && (self.base_prio() + prio_boost) > 0 {
+            self.prio_boost -= 1;
+        }
+    }
+
+    pub fn effective(&self) -> i8 {
+        cmp::max(self.inherited_prio(), self.base_prio() + self.prio_boost())
+    }
 }
 
 impl fmt::Debug for ThreadProtected {
@@ -1001,6 +1338,9 @@ impl fmt::Debug for ThreadProtected {
             .field("asid", &self.asid)
             .field("name", &self.name)
             .field("trapframe_addr", &self.trapframe_addr)
+            .field("prio", &self.prio)
+            .field("hartid", &self.hartid)
+            .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
@@ -1076,9 +1416,9 @@ pub const THREAD_STACK_SIZE: usize = 512 * units::KIB;
 pub const TRAPFRAME_ADDR: usize = usize::MAX - 3 * 4 * units::KIB + 1;
 
 impl<'a> SlotRef<'a, NotificationCap> {
-    pub fn word(&self) -> &Arc<AtomicU64> {
+    pub fn word(&self) -> &AtomicU64 {
         // SAFETY: Type check.
-        unsafe { self.cap.notification().unwrap_unchecked() }
+        unsafe { &self.cap.notification().unwrap_unchecked().word }
     }
 }
 
@@ -1088,8 +1428,13 @@ impl<'a, C: Capability> SlotRef<'a, C> {
     }
 }
 
+#[derive(Debug)]
+pub struct Notification {
+    pub word: AtomicU64,
+    pub wait_queue: Arc<SpinMutex<WaitQueue>>,
+}
+
 mod impls {
-    use core::sync::atomic::AtomicU64;
 
     use alloc::sync::Arc;
     use rille::capability::CapabilityType;
@@ -1098,7 +1443,7 @@ mod impls {
 
     use super::{
         Allocator, AllocatorCap, AnyCap, AnyCapVal, Capability, CaptblCap, Empty, EmptyCap,
-        NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
+        Notification, NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
     };
     impl Capability for EmptyCap {
         type Value = Empty;
@@ -1137,7 +1482,7 @@ mod impls {
         }
     }
     impl Capability for NotificationCap {
-        type Value = Arc<AtomicU64>;
+        type Value = Arc<Notification>;
         fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
             cap_type == CapabilityType::Notification
         }

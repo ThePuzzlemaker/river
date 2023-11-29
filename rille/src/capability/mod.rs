@@ -750,7 +750,7 @@ impl Captr<Notification> {
     /// - [`CapError::InvalidType`]: The capabiltiy in the provided
     ///   slot was not a notification.
     pub fn signal(&self) -> CapResult<()> {
-        Ok(())
+        syscalls::notification::signal(self.into_raw())
     }
 
     /// Wait until another thread signals this notification, or if

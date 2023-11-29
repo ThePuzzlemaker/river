@@ -124,19 +124,6 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         unsafe { PMAlloc::get().mark_used(addr, 0) };
     }
 
-    // SAFETY: Hart-local data has not been initialized at all as of
-    // yet.
-    unsafe { hart_local::init() }
-    {
-        let mut uart = UART.lock();
-        uart.print_str_sync("[         ] [");
-        uart.early_print_u64(hartid());
-        uart.print_str_sync("] ");
-        uart.print_str_sync("[info]: initialized hart-local storage for hart ");
-        uart.early_print_u64(hartid());
-        uart.print_str_sync("\n");
-    }
-
     let mut root_pgtbl = PageTable::new();
 
     let bss_start = symbol::bss_start().into_usize();
@@ -213,16 +200,11 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         asm!("lla {}, __global_pointer$", out(reg) gp);
     }
 
-    let tp = tp();
-
     // Fixup sp, gp, and tp to be in the right address space
     let new_stack_ptr = PhysicalMut::<u8, Kernel>::from_usize(tmp_stack_end)
         .into_virt()
         .into_usize();
     let new_global_ptr = PhysicalMut::<u8, Kernel>::from_usize(gp)
-        .into_virt()
-        .into_usize();
-    let new_thread_ptr = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
         .into_virt()
         .into_usize();
 
@@ -260,7 +242,6 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
         # set up sp and gp
         mv sp, {new_sp}
         mv gp, {new_gp}
-        mv tp, {new_tp}
 
         csrc sstatus, {mxr}
 
@@ -273,7 +254,6 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
             satp = in(reg) raw_satp.as_usize(),
             new_sp = in(reg) new_stack_ptr,
             new_gp = in(reg) new_global_ptr,
-            new_tp = in(reg) new_thread_ptr,
             stvec = in(reg) kmain_virt.into_usize(),
 
             // `kmain` args
@@ -378,18 +358,6 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
         uart.print_str_sync("...\n");
     }
 
-    // SAFETY: Hart-local data has not been initialized on this hart as of yet.
-    unsafe { hart_local::init() }
-    {
-        let mut uart = UART.lock();
-        uart.print_str_sync("[         ] [");
-        uart.early_print_u64(hartid());
-        uart.print_str_sync("] ");
-        uart.print_str_sync("[info]: initialized hart-local storage for hart ");
-        uart.early_print_u64(hartid());
-        uart.print_str_sync("\n");
-    }
-
     let gp: usize;
     // SAFETY: The value being written into GP is valid.
     unsafe {
@@ -398,19 +366,16 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
 
     let tp = tp();
 
-    // Fixup sp, gp, and tp to be in the right address space
+    // Fixup sp and gp to be in the right address space
     //
-    // TODO: stop doing this whole rigmaroll and make this better (add an
-    // `into_ptr` to phymem ops)
+    // TODO: stop doing this whole rigmaroll and make this better (add
+    // an `into_ptr` to phymem ops)
     //
     // SAFETY: Our caller guarantees this is safe.
     let new_stack_ptr = unsafe { (*data.into_identity().into_virt().into_ptr()).sp_phys }
         .into_virt()
         .into_usize();
     let new_global_ptr = PhysicalMut::<u8, Kernel>::from_usize(gp)
-        .into_virt()
-        .into_usize();
-    let new_thread_ptr = PhysicalMut::<u8, DirectMapped>::from_usize(tp as usize)
         .into_virt()
         .into_usize();
 
@@ -433,7 +398,6 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
         # set up sp and gp
         mv sp, {new_sp}
         mv gp, {new_gp}
-        mv tp, {new_tp}
 
         csrc sstatus, {mxr}
 
@@ -446,7 +410,6 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
             satp = in(reg) raw_satp.as_usize(),
             new_sp = in(reg) new_stack_ptr,
             new_gp = in(reg) new_global_ptr,
-            new_tp = in(reg) new_thread_ptr,
             stvec = in(reg) kmain_hart_virt.into_usize(),
 
             // `kmain_hart` args

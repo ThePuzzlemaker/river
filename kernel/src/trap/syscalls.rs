@@ -12,20 +12,23 @@ use rille::{
     capability::{
         self,
         paging::{BasePage, DynLevel, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel},
-        Allocator, AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, Notification,
-        UserRegisters,
+        Allocator, AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, UserRegisters,
     },
     units::StorageUnits,
 };
 
 use crate::{
-    capability::{captbl::Captbl, slotref::SlotRefMut, CapToOwned, Page, Thread},
+    asm,
+    capability::{
+        captbl::Captbl, slotref::SlotRefMut, CapToOwned, Notification, NotificationCap,
+        OwnedWaitQueue, Page, Thread, ThreadState, WaitQueue,
+    },
     kalloc::{self, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
     print, println,
-    proc::Scheduler,
+    sched::Scheduler,
     symbol,
-    sync::SpinRwLock,
+    sync::{SpinMutex, SpinRwLock},
 };
 
 pub fn sys_debug_dump_root(_thread: &Arc<Thread>) -> Result<(), CapError> {
@@ -44,6 +47,7 @@ pub fn sys_debug_dump_root(_thread: &Arc<Thread>) -> Result<(), CapError> {
         total,
         free
     );
+    crate::info!("thread.prio={:#?}", &_thread.private.lock().prio);
     Ok(())
 }
 
@@ -56,7 +60,7 @@ pub fn sys_debug_cap_identify(
 
     let root_hdr = &thread
         .private
-        .read()
+        .lock()
         .captbl
         .as_ref()
         .cloned()
@@ -81,7 +85,7 @@ pub fn sys_debug_cap_slot(thread: &Arc<Thread>, tbl: u64, index: u64) -> Result<
 
     let root_hdr = &thread
         .private
-        .read()
+        .lock()
         .captbl
         .as_ref()
         .cloned()
@@ -106,7 +110,7 @@ pub fn sys_debug_cap_slot(thread: &Arc<Thread>, tbl: u64, index: u64) -> Result<
 pub fn sys_debug_print(thread: &Arc<Thread>, str_ptr: VirtualConst<u8, Identity>, str_len: u64) {
     let str_len = str_len as usize;
 
-    let mut private = thread.private.write();
+    let mut private = thread.private.lock();
 
     // assert!(
     //     str_ptr.add(str_len).into_usize() < private.mem_size,
@@ -151,7 +155,7 @@ pub fn sys_copy_deep(
     let into_tbl_index = into_tbl_index as usize;
     let into_index = into_index as usize;
 
-    let private = thread.private.read();
+    let private = thread.private.lock();
 
     let root_hdr = &private
         .captbl
@@ -224,20 +228,16 @@ pub fn sys_grant(
         into_table as usize,
         into_index as usize,
     );
+    let (from_table_, from_index_, into_table_, into_index_) =
+        (from_table, from_index, into_table, into_index);
 
-    let private = thread.private.read();
+    let private = thread.private.lock();
 
     let root_hdr = &private
         .captbl
         .as_ref()
         .cloned()
         .ok_or(CapError::NotPresent)?;
-
-    if from_table == into_table && from_index == into_index {
-        // Captrs are aliased, this is a no-op
-        // TODO: mutate here
-        return Ok(());
-    }
 
     let from_table = if from_table == 0 {
         root_hdr.clone()
@@ -258,6 +258,14 @@ pub fn sys_grant(
             .upgrade()
             .ok_or(CapError::NotPresent)?
     };
+
+    if from_table_ == into_table_ && from_index_ == into_index_ {
+        let mut into = into_table.get_mut::<AnyCap>(into_index)?;
+        // Captrs are aliased, we just need to mutate.
+        into.set_badge(NonZeroU64::new(badge));
+        into.update_rights(rights);
+        return Ok(());
+    }
 
     let from = from_table.get_mut::<AnyCap>(from_index)?;
     let into = into_table.get_mut::<Empty>(into_index)?;
@@ -287,7 +295,7 @@ pub fn sys_swap(
         cap2_index as usize,
     );
 
-    let private = thread.private.read();
+    let private = thread.private.lock();
 
     let root_hdr = &private
         .captbl
@@ -331,7 +339,7 @@ pub fn sys_swap(
 pub fn sys_delete(thread: &Arc<Thread>, table: u64, index: u64) -> CapResult<()> {
     let (table, index) = (table as usize, index as usize);
 
-    let private = thread.private.read();
+    let private = thread.private.lock();
 
     let root_hdr = &private
         .captbl
@@ -374,7 +382,7 @@ pub fn sys_allocate_many(
     );
     let size = size as u8;
 
-    let private = thread.private.read();
+    let private = thread.private.lock();
 
     let root_hdr = &private
         .captbl
@@ -436,7 +444,7 @@ pub fn sys_allocate_many(
         CapabilityType::Notification => {
             for i in 0..count {
                 let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_notification_alloc(slot)?;
+                perform_notification_alloc(thread, slot)?;
             }
         }
 
@@ -534,8 +542,11 @@ fn perform_thread_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
     Ok(())
 }
 
-fn perform_notification_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
-    let _ = slot.replace(Arc::new(AtomicU64::new(0)));
+fn perform_notification_alloc(thread: &Arc<Thread>, slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
+    let _ = slot.replace(Arc::new(Notification {
+        word: AtomicU64::new(0),
+        wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
+    }));
 
     Ok(())
 }
@@ -549,7 +560,7 @@ pub fn sys_page_map(
 ) -> CapResult<()> {
     let (from_page, into_pgtbl) = (from_page as usize, into_pgtbl as usize);
 
-    let private = thread.private.read();
+    let private = thread.private.lock();
 
     let root_hdr = &private
         .captbl
@@ -571,7 +582,7 @@ pub fn sys_page_map(
 
 pub fn sys_thread_suspend(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
-    let private = thread.private.read();
+    let private = thread.private.lock();
     let root_hdr = private.captbl.as_ref().unwrap();
 
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
@@ -584,7 +595,7 @@ pub fn sys_thread_suspend(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()
 pub fn sys_thread_resume(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
     let root_hdr = {
-        let private = thread.private.read();
+        let private = thread.private.lock();
         private.captbl.as_ref().unwrap().clone()
     };
 
@@ -604,7 +615,7 @@ pub fn sys_thread_configure(
     let (thread_cap, captbl, pgtbl) = (thread_cap as usize, captbl as usize, pgtbl as usize);
 
     let root_hdr = {
-        let private = thread.private.read();
+        let private = thread.private.lock();
         private.captbl.as_ref().unwrap().clone()
     };
 
@@ -622,7 +633,7 @@ pub fn sys_thread_configure(
     };
 
     let pgtbl = if pgtbl == 0 {
-        let private = thread.private.read();
+        let private = thread.private.lock();
         private.root_pgtbl.as_ref().unwrap().clone()
     } else {
         root_hdr
@@ -649,7 +660,7 @@ pub fn sys_thread_write_registers(
     );
 
     let root_hdr = {
-        let private = thread.private.read();
+        let private = thread.private.lock();
         private.captbl.as_ref().unwrap().clone()
     };
 
@@ -665,18 +676,43 @@ pub fn sys_notification_signal(thread: &Arc<Thread>, notification: u64) -> CapRe
     let notification = notification as usize;
 
     let root_hdr = {
-        let private = thread.private.read();
+        let private = thread.private.lock();
         private.captbl.as_ref().unwrap().clone()
     };
 
-    let notification = root_hdr.get::<Notification>(notification)?;
+    let notification = root_hdr.get::<NotificationCap>(notification)?;
 
+    let mut wq = notification.cap.notification().unwrap().wait_queue.lock();
     let word = notification.word();
     word.fetch_or(
         notification.badge().map_or(0, NonZeroU64::get),
-        Ordering::Release,
+        Ordering::Relaxed,
     );
-    Scheduler::wake_up_on(Arc::as_ptr(word) as u64);
+    //    log::trace!("signal word={word:x?}");
+    log::trace!("wq={wq:?}");
+    if let Some(thread) = wq.find_highest_thread() {
+        *thread.blocked_on_wq.lock() = None;
+        thread.prio_boost();
+        drop(wq);
+        let hartid = Scheduler::choose_hart(&thread);
+        let send_ipi = Scheduler::is_idle(hartid) && hartid != asm::hartid();
+        let mut private = thread.private.lock();
+        private.state = ThreadState::Runnable;
+        //        Scheduler::debug();
+        //        crate::println!("===^before^===");
+        Scheduler::enqueue_dl(&thread, Some(hartid), &mut private);
+        log::trace!("woke up thread={thread:?}, private={private:?}");
+        //        Scheduler::debug();
+        //        crate::println!("===^after^===\n\n");
+
+        if send_ipi {
+            log::trace!("sending IPI to hartid={hartid}");
+            //    crate::info!("Sending IPI for thread={thread:#?}");
+            //Scheduler::debug();
+            sbi::ipi::send_ipi(sbi::HartMask::new(0).with(hartid as usize)).unwrap();
+        }
+        drop(private);
+    }
 
     Ok(())
 }
@@ -685,14 +721,14 @@ pub fn sys_notification_poll(thread: &Arc<Thread>, notification: u64) -> CapResu
     let notification = notification as usize;
 
     let root_hdr = {
-        let private = thread.private.read();
+        let private = thread.private.lock();
         private.captbl.as_ref().unwrap().clone()
     };
 
-    let notification = root_hdr.get::<Notification>(notification)?;
+    let notification = root_hdr.get::<NotificationCap>(notification)?;
 
     let word = notification.word();
-    let res = word.swap(0, Ordering::Acquire);
+    let res = word.swap(0, Ordering::Relaxed);
 
     Ok(res)
 }

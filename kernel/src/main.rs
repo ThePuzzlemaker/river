@@ -9,7 +9,9 @@
     ptr_as_uninit,
     core_intrinsics,
     slice_ptr_get,
-    get_many_mut
+    get_many_mut,
+    thread_local,
+    stmt_expr_attributes
 )]
 #![no_std]
 #![no_main]
@@ -36,6 +38,7 @@ pub mod kalloc;
 pub mod paging;
 pub mod plic;
 pub mod proc;
+pub mod sched;
 pub mod sync;
 pub mod syslog;
 pub mod trampoline;
@@ -60,6 +63,8 @@ use core::{
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc};
 use asm::hartid;
 use fdt::Fdt;
+use log::{error, info, trace};
+use owo_colors::OwoColorize;
 use paging::{root_page_table, PageTableFlags};
 use rille::{
     addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
@@ -71,13 +76,14 @@ use rille::{
 use uart::UART;
 
 use crate::{
+    asm::InterruptDisabler,
     boot::HartBootData,
     capability::{captbl::Captbl, Page, Thread, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
     plic::PLIC,
-    proc::{Scheduler, SchedulerInner},
+    sched::{Scheduler, SchedulerInner},
     sync::{SpinMutex, SpinRwLock},
     trap::{Irqs, IRQS},
 };
@@ -108,11 +114,17 @@ pub const KHEAP_VMEM_SIZE: usize = 64 * rille::units::GIB;
 pub static INIT: &[u8] = include_bytes!(env!("CARGO_BUILD_INIT_PATH"));
 
 static N_STARTED: AtomicUsize = AtomicUsize::new(0);
+pub static N_HARTS: AtomicUsize = AtomicUsize::new(0);
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain"]
 extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
+    // SAFETY: Hart-local data has not been initialized at all as of
+    // yet.
+    unsafe { hart_local::init() }
+    let intr = InterruptDisabler::new();
+
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
@@ -127,8 +139,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .timebase_frequency() as u64;
         hart.timebase_freq.set(timebase_freq);
     });
-
-    info!("initialized paging");
 
     {
         let mut pgtbl = root_page_table().lock();
@@ -151,6 +161,10 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     }
     // SAFETY: We guarantee that this virtual address is well-aligned and unaliased.
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
+
+    syslog::init_logging();
+    //syslog::parse_log_filter(Some("river=trace"));
+    trace!("syslog initialized!");
 
     let plic = fdt
         .find_compatible(&["riscv,plic0"])
@@ -180,6 +194,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     asm::timer_intr_on();
     asm::external_intr_on();
 
+    drop(intr);
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
@@ -231,7 +246,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let mut init_pages_range = 0..0;
     proc.setup_page_table();
     {
-        let mut private = proc.private.write();
+        let mut private = proc.private.lock();
 
         let trampoline_virt =
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
@@ -281,11 +296,11 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         }
         init_pages_range.end = free_slot_ctr;
 
-        proc.state.store(ThreadState::Runnable, Ordering::Relaxed);
+        private.state = ThreadState::Runnable;
     }
 
     {
-        let private = proc.private.write();
+        let private = proc.private.lock();
         let slot = private
             .captbl
             .as_ref()
@@ -313,7 +328,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     let mut fdt_pages_range = 0..0;
     {
-        let mut private = proc.private.write();
+        let mut private = proc.private.lock();
 
         fdt_pages_range.start = free_slot_ctr;
         for i in 0..(fdt_size / 4.kib()) {
@@ -344,7 +359,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         pma.allocate(kalloc::phys::what_order(4.kib())).unwrap()
     };
     {
-        let mut private = proc.private.write();
+        let mut private = proc.private.lock();
         private.root_pgtbl.as_mut().unwrap().map(
             bootinfo_page.into_const().into_identity(),
             VirtualConst::from_usize(0x2000_0000),
@@ -394,6 +409,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .write(boot_info);
     }
 
+    N_HARTS.store(fdt.cpus().count(), Ordering::Relaxed);
+
     LOCAL_HART.with(move |hart| {
         //hart.push_off();
 
@@ -407,6 +424,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             "====".bright_white().bold(),
         );
         info!("boot hart id: {}", hart.hartid.get());
+        info!("timebase freq: {}", hart.timebase_freq.get());
 
         let (free, total) = {
             let pma = PMAlloc::get();
@@ -464,7 +482,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         }
 
         Scheduler::init(scheduler_map);
-        Scheduler::enqueue(proc);
+        Scheduler::enqueue_dl(&proc, None, &mut proc.private.lock());
+        drop(proc);
 
         // Scheduler::enqueue(proc2);
         // hart.pop_off();
@@ -486,6 +505,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     while N_STARTED.load(Ordering::Relaxed) != fdt.cpus().count() {
         core::hint::spin_loop();
     }
+
+    crate::info!("tp: {:#x?}", &LOCAL_HART);
     // SAFETY: The scheduler is only started once on the main hart.
     unsafe { Scheduler::start() }
 }
@@ -494,6 +515,11 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[link_section = ".init.kmain_hart"]
 extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
+    // SAFETY: Hart-local data has not been initialized at all as of
+    // yet.
+    unsafe { hart_local::init() }
+    let intr = InterruptDisabler::new();
+
     // SAFETY: The pointer given to us is guaranteed to be valid by our caller
     let fdt: Fdt<'static> = match unsafe { Fdt::from_ptr(fdt_ptr) } {
         Ok(fdt) => fdt,
@@ -510,6 +536,7 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     });
 
     info!("hart {} starting", hartid());
+    crate::info!("tp: {:#x?}", &LOCAL_HART);
 
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
@@ -523,20 +550,21 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     asm::timer_intr_on();
     asm::external_intr_on();
 
+    drop(intr);
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
     LOCAL_HART.with(|hart| {
-        let _timebase_freq = fdt
+        let timebase_freq = fdt
             .cpus()
             .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
             .expect("Could not find hart in FDT")
             .timebase_frequency() as u64;
 
-        // // About 1/10 sec.
-        // hart.timer_interval.set(timebase_freq / 10);
-        // let interval = hart.timer_interval.get();
-        // sbi::timer::set_timer(asm::read_time() + interval).unwrap();
+        // About 1/10 sec.
+        hart.timer_interval.set(timebase_freq / 10);
+        let interval = hart.timer_interval.get();
+        sbi::timer::set_timer(asm::read_time() + interval).unwrap();
     });
 
     N_STARTED.fetch_add(1, Ordering::Relaxed);
@@ -567,7 +595,7 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
     if paging::enabled() {
         // Paging is set up, we can use dynamic dispatch.
         if let Some(msg) = panic_info.message() {
-            critical!("panic occurred: {}", msg);
+            error!("panic occurred: {}", msg);
             if let Some(location) = panic_info.location() {
                 println!(
                     "  at {}:{}:{}",
@@ -576,16 +604,8 @@ pub fn panic_handler(panic_info: &PanicInfo) -> ! {
                     location.column()
                 );
             }
-            /*let bt = Backtrace::<16>::capture();
-            println!("  Backtrace:");
-            for frame in bt.frames {
-                println!("    - {:#x}", frame);
-            }
-            if bt.frames_omitted {
-                println!("    - ... <omitted>");
-            }*/
         } else {
-            critical!("panic occurred (reason unknown).\n");
+            error!("panic occurred (reason unknown).\n");
             if let Some(location) = panic_info.location() {
                 println!(
                     "  at {}:{}:{}",

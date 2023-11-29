@@ -1,16 +1,17 @@
 use core::{
     cell::UnsafeCell,
     fmt, hint,
+    intrinsics::{likely, unlikely},
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::addr_of,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{self, AtomicU64, Ordering},
 };
 
 use bytemuck::Zeroable;
 
 use crate::{
-    asm::{self, hartid},
+    asm::{self, hartid, InterruptDisabler},
     hart_local::{self, LOCAL_HART},
 };
 
@@ -95,14 +96,11 @@ impl<T> SpinMutex<T> {
     /// This function will panic if it detects a deadlock.
     #[track_caller]
     pub fn try_lock(&'_ self) -> Option<SpinMutexGuard<'_, T>> {
-        // Disable interrupts to prevent deadlocks. Interrupts will
-        // always be disabled before TLS is enabled, as it's enabled
-        // very early (before paging, even).
-        let hartid = if hart_local::enabled() {
-            LOCAL_HART.with(|hart| {
-                hart.push_off();
-                hart.hartid.get()
-            })
+        // Disable interrupts to prevent deadlocks.
+        let intr = InterruptDisabler::new();
+        let hart_local_enabled = hart_local::enabled();
+        let hartid = if likely(hart_local_enabled) {
+            LOCAL_HART.hartid.get()
         } else {
             hartid()
         };
@@ -126,19 +124,30 @@ impl<T> SpinMutex<T> {
             self.locked
                 .compare_exchange(0, hartid + 1, Ordering::Acquire, Ordering::Relaxed)
         {
-            assert!(
-                held_by != hartid + 1,
-                "SpinMutex::try_lock: deadlock detected"
-            );
-            // Make sure we re-enable interrupts if we didn't lock.
-            if hart_local::enabled() {
-                LOCAL_HART.with(hart_local::HartCtx::pop_off);
-            }
+            // assert!(
+            //     held_by != hartid + 1,
+            //     "SpinMutex::try_lock: deadlock detected"
+            // );
             return None;
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            if unlikely(!hart_local_enabled) {
+                return Some(SpinMutexGuard {
+                    mutex: self,
+                    _intr: intr,
+                    _phantom: PhantomData,
+                });
+            }
+
+            atomic::compiler_fence(Ordering::SeqCst);
+            LOCAL_HART.holding_locks.update(|x| x + 1);
         }
 
         Some(SpinMutexGuard {
             mutex: self,
+            _intr: intr,
             _phantom: PhantomData,
         })
     }
@@ -151,13 +160,10 @@ impl<T> SpinMutex<T> {
     #[track_caller]
     pub fn lock(&'_ self) -> SpinMutexGuard<'_, T> {
         // Disable interrupts to prevent deadlocks.
-        // Interrupts will always be disabled before TLS is enabled,
-        // as it's enabled very early (before paging, even).
-        let hartid = if hart_local::enabled() {
-            LOCAL_HART.with(|hart| {
-                hart.push_off();
-                hart.hartid.get()
-            })
+        let intr = InterruptDisabler::new();
+        let hart_local_enabled = hart_local::enabled();
+        let hartid = if likely(hart_local_enabled) {
+            LOCAL_HART.hartid.get()
         } else {
             hartid()
         };
@@ -185,8 +191,16 @@ impl<T> SpinMutex<T> {
             hint::spin_loop();
         }
 
+        #[cfg(debug_assertions)]
+        {
+            if likely(hart_local_enabled) {
+                LOCAL_HART.holding_locks.update(|x| x + 1);
+            }
+        }
+
         SpinMutexGuard {
             mutex: self,
+            _intr: intr,
             _phantom: PhantomData,
         }
     }
@@ -216,6 +230,7 @@ impl<T: fmt::Debug> fmt::Debug for SpinMutex<T> {
 
 pub struct SpinMutexGuard<'a, T> {
     mutex: &'a SpinMutex<T>,
+    _intr: InterruptDisabler,
     _phantom: PhantomData<&'a mut T>,
 }
 
@@ -239,18 +254,25 @@ impl<'a, T> DerefMut for SpinMutexGuard<'a, T> {
 
 impl<'a, T> Drop for SpinMutexGuard<'a, T> {
     fn drop(&mut self) {
-        // Make sure, just in case, that interrupts are still off.
-        asm::intr_off();
-
+        debug_assert!(!asm::intr_off(), "SpinMutexGuard::drop: interrupts were on");
         // Set the locked flag to false. The Release ordering ensures
         // that this unlock happens-before any Acquire-load locks.
         self.mutex.locked.store(0, Ordering::Release);
 
-        // If interrupts were previously enabled, re-enable them.
-        // Interrupts will always be disabled before TLS is enabled,
-        // as it's enabled very early (before paging, even).
-        if hart_local::enabled() {
-            LOCAL_HART.with(hart_local::HartCtx::pop_off);
+        #[cfg(debug_assertions)]
+        {
+            // BUG: for some reason, this is getting optimized to
+            // outside of the `if`, causing issues. We only have
+            // `SpinMutex`es before hart_local is enabled, so this is
+            // the only place we have to worry about this.
+            if unlikely(!hart_local::enabled()) {
+                return;
+            }
+
+            // Prevent this write from getting moved up.
+            atomic::compiler_fence(Ordering::SeqCst);
+
+            LOCAL_HART.holding_locks.update(|x| x - 1);
         }
     }
 }

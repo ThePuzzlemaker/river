@@ -28,19 +28,13 @@ SECTIONS {
         PROVIDE(__global_pointer$ = .);
 	*(.sdata .sdata.*);
 	. = ALIGN(4K);
+    	PROVIDE(__bss_start = .);
+	*(.sbss .sbss.*);
+	*(.bss .bss.*);
+	. = ALIGN(4K);
+	PROVIDE(__bss_end = .);
     }
-
-    . = ALIGN(4K);
-    PROVIDE(__bss_start = .);
-    .sbss : {
-        *(.sbss .sbss.*);
-    }
-    .bss : {
-        *(.bss .bss.*);
-    }
-    . = ALIGN(4K);
-    PROVIDE(__bss_end = .);
-
+    
     /DISCARD/ : { *(.eh_frame_hdr .eh_frame) }
 }
 	       

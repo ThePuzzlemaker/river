@@ -51,21 +51,56 @@ SECTIONS {
         . = ALIGN(4K);
         PROVIDE(__data_start = .);
         *(.data .data.* .rodata .rodata.*);
+	
         . = ALIGN(4K);
-        PROVIDE(__tdata_start = .);
-        *(.hart_local);
+    }
+
+
+    .tdata : AT(ADDR(.tdata) - __offset) {
         . = ALIGN(4K);
-        PROVIDE(__tdata_end = .);
+	PROVIDE(__tdata_start = .);
+	*(.tdata .tdata.*);
+	. = ALIGN(4K);
+	PROVIDE(__tdata_end = .);
+    }
+
+    .tbss : AT(ADDR(.tbss) - __offset) {
+        . = ALIGN(4K);
+	PROVIDE(__tbss_start = .);
+	*(.tbss .tbss.*);
+	. = ALIGN(4K);
+	PROVIDE(__tbss_end = .);
     }
 
     . = ALIGN(8);
 
     .sdata : AT(ADDR(.sdata) - __offset) {
         PROVIDE(__global_pointer$ = .);
-        *(.sdata .sdata.*)
+        *(.sdata .sdata.*);
+	
+        PROVIDE(__eh_frame_start = .);
+	KEEP(*(.eh_frame .eh_frame.*));
+	*(.eh_frame .eh_frame.*);
+	PROVIDE(__eh_frame_end = .);
+	
+        PROVIDE(__eh_frame_hdr_start = .);
+	KEEP(*(.eh_framehdr .eh_framehdr.*));
+	*(.eh_framehdr .eh_framehdr.*);
+	PROVIDE(__eh_frame_hdr_end = .);
         . = ALIGN(4K);
         PROVIDE(__data_end = .);
     }
+
+
+    /* . = ALIGN(4K); */
+    /* .eh_frame_hdr : AT(ADDR(.eh_frame_hdr) - __offset) { */
+    /* 	. = ALIGN(4K); */
+    /* } */
+
+    /* . = ALIGN(4K); */
+    /* .eh_frame : AT(ADDR(.eh_frame) - __offset) { */
+    /* 	. = ALIGN(4K); */
+    /* } */
 
     . = ALIGN(4K);
     PROVIDE(__bss_start = .);
@@ -91,6 +126,4 @@ SECTIONS {
 
     . = ALIGN(4K);
     PROVIDE(KERNEL_END = .);
-
-    /DISCARD/ : { *(.eh_frame_hdr .eh_frame) }
 }

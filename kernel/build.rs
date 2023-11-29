@@ -19,6 +19,8 @@ fn main() {
             init.to_str().unwrap(),
             init_bin.to_str().unwrap(),
             "--remove-section=.stack",
+            "--keep-section=.sbss",
+            "--keep-section=.bss",
         ])
         .spawn()
         .unwrap();
