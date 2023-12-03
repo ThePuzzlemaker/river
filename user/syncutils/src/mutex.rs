@@ -108,7 +108,7 @@ impl<T> Mutex<T> {
 
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
-    _phantom: PhantomData<&'a T>,
+    _phantom: PhantomData<*const T>,
 }
 
 impl<'a, T: fmt::Debug> fmt::Debug for MutexGuard<'a, T> {
