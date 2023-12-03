@@ -143,7 +143,7 @@ impl log::Log for Logger {
             let (sec, ms) = time();
             let hartid = asm::hartid();
             crate::println!(
-                "{}{:>5}.{:<03}{} {}{}{} {}{}{}{} {}",
+                "{}{:>5}.{:<03}{} {}{}{} {}{}{}{} {}{} {}",
                 "[".white().dimmed(),
                 sec.white().dimmed(),
                 ms.white().dimmed(),
@@ -154,6 +154,8 @@ impl log::Log for Logger {
                 "[".style(color),
                 lvl.style(color),
                 "]".style(color),
+                ":".white().bold(),
+                mod_path.white().bold(),
                 ":".white().bold(),
                 record.args()
             );

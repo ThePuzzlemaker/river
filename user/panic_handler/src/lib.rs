@@ -21,10 +21,18 @@ impl fmt::Write for DebugPrint {
     }
 }
 
+fn tp() -> u64 {
+    let x: u64;
+    unsafe {
+        asm!("mv {}, tp", out(reg) x, options(nomem));
+    }
+    x
+}
+
 #[panic_handler]
 unsafe fn panic(panic: &PanicInfo<'_>) -> ! {
     if let Some(msg) = panic.message() {
-        println!("panic occurred: {}", msg);
+        println!("panic occurred (thread {}): {}", tp(), msg);
         if let Some(location) = panic.location() {
             println!(
                 "  at {}:{}:{}",

@@ -1,8 +1,8 @@
-use core::{arch::global_asm, mem};
+use core::{arch::global_asm, mem, num::NonZeroU64};
 
 use crate::{
     asm::{self, hartid, InterruptDisabler, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{Thread, ThreadState, THREAD_STACK_SIZE},
+    capability::{global_interrupt_pool, Thread, ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
@@ -125,14 +125,42 @@ fn device_interrupt(scause: u64) -> InterruptKind {
         // claim this interrupt
         let irq = PLIC.hart_sclaim();
 
-        if irq == IRQS.expect("IRQS").uart {
-            uart::handle_interrupt();
-        } else if irq == 0x0 {
+        if irq == 0x0 {
             // FIXME: I have no idea what the hell this means and why
             // it's being triggered here, but... sure it's fine
             return InterruptKind::External;
-        } else {
-            panic!("device_interrupt: unexpected IRQ {}", irq);
+        } else if let Some(handler) = global_interrupt_pool().map.read().get(&(irq as u16)) {
+            if let Some((notif, badge)) = &*handler.notification.lock() {
+                let mut wq = notif.wait_queue.lock();
+                let word = &notif.word;
+                word.fetch_or(*badge, Ordering::Relaxed);
+                //    log::trace!("signal word={word:x?}");
+                log::trace!("wq={wq:?}");
+                if let Some(thread) = wq.find_highest_thread() {
+                    *thread.blocked_on_wq.lock() = None;
+                    thread.prio_boost();
+                    drop(wq);
+                    let hartid = Scheduler::choose_hart(&thread);
+                    let send_ipi = Scheduler::is_idle(hartid) && hartid != asm::hartid();
+                    let mut private = thread.private.lock();
+                    private.state = ThreadState::Runnable;
+                    //        Scheduler::debug();
+                    //        crate::println!("===^before^===");
+                    Scheduler::enqueue_dl(&thread, Some(hartid), &mut private);
+                    log::trace!("woke up thread={thread:?}, private={private:?}");
+                    //        Scheduler::debug();
+                    //        crate::println!("===^after^===\n\n");
+
+                    if send_ipi {
+                        log::trace!("sending IPI to hartid={hartid}");
+                        //    crate::info!("Sending IPI for thread={thread:#?}");
+                        //Scheduler::debug();
+                        sbi::ipi::send_ipi(sbi::HartMask::new(0).with(hartid as usize)).unwrap();
+                    }
+                    drop(private);
+                }
+            }
+            //panic!("device_interrupt: unexpected IRQ {}", irq);
         }
 
         if irq != 0 {
@@ -408,8 +436,7 @@ unsafe extern "C" fn user_trap() -> ! {
 
                     let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
-                    // SAFETY: We are yet again running this process, so we can force unlock.
-                    let trapframe = unsafe { &mut *proc.trapframe.to_components().0 };
+                    let mut trapframe = proc.trapframe.lock();
                     let trapframe = &mut **trapframe;
 
                     trapframe.a0 = CapError::NoError.into();
@@ -418,6 +445,39 @@ unsafe extern "C" fn user_trap() -> ! {
                 }
                 SyscallNumber::NotificationSignal => sys_notification_signal(&proc, trapframe),
                 SyscallNumber::NotificationPoll => sys_notification_poll(&proc, trapframe),
+                SyscallNumber::IntrPoolGet => sys_intr_pool_get(&proc, trapframe),
+                SyscallNumber::IntrHandlerBind => sys_intr_handler_bind(&proc, trapframe),
+                SyscallNumber::IntrHandlerAck => sys_intr_handler_ack(&proc, trapframe),
+                SyscallNumber::IntrHandlerUnbind => sys_intr_handler_unbind(&proc, trapframe),
+                SyscallNumber::Yield => {
+                    let mut private = proc.private.lock();
+                    let old_prio = private.prio.effective();
+                    Scheduler::dequeue_dl(&proc, &mut private);
+                    proc.prio_saturating_diminish_dl(&mut private);
+                    if private.prio.effective() > old_prio {
+                        Scheduler::enqueue_front_dl(&proc, Some(hartid()), &mut private);
+                    } else {
+                        Scheduler::enqueue_dl(&proc, Some(hartid()), &mut private);
+                    }
+
+                    drop(private);
+                    drop(trapframe_lock);
+                    drop(proc);
+                    drop(intr);
+                    // SAFETY: This thread is currently running on this hart.
+                    unsafe {
+                        Thread::yield_to_scheduler();
+                    }
+                    intr = InterruptDisabler::new();
+
+                    let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+
+                    let mut trapframe = proc.trapframe.lock();
+                    let trapframe = &mut **trapframe;
+
+                    trapframe.a0 = CapError::NoError.into();
+                    break 'syscall;
+                }
                 _ => {
                     trapframe.a0 = CapError::InvalidOperation.into();
                 }
@@ -796,3 +856,7 @@ define_syscall!(sys_thread_write_registers, 2);
 define_syscall!(sys_grant, 6);
 define_syscall!(sys_notification_signal, 1);
 define_syscall!(sys_notification_poll, 1);
+define_syscall!(sys_intr_pool_get, 4);
+define_syscall!(sys_intr_handler_ack, 1);
+define_syscall!(sys_intr_handler_bind, 2);
+define_syscall!(sys_intr_handler_unbind, 1);

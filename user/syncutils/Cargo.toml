@@ -1,0 +1,10 @@
+[package]
+name = "syncutils"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rille = { path = "../../rille" }
+lock_api = "0.4.11"

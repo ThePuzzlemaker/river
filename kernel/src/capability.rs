@@ -19,7 +19,8 @@ use rille::capability::{CapError, CapResult, CapRights, CapabilityType, UserRegi
 
 pub use rille::capability::{
     paging::PageTable as PageTableCap, Allocator as AllocatorCap, AnyCap, Captbl as CaptblCap,
-    Empty as EmptyCap, Notification as NotificationCap, Thread as ThreadCap,
+    Empty as EmptyCap, InterruptHandler as InterruptHandlerCap, InterruptPool as InterruptPoolCap,
+    Notification as NotificationCap, Thread as ThreadCap,
 };
 
 pub type PageCap = rille::capability::paging::Page<DynLevel>;
@@ -32,9 +33,10 @@ use crate::asm::InterruptDisabler;
 use crate::hart_local::LOCAL_HART;
 use crate::kalloc::phys::PMAlloc;
 use crate::paging::SharedPageTable;
+use crate::plic::PLIC;
 use crate::proc::Context;
 use crate::sched::Scheduler;
-use crate::sync::{SpinMutex, SpinMutexGuard, SpinRwLock, SpinRwLockWriteGuard};
+use crate::sync::{OnceCell, SpinMutex, SpinMutexGuard, SpinRwLock, SpinRwLockWriteGuard};
 use crate::trampoline::Trapframe;
 use crate::trap::user_trap_ret;
 use crate::{asm, kalloc};
@@ -74,6 +76,8 @@ pub enum CapabilityKind {
     Page(Page) = CapabilityType::Page as u8,
     Thread(Arc<Thread>) = CapabilityType::Thread as u8,
     Notification(Arc<Notification>) = CapabilityType::Notification as u8,
+    InterruptPool(Arc<InterruptPool>) = CapabilityType::InterruptPool as u8,
+    InterruptHandler(Arc<InterruptHandler>) = CapabilityType::InterruptHandler as u8,
 }
 
 impl fmt::Debug for CapabilityKind {
@@ -86,6 +90,10 @@ impl fmt::Debug for CapabilityKind {
             Self::Page(page) => f.debug_tuple("Page").field(page).finish(),
             Self::Thread(thread) => write!(f, "Thread(<opaque:{:#p}>", Arc::as_ptr(thread)),
             Self::Notification(notif) => f.debug_tuple("Notification").field(notif).finish(),
+            Self::InterruptHandler(handler) => {
+                f.debug_tuple("InterruptHandler").field(handler).finish()
+            }
+            Self::InterruptPool(pool) => f.debug_tuple("InterruptPool").field(pool).finish(),
         }
     }
 }
@@ -142,6 +150,22 @@ impl CapabilityKind {
     pub fn notification(&self) -> Option<&Arc<Notification>> {
         if let Self::Notification(notif) = self {
             Some(notif)
+        } else {
+            None
+        }
+    }
+
+    pub fn intr_handler(&self) -> Option<&Arc<InterruptHandler>> {
+        if let Self::InterruptHandler(handler) = self {
+            Some(handler)
+        } else {
+            None
+        }
+    }
+
+    pub fn intr_pool(&self) -> Option<&Arc<InterruptPool>> {
+        if let Self::InterruptPool(pool) = self {
+            Some(pool)
         } else {
             None
         }
@@ -278,6 +302,8 @@ pub enum AnyCapVal {
     PgTbl(SharedPageTable),
     Thread(Arc<Thread>),
     Notification(Arc<Notification>),
+    InterruptHandler(Arc<InterruptHandler>),
+    InterruptPool(Arc<InterruptPool>),
     // TODO
 }
 
@@ -294,6 +320,10 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
             CapabilityKind::Thread(thread) => AnyCapVal::Thread(thread.clone()),
             CapabilityKind::Notification(notification) => {
                 AnyCapVal::Notification(notification.clone())
+            }
+            CapabilityKind::InterruptPool(pool) => AnyCapVal::InterruptPool(pool.clone()),
+            CapabilityKind::InterruptHandler(handler) => {
+                AnyCapVal::InterruptHandler(handler.clone())
             }
         }
     }
@@ -312,6 +342,11 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
             CapabilityKind::Thread(thread) => AnyCapVal::Thread(thread.clone()),
             CapabilityKind::Notification(notification) => {
                 AnyCapVal::Notification(notification.clone())
+            }
+
+            CapabilityKind::InterruptPool(pool) => AnyCapVal::InterruptPool(pool.clone()),
+            CapabilityKind::InterruptHandler(handler) => {
+                AnyCapVal::InterruptHandler(handler.clone())
             }
         }
     }
@@ -418,6 +453,8 @@ impl CapabilityValue for AnyCapVal {
             AnyCapVal::PgTbl(pgtbl) => pgtbl.into_kind(),
             AnyCapVal::Thread(thread) => thread.into_kind(),
             AnyCapVal::Notification(notif) => notif.into_kind(),
+            AnyCapVal::InterruptHandler(handler) => handler.into_kind(),
+            AnyCapVal::InterruptPool(pool) => pool.into_kind(),
         }
     }
 
@@ -432,6 +469,8 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::Page(_) => Page::copy_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::copy_hook(slot),
                 CapabilityKind::Notification(_) => Arc::<Notification>::copy_hook(slot),
+                CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::copy_hook(slot),
+                CapabilityKind::InterruptPool(_) => Arc::<InterruptPool>::copy_hook(slot),
             }
         }
     }
@@ -447,6 +486,8 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::Page(_) => Page::delete_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::delete_hook(slot),
                 CapabilityKind::Notification(_) => Arc::<Notification>::delete_hook(slot),
+                CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::delete_hook(slot),
+                CapabilityKind::InterruptPool(_) => Arc::<InterruptPool>::delete_hook(slot),
             }
         }
     }
@@ -498,6 +539,7 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
 pub struct Page {
     phys: PhysicalMut<u8, DirectMapped>,
     size_log2: u8,
+    is_device: bool,
 }
 
 impl Page {
@@ -510,7 +552,24 @@ impl Page {
     /// - `phys` must be aligned to `1 << size_log2` bytes.
     // TODO: dealloc?
     pub unsafe fn new(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Self {
-        Self { phys, size_log2 }
+        Self {
+            phys,
+            size_log2,
+            is_device: false,
+        }
+    }
+
+    /// Create a page capability from MMIO.
+    ///
+    /// # Safety
+    ///
+    /// See [`Self::new`].
+    pub unsafe fn new_device(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Self {
+        Self {
+            phys,
+            size_log2,
+            is_device: true,
+        }
     }
 }
 
@@ -993,7 +1052,10 @@ impl WaitQueue {
                         sbi_mask = sbi_mask.with(hart as usize);
                     }
                 }
-                sbi::ipi::send_ipi(sbi_mask).unwrap();
+                if sbi_mask != sbi::HartMask::new(0) {
+                    log::trace!("{:#?}\n\n", sbi_mask);
+                    //   sbi::ipi::send_ipi(sbi_mask).unwrap();
+                }
                 return local_resched;
             }
         }
@@ -1271,8 +1333,8 @@ impl Thread {
         }
     }
 
-    pub fn prio_saturating_diminish(self: &Arc<Thread>) {
-        let prio = &mut self.private.lock().prio;
+    pub fn prio_saturating_diminish_dl(self: &Arc<Thread>, private: &mut ThreadProtected) {
+        let prio = &mut private.prio;
         let old_eff_prio = prio.effective();
         prio.saturating_diminish();
         let new_eff_prio = prio.effective();
@@ -1434,6 +1496,61 @@ pub struct Notification {
     pub wait_queue: Arc<SpinMutex<WaitQueue>>,
 }
 
+#[derive(Debug)]
+pub struct InterruptPool {
+    pub map: SpinRwLock<BTreeMap<u16, Arc<InterruptHandler>>>,
+}
+
+#[derive(Debug)]
+pub struct InterruptHandler {
+    pub notification: SpinMutex<Option<(Arc<Notification>, u64)>>,
+    pub irq: u16,
+}
+
+impl CapabilityValue for Arc<InterruptPool> {
+    type Cap = InterruptPoolCap;
+
+    fn into_kind(self) -> CapabilityKind {
+        CapabilityKind::InterruptPool(self)
+    }
+}
+
+impl CapabilityValue for Arc<InterruptHandler> {
+    type Cap = InterruptHandlerCap;
+
+    fn into_kind(self) -> CapabilityKind {
+        CapabilityKind::InterruptHandler(self)
+    }
+}
+
+impl<'a> SlotRefMut<'a, InterruptPoolCap> {
+    pub fn make_handler(&mut self, irq: u16) -> CapResult<Arc<InterruptHandler>> {
+        let handler = Arc::new(InterruptHandler {
+            notification: SpinMutex::new(None),
+            irq,
+        });
+        // SAFETY: Type check.
+        let pool = unsafe { self.cap.intr_pool().unwrap_unchecked() };
+        if pool.map.read().contains_key(&irq) {
+            return Err(CapError::InvalidOperation);
+        }
+        pool.map.write().insert(irq, handler.clone());
+        PLIC.set_priority(irq as u32, 1);
+        PLIC.hart_senable(irq as u32);
+        Ok(handler)
+    }
+}
+
+static GLOBAL_POOL: OnceCell<Arc<InterruptPool>> = OnceCell::new();
+
+pub fn global_interrupt_pool() -> &'static Arc<InterruptPool> {
+    GLOBAL_POOL.get_or_init(|| {
+        Arc::new(InterruptPool {
+            map: SpinRwLock::new(BTreeMap::new()),
+        })
+    })
+}
+
 mod impls {
 
     use alloc::sync::Arc;
@@ -1443,47 +1560,48 @@ mod impls {
 
     use super::{
         Allocator, AllocatorCap, AnyCap, AnyCapVal, Capability, CaptblCap, Empty, EmptyCap,
-        Notification, NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
+        InterruptHandler, InterruptHandlerCap, InterruptPool, InterruptPoolCap, Notification,
+        NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
     };
     impl Capability for EmptyCap {
         type Value = Empty;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Empty
         }
     }
     impl Capability for CaptblCap {
         type Value = WeakCaptbl;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Captbl
         }
     }
     impl Capability for AllocatorCap {
         type Value = Allocator;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Allocator
         }
     }
     impl Capability for PageTableCap {
         type Value = SharedPageTable;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::PgTbl
         }
     }
     impl Capability for PageCap {
         type Value = super::Page;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Page
         }
     }
     impl Capability for ThreadCap {
         type Value = Arc<super::Thread>;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Thread
         }
     }
     impl Capability for NotificationCap {
         type Value = Arc<Notification>;
-        fn is_valid_type(cap_type: rille::capability::CapabilityType) -> bool {
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Notification
         }
     }
@@ -1491,6 +1609,19 @@ mod impls {
         type Value = AnyCapVal;
         fn is_valid_type(_: CapabilityType) -> bool {
             true
+        }
+    }
+    impl Capability for InterruptHandlerCap {
+        type Value = Arc<InterruptHandler>;
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
+            cap_type == CapabilityType::InterruptHandler
+        }
+    }
+
+    impl Capability for InterruptPoolCap {
+        type Value = Arc<InterruptPool>;
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
+            cap_type == CapabilityType::InterruptPool
         }
     }
 }

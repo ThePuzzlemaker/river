@@ -9,6 +9,7 @@ use crate::capability::{
     Captr,
     CaptrRange,
     Empty,
+    InterruptPool,
     Thread,
 };
 
@@ -24,6 +25,8 @@ pub struct BootInfo {
     pub init_pages: CaptrRange<Page<BasePage>>,
     /// Pages of the FDT, ordered by virtual address.
     pub fdt_pages: CaptrRange<Page<BasePage>>,
+    /// Pages of device memory, ordered by virtual address.
+    pub dev_pages: CaptrRange<Page<BasePage>>,
     /// The first free slot.
     pub free_slots: CaptrRange<Empty>,
     /// Pointer to the FDT
@@ -42,6 +45,8 @@ pub struct InitCapabilities {
     pub allocator: Captr<Allocator>,
     /// The page backing the [`BootInfo`] passed to the init proces.
     pub bootinfo_page: PageCaptr<BasePage>,
+    /// The global interrupt pool.
+    pub intr_pool: Captr<InterruptPool>,
 }
 
 impl InitCapabilities {
@@ -58,6 +63,7 @@ impl InitCapabilities {
             thread: Captr::from_raw_unchecked(3),
             allocator: Captr::from_raw_unchecked(4),
             bootinfo_page: Captr::from_raw_unchecked(5),
+            intr_pool: Captr::from_raw_unchecked(6),
         }
     }
 }

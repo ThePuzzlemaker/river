@@ -35,6 +35,11 @@ pub enum SyscallNumber {
     NotificationSignal = 13,
     /// [`Captr::<Notification>::poll`][crate::capability::Captr::<Notification>::poll]
     NotificationPoll = 14,
+    Yield = 15,
+    IntrHandlerAck = 16,
+    IntrHandlerBind = 17,
+    IntrHandlerUnbind = 18,
+    IntrPoolGet = 19,
     /// Print the debug representation of a capability to the kernel
     /// console.
     DebugCapSlot = 0xFFFF_0000,

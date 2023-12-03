@@ -78,7 +78,10 @@ use uart::UART;
 use crate::{
     asm::InterruptDisabler,
     boot::HartBootData,
-    capability::{captbl::Captbl, Page, Thread, ThreadState},
+    capability::{
+        captbl::Captbl, global_interrupt_pool, InterruptHandler, InterruptPool, Page, Thread,
+        ThreadState,
+    },
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
@@ -182,8 +185,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     unsafe { PLIC.init(plic_base.into_ptr_mut()) }
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
-    PLIC.set_priority(uart_irq, 1);
-    PLIC.hart_senable(uart_irq);
     PLIC.hart_set_spriority(0);
     // SAFETY: The trap vector address is valid.
     unsafe { asm::write_stvec(trap::kernel_trapvec as *const u8) }
@@ -242,7 +243,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
     let proc = Thread::new(String::from("user_mode_woo"), Some(captbl), Some(pgtbl));
-    let mut free_slot_ctr = 6;
+    let mut free_slot_ctr = 7;
     let mut init_pages_range = 0..0;
     proc.setup_page_table();
     {
@@ -308,6 +309,14 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             .get_mut::<Empty>(3)
             .unwrap();
         slot.replace(proc.clone());
+        let slot = private
+            .captbl
+            .as_ref()
+            .unwrap()
+            .get_mut::<Empty>(6)
+            .unwrap();
+        // TODO: make sure interrupt handlers/pools can't be copied in slots, only moved.
+        slot.replace(global_interrupt_pool().clone());
     }
 
     let fdt_size = fdt.total_size().next_multiple_of(4.kib());
@@ -377,19 +386,53 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         slot.replace(unsafe { Page::new(bootinfo_page, 12) });
     }
 
+    let mut dev_pages_range = 0..0;
+    {
+        dev_pages_range.start = free_slot_ctr;
+        let private = proc.private.lock();
+        let slot = private
+            .captbl
+            .as_ref()
+            .unwrap()
+            .get_mut::<Empty>(free_slot_ctr)
+            .unwrap();
+        // SAFETY: This memory is device memory and is valid for a page.
+        slot.replace(unsafe {
+            Page::new_device(
+                PhysicalMut::from_ptr(
+                    uart.reg()
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .starting_address
+                        .cast_mut(),
+                ),
+                12,
+            )
+        });
+        free_slot_ctr += 1;
+        dev_pages_range.end = free_slot_ctr;
+    }
+
     let boot_info = BootInfo {
         captbl_size_log2: 16,
         init_pages: CaptrRange {
-            // SAFETY: We know these slots are free.
+            // SAFETY: We know these slots contain pages.
             lo: unsafe { Captr::from_raw_unchecked(init_pages_range.start) },
             // SAFETY: See above.
             hi: unsafe { Captr::from_raw_unchecked(init_pages_range.end) },
         },
         fdt_pages: CaptrRange {
-            // SAFETY: We know these slots are free.
+            // SAFETY: We know these slots contain pages.
             lo: unsafe { Captr::from_raw_unchecked(fdt_pages_range.start) },
             // SAFETY: See above.
             hi: unsafe { Captr::from_raw_unchecked(fdt_pages_range.end) },
+        },
+        dev_pages: CaptrRange {
+            // SAFETY: We know these slots contain pages.
+            lo: unsafe { Captr::from_raw_unchecked(dev_pages_range.start) },
+            // SAFETY: See above.
+            hi: unsafe { Captr::from_raw_unchecked(dev_pages_range.end) },
         },
         free_slots: CaptrRange {
             // SAFETY: We know this slot is free.

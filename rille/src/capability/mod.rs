@@ -86,6 +86,8 @@ pub enum CapabilityType {
     Thread = 5,
     /// [`Notification`]s.
     Notification = 6,
+    InterruptPool = 7,
+    InterruptHandler = 8,
     /// Any capability type `>=32` is undefined.
     #[num_enum(default)]
     Unknown = 32,
@@ -886,12 +888,40 @@ impl Capability for AnyCap {
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Unknown;
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InterruptHandler {}
+
+impl Capability for InterruptHandler {
+    /// Cannot allocate an `InterruptHandler`.
+    type AllocateSizeSpec = Infallible;
+
+    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
+        0
+    }
+
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::InterruptHandler;
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InterruptPool {}
+
+impl Capability for InterruptPool {
+    /// Cannot allocate an `InterruptPool`.
+    type AllocateSizeSpec = Infallible;
+
+    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
+        0
+    }
+
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::InterruptPool;
+}
+
 // == Unimportant or boilerplate-y impls below ==
 
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Allocator, AnyCap, Captbl, Empty, Notification, Thread,
+        Allocator, AnyCap, Captbl, Empty, InterruptHandler, InterruptPool, Notification, Thread,
     };
 
     pub trait Sealed {}
@@ -908,6 +938,8 @@ mod private {
     impl Sealed for Thread {}
     impl Sealed for Notification {}
     impl Sealed for AnyCap {}
+    impl Sealed for InterruptPool {}
+    impl Sealed for InterruptHandler {}
 }
 
 // These impls are just so Capability doesn't have to impl all these

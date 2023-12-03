@@ -3,20 +3,23 @@
 #![feature(panic_info_message)]
 
 use core::{
-    arch::global_asm,
+    arch::{asm, global_asm},
     fmt,
     num::NonZeroU64,
+    ptr,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use rille::{
+    addr::VirtualConst,
     capability::{
-        paging::{BasePage, Page},
+        paging::{BasePage, MegaPage, Page, PageTableFlags, PagingLevel},
         CapRights, Captr, Notification, RemoteCaptr, Thread,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls::{self, ecall1, ecall6, SyscallNumber},
+    syscalls::{self, ecall1, ecall2, ecall4, ecall6, SyscallNumber},
 };
+use syncutils::{mutex::Mutex, once_cell::OnceCell};
 
 extern crate panic_handler;
 
@@ -68,6 +71,10 @@ extern "C" fn thread_entry(
     in_notif: Captr<Notification>,
     out_notif: Captr<Notification>,
 ) -> ! {
+    unsafe {
+        asm!("li tp, 1", options(nomem));
+    }
+
     let caps = unsafe { InitCapabilities::new() };
     // _thread.suspend().unwrap();
     // caps.thread.suspend().unwrap();
@@ -84,18 +91,28 @@ extern "C" fn thread_entry(
     // });
 
     println!("{:#?}", time());
-    out_notif.signal().unwrap();
+    loop {
+        let mut lock = SHARED2.expect("oops").lock();
+        let n = *lock;
 
-    while in_notif.wait().is_ok() {
-        let n = SHARED.fetch_add(1, Ordering::Relaxed);
-
-        //print!("\rpong!: {}       {:?}     ", n, time());
-
-        if n == 50_000 {
+        if n >= 50_000 {
             break;
         }
-        out_notif.signal().unwrap()
+        *lock += 1;
+        print!("\rthread 2: {}       {:?}      ", n, time());
     }
+    // out_notif.signal().unwrap();
+
+    // while in_notif.wait().is_ok() {
+    //     let n = SHARED.fetch_add(1, Ordering::Relaxed);
+
+    //     //print!("\rpong!: {}       {:?}     ", n, time());
+
+    //     if n == 50_000 {
+    //         break;
+    //     }
+    //     out_notif.signal().unwrap()
+    // }
 
     loop {
         unsafe {
@@ -111,8 +128,77 @@ extern "C" fn thread_entry(
     // }
 }
 
+extern "C" fn thread2_entry(_thread: Captr<Thread>, init_info: *const BootInfo) -> ! {
+    // unsafe {
+    //     asm!("li tp, 2", options(nomem));
+    // }
+    let init_info = unsafe { &*init_info };
+    let init_caps = unsafe { InitCapabilities::new() };
+    let notif: Captr<Notification> = init_caps
+        .allocator
+        .allocate(
+            RemoteCaptr::local(init_caps.captbl),
+            init_info.free_slots.lo.add(1),
+            (),
+        )
+        .unwrap();
+    unsafe {
+        ecall6(
+            SyscallNumber::Grant,
+            init_caps.captbl.into_raw() as u64,
+            notif.into_raw() as u64,
+            init_caps.captbl.into_raw() as u64,
+            notif.into_raw() as u64,
+            CapRights::all().bits(),
+            0xDEADBEEF,
+        )
+        .unwrap();
+    }
+
+    // unsafe {
+    //     ecall4(
+    //         SyscallNumber::IntrPoolGet,
+    //         init_caps.intr_pool.into_raw() as u64,
+    //         init_caps.captbl.into_raw() as u64,
+    //         init_info.free_slots.lo.add(2).into_raw() as u64,
+    //         0x0a,
+    //     )
+    //     .unwrap();
+    // }
+    let intr_handler = init_info.free_slots.lo.add(2);
+
+    // unsafe {
+    //     ecall2(
+    //         SyscallNumber::IntrHandlerBind,
+    //         intr_handler.into_raw() as u64,
+    //         notif.into_raw() as u64,
+    //     )
+    //     .unwrap();
+    // }
+
+    // syscalls::debug::debug_dump_root();
+
+    while notif.wait().unwrap().is_some() {
+        unsafe {
+            ecall1(
+                SyscallNumber::IntrHandlerAck,
+                intr_handler.into_raw() as u64,
+            )
+            .unwrap();
+        }
+        //        print!("\rexternal intr!");
+        // syscalls::debug::debug_cap_slot(init_caps.captbl.into_raw(), notif.into_raw()).unwrap();
+    }
+
+    loop {
+        unsafe {
+            core::arch::asm!("nop");
+        }
+    }
+}
+
 static SHARED: AtomicU64 = AtomicU64::new(0);
-static THREAD_STACK: &[u8; 1024 * 1024] = &[0; 1024 * 1024];
+static SHARED2: OnceCell<Mutex<u64>> = OnceCell::new();
 
 pub fn time() -> (u64, u64) {
     let timebase_freq = 10_000_000;
@@ -130,7 +216,7 @@ pub fn time() -> (u64, u64) {
 #[no_mangle]
 extern "C" fn entry(init_info: *const BootInfo) -> ! {
     let caps = unsafe { InitCapabilities::new() };
-    let _init_info = unsafe { &*init_info };
+    let init_info = unsafe { &*init_info };
 
     let root_captbl = RemoteCaptr::local(caps.captbl);
 
@@ -138,10 +224,18 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         .allocator
         .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65534) }, ())
         .unwrap();
-
-    let _pg: Captr<Page<BasePage>> = caps
+    let thread2: Captr<Thread> = caps
         .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65535) }, ())
+        .allocate(root_captbl, init_info.free_slots.lo, ())
+        .unwrap();
+
+    let pg: Captr<Page<MegaPage>> = caps
+        .allocator
+        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65000) }, ())
+        .unwrap();
+    let pg2: Captr<Page<MegaPage>> = caps
+        .allocator
+        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65001) }, ())
         .unwrap();
 
     let mut notifs = caps
@@ -183,6 +277,28 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         .unwrap();
     }
 
+    pg.map(
+        caps.pgtbl,
+        VirtualConst::from_usize(0x8200000),
+        PageTableFlags::RW,
+    )
+    .unwrap();
+    pg2.map(
+        caps.pgtbl,
+        VirtualConst::from_usize(0x8600000),
+        PageTableFlags::RW,
+    )
+    .unwrap();
+    init_info
+        .dev_pages
+        .lo
+        .map(
+            caps.pgtbl,
+            VirtualConst::from_usize(0x80000000),
+            PageTableFlags::RW,
+        )
+        .unwrap();
+
     // unsafe { Captr::<Page<BasePage>>::from_raw_unchecked(65533) }
     //     .map(
     //         caps.pgtbl,
@@ -196,11 +312,12 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     // }
 
     unsafe { thread.configure(Captr::null(), Captr::null()).unwrap() };
+    unsafe { thread2.configure(Captr::null(), Captr::null()).unwrap() };
     unsafe {
         thread
             .write_registers(&rille::capability::UserRegisters {
                 pc: thread_entry as usize as u64,
-                sp: THREAD_STACK.as_ptr().wrapping_add(1024 * 1024) as usize as u64,
+                sp: 0x8200000 + (1 << MegaPage::PAGE_SIZE_LOG2),
                 a0: thread.into_raw() as u64,
                 a1: out_notif.into_raw() as u64,
                 a2: in_notif.into_raw() as u64,
@@ -208,23 +325,48 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             })
             .unwrap()
     };
-
-    syscalls::debug::debug_dump_root();
+    unsafe {
+        thread2
+            .write_registers(&rille::capability::UserRegisters {
+                pc: thread2_entry as usize as u64,
+                sp: 0x8600000 + (1 << MegaPage::PAGE_SIZE_LOG2),
+                a0: thread2.into_raw() as u64,
+                a1: init_info as *const _ as u64,
+                ..Default::default()
+            })
+            .unwrap()
+    };
 
     //unsafe { thread.resume().unwrap() }
 
+    unsafe { thread2.resume().unwrap() }
+
     unsafe { thread.resume().unwrap() }
 
-    while in_notif.wait().is_ok() {
-        let n = SHARED.fetch_add(1, Ordering::Relaxed);
+    SHARED2.get_or_init(|| Mutex::new(0, in_notif));
 
-        //        print!("\rping!: {}       {:?}     ", n, time());
-        if n == 50_000 {
-            println!("\ndone! {:#?}", time());
+    loop {
+        let mut lock = SHARED2.expect("oops").lock();
+        let n = *lock;
+
+        if n >= 50_000 {
+            println!("");
             break;
         }
-        out_notif.signal().unwrap();
+        *lock += 1;
+        print!("\rthread 1: {}       {:?}      ", n, time());
     }
+
+    // while in_notif.wait().is_ok() {
+    //     let n = SHARED.fetch_add(1, Ordering::Relaxed);
+
+    //     //        print!("\rping!: {}       {:?}     ", n, time());
+    //     if n == 50_000 {
+    //         println!("\ndone! {:#?}", time());
+    //         break;
+    //     }
+    //     out_notif.signal().unwrap();
+    // }
 
     syscalls::debug::debug_dump_root();
 
@@ -248,7 +390,19 @@ struct DebugPrint;
 
 impl fmt::Write for DebugPrint {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        syscalls::debug::debug_print_string(s);
+        print(s);
         Ok(())
+    }
+}
+
+pub fn print(s: &str) {
+    let serial = 0x80000000 as *mut u8;
+    for b in s.as_bytes() {
+        // SAFETY: The invariants of the serial driver ensure this is valid.
+        while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
+            core::hint::spin_loop();
+        }
+        // SAFETY: See above.
+        unsafe { ptr::write_volatile(serial, *b) }
     }
 }

@@ -610,6 +610,11 @@ impl SharedPageTable {
             PageSize::Mega => 2,
             PageSize::Giga => 1,
         };
+        let final_iter = match size {
+            PageSize::Base => 0,
+            PageSize::Mega => 1,
+            PageSize::Giga => 2,
+        };
 
         let mut inner = self.inner.write();
         let mut table = &mut **inner;
@@ -617,7 +622,7 @@ impl SharedPageTable {
         for (iter, vpn) in to.vpns().into_iter().enumerate().rev().take(depth_max) {
             let entry = &mut table.ptes[vpn.into_usize()];
 
-            if iter == 0 {
+            if iter == final_iter {
                 // assert!(
                 //     entry.decode().flags & PageTableFlags::VALID == PageTableFlags::empty(),
                 //     "PageTable::map: attempted to map an already-mapped vaddr: from={from:#p}, to={to:#p}, flags={flags:?}, existing flags={:?}", entry.decode().flags
@@ -639,7 +644,6 @@ impl SharedPageTable {
                     table = unsafe { &mut *(paddr.into_virt().into_ptr_mut()) }
                 }
                 PTEKind::Invalid => {
-                    // TODO: use try_ variants to make this not panic
                     let new_subtable = Box::leak(PageTable::new_table());
                     let subtable_phys: PhysicalMut<RawPageTable, DirectMapped> =
                         Virtual::from_ptr(new_subtable as *mut _).into_phys();

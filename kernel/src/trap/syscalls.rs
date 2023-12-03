@@ -20,11 +20,12 @@ use rille::{
 use crate::{
     asm,
     capability::{
-        captbl::Captbl, slotref::SlotRefMut, CapToOwned, Notification, NotificationCap,
-        OwnedWaitQueue, Page, Thread, ThreadState, WaitQueue,
+        captbl::Captbl, slotref::SlotRefMut, CapToOwned, InterruptHandlerCap, InterruptPoolCap,
+        Notification, NotificationCap, OwnedWaitQueue, Page, Thread, ThreadState, WaitQueue,
     },
     kalloc::{self, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
+    plic::PLIC,
     print, println,
     sched::Scheduler,
     symbol,
@@ -32,7 +33,7 @@ use crate::{
 };
 
 pub fn sys_debug_dump_root(_thread: &Arc<Thread>) -> Result<(), CapError> {
-    //crate::println!("{:#x?}", thread.private.read().captbl);
+    //crate::println!("{:#x?}", _thread.private.lock().captbl);
     let (free, total) = {
         let pma = PMAlloc::get();
         (pma.num_free_pages(), pma.num_pages())
@@ -42,7 +43,7 @@ pub fn sys_debug_dump_root(_thread: &Arc<Thread>) -> Result<(), CapError> {
     let used = used * 4.kib();
     let total = total * 4.kib();
     crate::info!(
-        "current memory usage: {}B / {}B ({}MiB free)",
+        "current memory usage: {}B / {}B ({}B free)",
         used,
         total,
         free
@@ -89,19 +90,34 @@ pub fn sys_debug_cap_slot(thread: &Arc<Thread>, tbl: u64, index: u64) -> Result<
         .captbl
         .as_ref()
         .cloned()
-        .ok_or(CapError::NotPresent)?;
+        .ok_or(CapError::NotPresent)
+        .map(|x| {
+            println!("present 1");
+            x
+        })?;
 
     let tbl = if tbl == 0 {
         root_hdr.clone()
     } else {
         root_hdr
-            .get::<capability::Captbl>(tbl)?
+            .get::<capability::Captbl>(tbl)
+            .map(|x| {
+                println!("present 2");
+                x
+            })?
             .to_owned_cap()
             .upgrade()
+            .map(|x| {
+                println!("present 3");
+                x
+            })
             .ok_or(CapError::NotPresent)?
     };
 
-    let slot = tbl.get::<AnyCap>(index)?;
+    let slot = tbl.get::<AnyCap>(index).map(|x| {
+        println!("present 4");
+        x
+    })?;
     println!("{:#x?}", slot);
 
     Ok(())
@@ -448,6 +464,13 @@ pub fn sys_allocate_many(
             }
         }
 
+        CapabilityType::Notification => {
+            for i in 0..count {
+                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
+                perform_notification_alloc(thread, slot)?;
+            }
+        }
+
         _ => return Err(CapError::InvalidOperation),
     }
 
@@ -582,9 +605,10 @@ pub fn sys_page_map(
 
 pub fn sys_thread_suspend(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
-    let private = thread.private.lock();
-    let root_hdr = private.captbl.as_ref().unwrap();
-
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
     thread_cap.suspend();
@@ -731,4 +755,117 @@ pub fn sys_notification_poll(thread: &Arc<Thread>, notification: u64) -> CapResu
     let res = word.swap(0, Ordering::Relaxed);
 
     Ok(res)
+}
+
+pub fn sys_intr_pool_get(
+    thread: &Arc<Thread>,
+    pool: u64,
+    into_table: u64,
+    into_index: u64,
+    irq: u64,
+) -> CapResult<()> {
+    let (pool, into_table, into_index, irq) = (
+        pool as usize,
+        into_table as usize,
+        into_index as usize,
+        irq as u16,
+    );
+
+    if irq > 1023 || irq == 0 {
+        return Err(CapError::InvalidOperation);
+    }
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    if into_table == 0 && pool == into_index {
+        // Captrs are aliased, this is invalid.
+        return Err(CapError::InvalidOperation);
+    }
+
+    let into_table = if into_table == 0 {
+        root_hdr.clone()
+    } else {
+        root_hdr
+            .get::<capability::Captbl>(into_table)?
+            .to_owned_cap()
+            .upgrade()
+            .ok_or(CapError::NotPresent)?
+    };
+
+    let mut pool = root_hdr.get_mut::<InterruptPoolCap>(pool)?;
+    let into_index = into_table.get_mut::<capability::Empty>(into_index)?;
+
+    let handler = pool.make_handler(irq)?;
+    let _ = into_index.replace(handler);
+
+    Ok(())
+}
+
+pub fn sys_intr_handler_ack(thread: &Arc<Thread>, handler: u64) -> CapResult<()> {
+    let handler = handler as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let handler = root_hdr.get::<InterruptHandlerCap>(handler)?;
+
+    PLIC.hart_sunclaim(handler.cap.intr_handler().unwrap().irq as u32);
+
+    Ok(())
+}
+
+pub fn sys_intr_handler_bind(
+    thread: &Arc<Thread>,
+    handler: u64,
+    notification: u64,
+) -> CapResult<()> {
+    let (handler, notification) = (handler as usize, notification as usize);
+
+    if handler == notification {
+        return Err(CapError::InvalidOperation);
+    }
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let handler = root_hdr.get_mut::<InterruptHandlerCap>(handler)?;
+    let notification = root_hdr.get::<NotificationCap>(notification)?;
+
+    handler
+        .cap
+        .intr_handler()
+        .unwrap()
+        .notification
+        .lock()
+        .replace((
+            notification.cap.notification().unwrap().clone(),
+            notification
+                .badge()
+                .map(NonZeroU64::get)
+                .unwrap_or_default(),
+        ));
+
+    Ok(())
+}
+
+pub fn sys_intr_handler_unbind(thread: &Arc<Thread>, handler: u64) -> CapResult<()> {
+    let handler = handler as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let handler = root_hdr.get::<InterruptHandlerCap>(handler)?;
+
+    *handler.cap.intr_handler().unwrap().notification.lock() = None;
+
+    Ok(())
 }

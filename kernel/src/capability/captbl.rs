@@ -173,7 +173,7 @@ impl fmt::Debug for Captbl {
         f.debug_struct("Captbl")
             .field("inner", &self.inner.0)
             // SAFETY: By invariants.
-            .field("hdr", unsafe { &(*self.inner.0)[0].slot })
+            .field("hdr", unsafe { &(*self.inner.0)[0].hdr })
             // SAFETY: By invariants
             .field("table", &CaptblSlots(unsafe { &*self.inner.0 }))
             .finish()
