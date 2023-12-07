@@ -1,6 +1,6 @@
 #symbol-file target/riscv64gc-unknown-none-elf/debug/river
-add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/debug/userspace_testing
-#add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/release/userspace_testing
+#add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/debug/userspace_testing
+add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/release/userspace_testing
 
 # disable this if you'd like
 source ~/.gdbinit-gef.py

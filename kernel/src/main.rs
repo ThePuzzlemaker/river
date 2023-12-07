@@ -166,7 +166,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     unsafe { HEAP_ALLOCATOR.init(Virtual::from_usize(KHEAP_VMEM_OFFSET)) };
 
     syslog::init_logging();
-    //syslog::parse_log_filter(Some("river=trace"));
+    //    syslog::parse_log_filter(Some("river::trap=trace"));
     trace!("syslog initialized!");
 
     let plic = fdt
@@ -584,7 +584,7 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     let uart = fdt.chosen().stdout().unwrap();
     let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
     //PLIC.set_priority(uart_irq, 1);
-    PLIC.hart_senable(uart_irq);
+    //PLIC.hart_senable(uart_irq);
     PLIC.hart_set_spriority(0);
     // SAFETY: The address provided is valid.
     unsafe { asm::write_stvec(trap::kernel_trapvec as *const u8) };

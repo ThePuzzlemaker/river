@@ -3,26 +3,39 @@
     clippy::unnecessary_wraps,
     clippy::too_many_arguments
 )]
-use core::{mem::MaybeUninit, num::NonZeroU64, slice, sync::atomic::AtomicU64};
+use core::{
+    cmp,
+    mem::{self, MaybeUninit},
+    num::NonZeroU64,
+    slice,
+    sync::atomic::AtomicU64,
+};
 
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{
+    boxed::Box,
+    string::String,
+    sync::{Arc, Weak},
+};
 use atomic::Ordering;
 use rille::{
     addr::{Identity, Kernel, VirtualConst},
     capability::{
         self,
         paging::{BasePage, DynLevel, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel},
-        Allocator, AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, UserRegisters,
+        Allocator, AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, MessageHeader,
+        UserRegisters,
     },
     units::StorageUnits,
 };
 
 use crate::{
-    asm,
+    asm::{self, InterruptDisabler},
     capability::{
-        captbl::Captbl, slotref::SlotRefMut, CapToOwned, InterruptHandlerCap, InterruptPoolCap,
-        Notification, NotificationCap, OwnedWaitQueue, Page, Thread, ThreadState, WaitQueue,
+        captbl::Captbl, slotref::SlotRefMut, CapToOwned, Endpoint, InterruptHandlerCap,
+        InterruptPoolCap, Notification, NotificationCap, Page, PageCap, Thread, ThreadProtected,
+        ThreadState, WaitQueue,
     },
+    hart_local::LOCAL_HART,
     kalloc::{self, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
     plic::PLIC,
@@ -32,7 +45,7 @@ use crate::{
     sync::{SpinMutex, SpinRwLock},
 };
 
-pub fn sys_debug_dump_root(_thread: &Arc<Thread>) -> Result<(), CapError> {
+pub fn sys_debug_dump_root(_thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
     //crate::println!("{:#x?}", _thread.private.lock().captbl);
     let (free, total) = {
         let pma = PMAlloc::get();
@@ -53,7 +66,8 @@ pub fn sys_debug_dump_root(_thread: &Arc<Thread>) -> Result<(), CapError> {
 }
 
 pub fn sys_debug_cap_identify(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     tbl: u64,
     index: u64,
 ) -> Result<CapabilityType, CapError> {
@@ -81,7 +95,12 @@ pub fn sys_debug_cap_identify(
     Ok(slot.cap.cap_type())
 }
 
-pub fn sys_debug_cap_slot(thread: &Arc<Thread>, tbl: u64, index: u64) -> Result<(), CapError> {
+pub fn sys_debug_cap_slot(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    tbl: u64,
+    index: u64,
+) -> Result<(), CapError> {
     let (tbl, index) = (tbl as usize, index as usize);
 
     let root_hdr = &thread
@@ -123,7 +142,12 @@ pub fn sys_debug_cap_slot(thread: &Arc<Thread>, tbl: u64, index: u64) -> Result<
     Ok(())
 }
 
-pub fn sys_debug_print(thread: &Arc<Thread>, str_ptr: VirtualConst<u8, Identity>, str_len: u64) {
+pub fn sys_debug_print(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    str_ptr: VirtualConst<u8, Identity>,
+    str_len: u64,
+) {
     let str_len = str_len as usize;
 
     let mut private = thread.private.lock();
@@ -156,7 +180,8 @@ pub fn sys_debug_print(thread: &Arc<Thread>, str_ptr: VirtualConst<u8, Identity>
 }
 
 pub fn sys_copy_deep(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     from_tbl_ref: u64,
     from_tbl_index: u64,
     from_index: u64,
@@ -230,7 +255,8 @@ pub fn sys_copy_deep(
 }
 
 pub fn sys_grant(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     from_table: u64,
     from_index: u64,
     into_table: u64,
@@ -298,7 +324,8 @@ pub fn sys_grant(
 }
 
 pub fn sys_swap(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     cap1_table: u64,
     cap1_index: u64,
     cap2_table: u64,
@@ -352,7 +379,12 @@ pub fn sys_swap(
     Ok(())
 }
 
-pub fn sys_delete(thread: &Arc<Thread>, table: u64, index: u64) -> CapResult<()> {
+pub fn sys_delete(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    table: u64,
+    index: u64,
+) -> CapResult<()> {
     let (table, index) = (table as usize, index as usize);
 
     let private = thread.private.lock();
@@ -380,7 +412,8 @@ pub fn sys_delete(thread: &Arc<Thread>, table: u64, index: u64) -> CapResult<()>
 }
 
 pub fn sys_allocate_many(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     allocator: u64,
     into_ref: u64,
     into_index: u64,
@@ -460,14 +493,14 @@ pub fn sys_allocate_many(
         CapabilityType::Notification => {
             for i in 0..count {
                 let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_notification_alloc(thread, slot)?;
+                perform_notification_alloc(slot)?;
             }
         }
 
-        CapabilityType::Notification => {
+        CapabilityType::Endpoint => {
             for i in 0..count {
                 let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_notification_alloc(thread, slot)?;
+                perform_endpoint_alloc(slot)?;
             }
         }
 
@@ -565,7 +598,7 @@ fn perform_thread_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
     Ok(())
 }
 
-fn perform_notification_alloc(thread: &Arc<Thread>, slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
+fn perform_notification_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
     let _ = slot.replace(Arc::new(Notification {
         word: AtomicU64::new(0),
         wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
@@ -574,8 +607,19 @@ fn perform_notification_alloc(thread: &Arc<Thread>, slot: SlotRefMut<'_, Empty>)
     Ok(())
 }
 
+fn perform_endpoint_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
+    let _ = slot.replace(Arc::new(Endpoint {
+        recv_wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
+        send_wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
+        reply_cap: SpinMutex::new(None),
+    }));
+
+    Ok(())
+}
+
 pub fn sys_page_map(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    intr: InterruptDisabler,
     from_page: u64,
     into_pgtbl: u64,
     addr: VirtualConst<u8, Identity>,
@@ -603,7 +647,11 @@ pub fn sys_page_map(
     Ok(())
 }
 
-pub fn sys_thread_suspend(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
+pub fn sys_thread_suspend(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    thread_cap: u64,
+) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
     let root_hdr = {
         let private = thread.private.lock();
@@ -616,7 +664,11 @@ pub fn sys_thread_suspend(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()
     Ok(())
 }
 
-pub fn sys_thread_resume(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()> {
+pub fn sys_thread_resume(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    thread_cap: u64,
+) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
     let root_hdr = {
         let private = thread.private.lock();
@@ -631,12 +683,19 @@ pub fn sys_thread_resume(thread: &Arc<Thread>, thread_cap: u64) -> CapResult<()>
 }
 
 pub fn sys_thread_configure(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     thread_cap: u64,
     captbl: u64,
     pgtbl: u64,
+    ipc_buffer: u64,
 ) -> CapResult<()> {
-    let (thread_cap, captbl, pgtbl) = (thread_cap as usize, captbl as usize, pgtbl as usize);
+    let (thread_cap, captbl, pgtbl, ipc_buffer) = (
+        thread_cap as usize,
+        captbl as usize,
+        pgtbl as usize,
+        ipc_buffer as usize,
+    );
 
     let root_hdr = {
         let private = thread.private.lock();
@@ -668,13 +727,34 @@ pub fn sys_thread_configure(
             .clone()
     };
 
-    thread_cap.configure(captbl, pgtbl)?;
+    let ipc_buffer = if ipc_buffer == 0 {
+        None
+    } else {
+        root_hdr
+            .get::<capability::paging::Page<DynLevel>>(ipc_buffer)
+            .ok()
+    };
+
+    // TODO: make sure buffers can't overlap.
+    if let Some(ipc_buffer) = ipc_buffer {
+        if !ipc_buffer
+            .rights
+            .contains(CapRights::READ | CapRights::WRITE)
+            || ipc_buffer.cap.page().unwrap().size_log2 != BasePage::PAGE_SIZE_LOG2 as u8
+        {
+            return Err(CapError::InvalidOperation);
+        }
+        thread_cap.configure(captbl, pgtbl, Some(ipc_buffer.cap.page().unwrap().phys))?;
+    } else {
+        thread_cap.configure(captbl, pgtbl, None)?;
+    }
 
     Ok(())
 }
 
 pub fn sys_thread_write_registers(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     thread_cap: u64,
     regs_vaddr: u64,
 ) -> CapResult<()> {
@@ -696,7 +776,11 @@ pub fn sys_thread_write_registers(
 }
 
 // TODO: bring this logic elsewhere so the kernel can signal notifications more cleanly.
-pub fn sys_notification_signal(thread: &Arc<Thread>, notification: u64) -> CapResult<()> {
+pub fn sys_notification_signal(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    notification: u64,
+) -> CapResult<()> {
     let notification = notification as usize;
 
     let root_hdr = {
@@ -741,7 +825,11 @@ pub fn sys_notification_signal(thread: &Arc<Thread>, notification: u64) -> CapRe
     Ok(())
 }
 
-pub fn sys_notification_poll(thread: &Arc<Thread>, notification: u64) -> CapResult<u64> {
+pub fn sys_notification_poll(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    notification: u64,
+) -> CapResult<u64> {
     let notification = notification as usize;
 
     let root_hdr = {
@@ -758,7 +846,8 @@ pub fn sys_notification_poll(thread: &Arc<Thread>, notification: u64) -> CapResu
 }
 
 pub fn sys_intr_pool_get(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     pool: u64,
     into_table: u64,
     into_index: u64,
@@ -804,7 +893,11 @@ pub fn sys_intr_pool_get(
     Ok(())
 }
 
-pub fn sys_intr_handler_ack(thread: &Arc<Thread>, handler: u64) -> CapResult<()> {
+pub fn sys_intr_handler_ack(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    handler: u64,
+) -> CapResult<()> {
     let handler = handler as usize;
 
     let root_hdr = {
@@ -820,7 +913,8 @@ pub fn sys_intr_handler_ack(thread: &Arc<Thread>, handler: u64) -> CapResult<()>
 }
 
 pub fn sys_intr_handler_bind(
-    thread: &Arc<Thread>,
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
     handler: u64,
     notification: u64,
 ) -> CapResult<()> {
@@ -855,7 +949,11 @@ pub fn sys_intr_handler_bind(
     Ok(())
 }
 
-pub fn sys_intr_handler_unbind(thread: &Arc<Thread>, handler: u64) -> CapResult<()> {
+pub fn sys_intr_handler_unbind(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    handler: u64,
+) -> CapResult<()> {
     let handler = handler as usize;
 
     let root_hdr = {
@@ -868,4 +966,470 @@ pub fn sys_intr_handler_unbind(thread: &Arc<Thread>, handler: u64) -> CapResult<
     *handler.cap.intr_handler().unwrap().notification.lock() = None;
 
     Ok(())
+}
+
+#[allow(clippy::cast_possible_wrap)]
+pub fn sys_thread_set_priority(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    thread_cap: u64,
+    prio: u64,
+) -> CapResult<()> {
+    let thread_cap = thread_cap as usize;
+    let prio = prio as i64 as i8;
+
+    if !(0..32).contains(&prio) {
+        return Err(CapError::InvalidOperation);
+    }
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
+
+    let thread_cap = thread_cap.cap.thread().unwrap();
+    let mut private = thread_cap.private.lock();
+    Scheduler::dequeue_dl(thread_cap, &mut private);
+
+    let old_eff_prio = private.prio.effective();
+    private.prio.base_prio = prio;
+    let new_eff_prio = private.prio.effective();
+    if new_eff_prio > old_eff_prio {
+        Scheduler::enqueue_front_dl(thread_cap, Some(asm::hartid()), &mut private);
+    } else {
+        Scheduler::enqueue_dl(thread_cap, Some(asm::hartid()), &mut private);
+    }
+    drop(private);
+    if thread_cap
+        .blocked_on_wq
+        .lock()
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .is_some()
+    {
+        thread_cap.wait_queue_priority_changed(old_eff_prio, new_eff_prio, true);
+    }
+
+    Ok(())
+}
+
+pub fn sys_thread_set_ipc_buffer(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    thread_cap: u64,
+    ipc_buffer: u64,
+) -> CapResult<()> {
+    let thread_cap = thread_cap as usize;
+    let ipc_buffer = ipc_buffer as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
+
+    let thread_cap = thread_cap.cap.thread().unwrap();
+    let mut private = thread_cap.private.lock();
+
+    let ipc_buffer = root_hdr.get::<PageCap>(ipc_buffer)?;
+
+    if !ipc_buffer
+        .rights
+        .contains(CapRights::READ | CapRights::WRITE)
+        || ipc_buffer.cap.page().unwrap().size_log2 != BasePage::PAGE_SIZE_LOG2 as u8
+    {
+        return Err(CapError::InvalidOperation);
+    }
+
+    private.ipc_buffer = Some(ipc_buffer.cap.page().unwrap().phys);
+
+    Ok(())
+}
+
+pub fn sys_yield(thread: Arc<Thread>, intr: InterruptDisabler) {
+    let mut private = thread.private.lock();
+    let old_prio = private.prio.effective();
+    Scheduler::dequeue_dl(&thread, &mut private);
+    thread.prio_saturating_diminish_dl(&mut private);
+    if private.prio.effective() > old_prio {
+        Scheduler::enqueue_front_dl(&thread, Some(asm::hartid()), &mut private);
+    } else {
+        Scheduler::enqueue_dl(&thread, Some(asm::hartid()), &mut private);
+    }
+
+    drop(private);
+    drop(thread);
+    drop(intr);
+    // SAFETY: This thread is currently running on this hart.
+    unsafe {
+        Thread::yield_to_scheduler();
+    }
+}
+
+#[allow(unused_assignments)]
+pub fn sys_notification_wait(
+    thread: Arc<Thread>,
+    mut intr: InterruptDisabler,
+    notification: u64,
+) -> CapResult<u64> {
+    let notification = notification as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let notification = root_hdr.get::<NotificationCap>(notification)?;
+
+    let notification = notification.cap.notification().unwrap();
+    let wq = &notification.wait_queue;
+    {
+        let mut wq_lock = wq.lock();
+        let mut private = thread.private.lock();
+
+        let x = notification.word.swap(0, Ordering::Relaxed);
+        if x != 0 {
+            return Ok(x);
+        }
+
+        private.state = ThreadState::Blocking;
+        Scheduler::dequeue_dl(&thread, &mut private);
+        thread.blocked_on_wq.lock().replace(Arc::downgrade(wq));
+        wq_lock.insert(private.prio.effective(), &thread);
+    }
+    drop(thread);
+    drop(intr);
+    // SAFETY: This thread is currently in the wait queue.
+    unsafe {
+        Thread::yield_to_scheduler();
+    }
+    intr = InterruptDisabler::new();
+
+    Ok(notification.word.swap(0, Ordering::Relaxed))
+}
+
+pub fn sys_endpoint_recv(
+    thread: Arc<Thread>,
+    intr: InterruptDisabler,
+    endpoint: u64,
+) -> CapResult<MessageHeader> {
+    let endpoint = endpoint as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
+    let endpoint = endpoint.cap.endpoint().unwrap();
+
+    sys_endpoint_recv_inner(thread, intr, endpoint).map(|(x, _, _)| x)
+}
+
+pub fn sys_endpoint_recv_inner(
+    thread: Arc<Thread>,
+    mut intr: InterruptDisabler,
+    endpoint: &Arc<Endpoint>,
+) -> CapResult<(MessageHeader, Arc<Thread>, InterruptDisabler)> {
+    let recv_wq = &endpoint.recv_wait_queue;
+    {
+        let mut recv_wq_lock = recv_wq.lock();
+        let mut private = thread.private.lock();
+
+        let mut send_wq_lock = endpoint.send_wait_queue.lock();
+        if let Some(sender) = send_wq_lock.find_highest_thread() {
+            let mut sender_private = sender.private.lock();
+            let msg_hdr = endpoint_recv(
+                &thread,
+                &sender,
+                &mut private,
+                &mut sender_private,
+                endpoint,
+                &mut send_wq_lock,
+                false,
+            );
+            sender_private.recv_fastpath = true;
+            drop(private);
+            return Ok((msg_hdr, thread, intr));
+        }
+        drop(send_wq_lock);
+
+        private.state = ThreadState::Blocking;
+        Scheduler::dequeue_dl(&thread, &mut private);
+        thread.blocked_on_wq.lock().replace(Arc::downgrade(recv_wq));
+        recv_wq_lock.insert(private.prio.effective(), &thread);
+    }
+    drop(thread);
+    drop(intr);
+    // SAFETY: This thread is in the wait queue
+    unsafe {
+        Thread::yield_to_scheduler();
+    }
+    intr = InterruptDisabler::new();
+
+    let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+
+    let mut private = thread.private.lock();
+
+    if let Some(hdr) = private.send_fastpath.take() {
+        drop(private);
+        return Ok((hdr, thread, intr));
+    }
+
+    let mut send_wq_lock = endpoint.send_wait_queue.lock();
+    let sender = send_wq_lock.find_highest_thread().unwrap();
+    let msg_hdr = endpoint_recv(
+        &thread,
+        &sender,
+        &mut private,
+        &mut sender.private.lock(),
+        endpoint,
+        &mut send_wq_lock,
+        false,
+    );
+    drop(private);
+    Ok((msg_hdr, thread, intr))
+}
+
+#[inline]
+fn endpoint_recv(
+    thread: &Arc<Thread>,
+    sender: &Arc<Thread>,
+    private: &mut ThreadProtected,
+    sender_private: &mut ThreadProtected,
+    endpoint: &Arc<Endpoint>,
+    send_wq: &mut WaitQueue,
+    send_fastpath: bool,
+) -> MessageHeader {
+    if !send_fastpath {
+        endpoint.block_senders(thread, private, send_wq);
+        *sender.blocked_on_wq.lock() = None;
+    }
+
+    let hdr = if send_fastpath {
+        private.send_fastpath.unwrap()
+    } else {
+        MessageHeader::from_raw(sender.trapframe.lock().a2)
+    };
+
+    let len = cmp::min(hdr.length(), 4.kib() / mem::size_of::<u64>());
+    let tx_trapframe = sender.trapframe.lock();
+    let mut rx_trapframe = thread.trapframe.lock();
+    match len {
+        1 => {
+            rx_trapframe.a4 = tx_trapframe.a4;
+        }
+        2 => {
+            rx_trapframe.a4 = tx_trapframe.a4;
+            rx_trapframe.a5 = tx_trapframe.a5;
+        }
+        3 => {
+            rx_trapframe.a4 = tx_trapframe.a4;
+            rx_trapframe.a5 = tx_trapframe.a5;
+            rx_trapframe.a6 = tx_trapframe.a6;
+        }
+        4 => {
+            rx_trapframe.a4 = tx_trapframe.a4;
+            rx_trapframe.a5 = tx_trapframe.a5;
+            rx_trapframe.a6 = tx_trapframe.a6;
+            rx_trapframe.a7 = tx_trapframe.a7;
+        }
+        _ => {
+            if let Some(recv_buffer) = private.ipc_buffer {
+                if let Some(send_buffer) = sender_private.ipc_buffer {
+                    // SAFETY: TODO: deal with page dealloc
+                    unsafe {
+                        core::ptr::copy(
+                            send_buffer.into_virt().into_ptr(),
+                            recv_buffer.into_virt().into_ptr_mut(),
+                            len * mem::size_of::<u64>(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if !send_fastpath {
+        //let hartid = Scheduler::choose_hart_dl(sender, sender_private);
+        //let send_ipi = Scheduler::is_idle(hartid) && hartid != asm::hartid();
+
+        sender_private.state = ThreadState::Runnable;
+        sender.prio_boost_dl(sender_private);
+        Scheduler::enqueue_front_dl(sender, Some(asm::hartid()), sender_private);
+        //if send_ipi {
+        //    sbi::ipi::send_ipi(sbi::HartMask::new(0).with(hartid as usize)).unwrap();
+        //}
+
+        endpoint.unblock_senders(thread, private, send_wq);
+    }
+
+    hdr
+}
+
+// TODO: extract this into a general "wake" function
+#[inline]
+fn endpoint_send(receiver: &Arc<Thread>, receiver_private: &mut ThreadProtected) {
+    *receiver.blocked_on_wq.lock() = None;
+
+    //let hartid = Scheduler::choose_hart_dl(receiver, receiver_private);
+    //let send_ipi = Scheduler::is_idle(hartid) && hartid != asm::hartid();
+
+    receiver_private.state = ThreadState::Runnable;
+    receiver.prio_boost_dl(receiver_private);
+    Scheduler::enqueue_front_dl(receiver, Some(asm::hartid()), receiver_private);
+    //if send_ipi {
+    //    sbi::ipi::send_ipi(sbi::HartMask::new(0).with(hartid as usize)).unwrap();
+    //}
+}
+
+#[inline]
+pub fn sys_endpoint_send(
+    thread: Arc<Thread>,
+    intr: InterruptDisabler,
+    endpoint: u64,
+    hdr: MessageHeader,
+) -> CapResult<()> {
+    let endpoint = endpoint as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
+    let endpoint = endpoint.cap.endpoint().unwrap();
+    sys_endpoint_send_inner(thread, intr, endpoint, hdr).map(|_| ())
+}
+
+#[inline]
+pub fn sys_endpoint_send_inner(
+    thread: Arc<Thread>,
+    mut intr: InterruptDisabler,
+    endpoint: &Arc<Endpoint>,
+    hdr: MessageHeader,
+) -> CapResult<(Arc<Thread>, InterruptDisabler)> {
+    let send_wq = &endpoint.send_wait_queue;
+    {
+        let mut send_wq_lock = send_wq.lock();
+        let mut private = thread.private.lock();
+
+        let mut recv_wq_lock = endpoint.recv_wait_queue.lock();
+        if let Some(receiver) = recv_wq_lock.find_highest_thread() {
+            let mut receiver_private = receiver.private.lock();
+            receiver_private.send_fastpath = Some(hdr);
+            drop(recv_wq_lock);
+            endpoint_recv(
+                &receiver,
+                &thread,
+                &mut receiver_private,
+                &mut private,
+                endpoint,
+                &mut send_wq_lock,
+                true,
+            );
+            endpoint_send(&receiver, &mut receiver_private);
+            drop(private);
+            return Ok((thread, intr));
+        }
+        drop(recv_wq_lock);
+
+        private.state = ThreadState::Blocking;
+        Scheduler::dequeue_dl(&thread, &mut private);
+        thread.blocked_on_wq.lock().replace(Arc::downgrade(send_wq));
+        send_wq_lock.insert(private.prio.effective(), &thread);
+    }
+    drop(thread);
+    drop(intr);
+    // SAFETY: This thread is in the wait queue
+    unsafe {
+        Thread::yield_to_scheduler();
+    }
+    intr = InterruptDisabler::new();
+
+    let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+
+    let mut private = thread.private.lock();
+
+    if private.recv_fastpath {
+        private.recv_fastpath = false;
+        drop(private);
+        return Ok((thread, intr));
+    }
+
+    let receiver = endpoint
+        .recv_wait_queue
+        .lock()
+        .find_highest_thread()
+        .unwrap();
+    endpoint_send(&receiver, &mut receiver.private.lock());
+
+    drop(private);
+    Ok((thread, intr))
+}
+
+pub fn sys_endpoint_reply(
+    thread: Arc<Thread>,
+    intr: InterruptDisabler,
+    base_endpoint: u64,
+    hdr: MessageHeader,
+) -> CapResult<()> {
+    let base_endpoint = base_endpoint as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let base_endpoint = root_hdr.get::<capability::Endpoint>(base_endpoint)?;
+    let base_endpoint = base_endpoint.cap.endpoint().unwrap();
+    let endpoint = base_endpoint
+        .reply_cap
+        .lock()
+        .clone()
+        .ok_or(CapError::InvalidOperation)?;
+    sys_endpoint_send_inner(thread, intr, &endpoint, hdr).map(|_| ())
+}
+
+// TODO: reply_recv a1 = endpt, a2 = hdr, a3 = &badge, a4-a7 = MRs
+
+pub fn sys_endpoint_call(
+    mut thread: Arc<Thread>,
+    mut intr: InterruptDisabler,
+    endpoint: u64,
+    hdr: MessageHeader,
+) -> CapResult<MessageHeader> {
+    let endpoint = endpoint as usize;
+
+    let root_hdr = {
+        let private = thread.private.lock();
+        private.captbl.as_ref().unwrap().clone()
+    };
+
+    let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
+
+    let endpoint = endpoint.cap.endpoint().unwrap();
+
+    {
+        let reply_cap = Arc::new(Endpoint {
+            recv_wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
+            send_wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
+            reply_cap: SpinMutex::new(None),
+        });
+        endpoint.reply_cap.lock().replace(reply_cap);
+
+        (thread, intr) = sys_endpoint_send_inner(thread, intr, endpoint, hdr)?;
+    }
+
+    let hdr = {
+        let reply_cap = endpoint.reply_cap.lock().clone().unwrap();
+        let (hdr, _, _) = sys_endpoint_recv_inner(thread, intr, &reply_cap)?;
+        *endpoint.reply_cap.lock() = None;
+        hdr
+    };
+
+    Ok(hdr)
 }

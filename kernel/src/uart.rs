@@ -141,7 +141,7 @@ impl Ns16650Inner {
                 .write_volatile(msb);
         }
 
-        self.write_lcr(lcr);
+        self.write_lcr(lcr | 3);
     }
 
     fn read_lcr(&self) -> u8 {

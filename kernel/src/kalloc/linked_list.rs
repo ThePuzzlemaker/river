@@ -51,7 +51,7 @@
 
 use core::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
-    cmp, intrinsics, mem,
+    cmp, fmt, intrinsics, mem,
     ptr::{self, addr_of_mut, NonNull},
     slice,
 };
@@ -105,13 +105,42 @@ impl LinkedListAlloc {
     }
 }
 
-#[derive(Debug)]
 struct LinkedListAllocInner {
     init: bool,
     mapped_size: usize,
     base: VirtualMut<u8, Identity>,
     unmanaged_ptr: *mut u8,
     free_list: *mut FreeNode,
+}
+
+impl fmt::Debug for LinkedListAllocInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkedListAllocInner")
+            .field("init", &self.init)
+            .field("mapped_size", &self.mapped_size)
+            .field("base", &self.base)
+            .field("unmanaged_ptr", &self.unmanaged_ptr)
+            .field("free_list", &FreeListDebugAdapter(self.free_list))
+            .finish()
+    }
+}
+
+struct FreeListDebugAdapter(*mut FreeNode);
+
+impl fmt::Debug for FreeListDebugAdapter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut l = f.debug_list();
+        let mut current = self.0;
+        loop {
+            if current.is_null() {
+                break;
+            }
+            let node = unsafe { &*current };
+            l.entry(&(current, node));
+            current = node.next;
+        }
+        l.finish()
+    }
 }
 
 #[derive(Debug)]
@@ -166,7 +195,7 @@ fn calculate_needed_size(node_base: *mut u8, layout: Layout) -> (usize, usize) {
     // However, we *do* need to ensure that needed_size is at least
     // 8-aligned, so that our next size tag isn't unaligned. This
     // padding is at the end so we don't compensate in n_bytes_padding.
-    let needed_size = needed_size + 8 - (needed_size % 8);
+    let needed_size = needed_size.next_multiple_of(8);
     (needed_size, n_bytes_padding)
 }
 
@@ -187,10 +216,13 @@ enum FoundNode {
 }
 
 impl LinkedListAllocInner {
+    #[track_caller]
     unsafe fn find_first_fit(&self, layout: Layout) -> FoundNode {
+        //        log::trace!("find_first_fit: {layout:?}");
         let mut current_node = self.free_list;
 
         loop {
+            //          log::trace!("find_first_fit: current_node={:#?}", current_node);
             if current_node.is_null() {
                 // Our first-fit block wasn't found, i.e. there wasn't a block
                 // large enough. This means we need to make a new block, which
@@ -217,6 +249,10 @@ impl LinkedListAllocInner {
                 };
             }
 
+            // log::trace!("find_first_fit: current_node={:?}", unsafe {
+            //     &*current_node
+            // });
+
             // The MSB of the size is the "is free" bit, so we need to take that
             // out to make sure our reference size is right.
             //
@@ -226,7 +262,7 @@ impl LinkedListAllocInner {
             debug_assert_ne!(
                 size_tag & (1 << 63),
                 0,
-                "free list node referred to occupied block"
+                "free list node referred to occupied block: {current_node:#?}, size tag={size_tag:#x}, self={self:#?}",
             );
             // N.B. doesn't include this free tag
             let node_size = size_tag & !(1 << 63);
@@ -250,6 +286,23 @@ impl LinkedListAllocInner {
                 needed_size,
                 n_bytes_padding,
             };
+        }
+    }
+
+    #[track_caller]
+    fn free_list_valid(&self) -> bool {
+        let mut prev = ptr::null_mut();
+        let mut cur = self.free_list;
+        loop {
+            if cur.is_null() {
+                break true;
+            }
+            let node = unsafe { &*cur };
+            if (node.prev != prev) || (node.size_tag & (1 << 63)) == 0 {
+                break false;
+            }
+            prev = cur;
+            cur = node.next;
         }
     }
 }
@@ -295,6 +348,12 @@ unsafe impl Allocator for LinkedListAlloc {
         debug_assert!(
             alloc.init,
             "LinkedListAlloc::allocate: kalloc not initialized"
+        );
+        //        log::trace!("aaa");
+        //log::trace!("alloc before: {alloc:#?}");
+        debug_assert!(
+            alloc.free_list_valid(),
+            "LinkedListAlloc::allocate: free list was invalid before allocation {alloc:#?}"
         );
         // SAFETY: Our allocator is initialized.
         let node = unsafe { alloc.find_first_fit(layout) };
@@ -378,7 +437,9 @@ unsafe impl Allocator for LinkedListAlloc {
                 node_size,
             } => {
                 // Check if our size excess is more than our threshold.
-                if node_size - needed_size >= BLOCK_SPLIT_THRESHOLD {
+                if
+                // node_size - needed_size >= BLOCK_SPLIT_THRESHOLD
+                false {
                     // SAFETY: This pointer is valid as needed_size
                     // accounts for the data size *and* the padding
                     // size, and is also 8-aligned. Also, we account
@@ -447,6 +508,8 @@ unsafe impl Allocator for LinkedListAlloc {
                     // pointer is valid and aligned.
                     let node = unsafe { &mut *ptr };
                     node.size_tag = node_size;
+
+                    //log::trace!("{:?}", alloc);
                     // N.B. null prev == node is at head of free-list
                     if node.prev.is_null() {
                         alloc.free_list = node.next;
@@ -487,6 +550,13 @@ unsafe impl Allocator for LinkedListAlloc {
             "kalloc::linked_list: allocator allocated unaligned block"
         );
 
+        log::trace!("allocate: layout={layout:?}, ptr={ptr:#p}, self={alloc:#?}");
+
+        debug_assert!(
+            alloc.free_list_valid(),
+            "LinkedListAlloc::allocate: free list was invalid after allocation {alloc:#?}"
+        );
+
         // SAFETY: Our pointer is non-null (unless something got
         // seriously clobbered, in which case we have bigger
         // problems). It is also properly aligned and of the proper
@@ -500,6 +570,10 @@ unsafe impl Allocator for LinkedListAlloc {
         debug_assert!(
             alloc.init,
             "LinkedListAlloc::deallocate: kalloc not initialized"
+        );
+        debug_assert!(
+            alloc.free_list_valid(),
+            "LinkedListAlloc::deallocate: free list was invalid before deallocation: {alloc:#?}"
         );
         // SAFETY: This pointer is safe to use as it refers to data
         // within the same linked list allocator node (specifically,
@@ -531,9 +605,8 @@ unsafe impl Allocator for LinkedListAlloc {
             "kalloc::linked_list: attempted to free a node with a layout larger than the node"
         );
 
-        let mut prev = alloc.free_list;
         // if the free list is null, then we need to start the list here
-        if prev.is_null() {
+        if alloc.free_list.is_null() {
             alloc.free_list = node_ptr;
             // SAFETY: We have exclusive access to this node by our
             // invariants. The base pointer is valid.
@@ -542,48 +615,79 @@ unsafe impl Allocator for LinkedListAlloc {
                 addr_of_mut!((*node_ptr).prev).write(ptr::null_mut());
                 addr_of_mut!((*node_ptr).next).write(ptr::null_mut());
             }
+            //log::trace!("deallocate: ptr={ptr:#p} layout={layout:?} self={alloc:#?}");
+
+            debug_assert!(
+                alloc.free_list_valid(),
+                "LinkedListAlloc::deallocate: free list was invalid after deallocation (path 1): {alloc:#?}"
+            );
             return;
         }
-        let mut next;
+        let mut prev: *mut FreeNode = ptr::null_mut();
+        let mut next = alloc.free_list;
         loop {
-            // SAFETY: We have exclusive access to all freed nodes by
-            // our invariants.
-            next = unsafe { &*prev }.next;
             // if next is null, we need to add this node to the end of
             // the list.
             if next.is_null() {
-                // SAFETY: Exclusive access by
-                // invariants. Short-circuiting null check for `prev`
-                // on initial conditions above.
+                if !prev.is_null() {
+                    // SAFETY: By invariants; null check
+                    unsafe {
+                        (*prev).next = node_ptr;
+                    }
+                }
+
+                // SAFETY: Exclusive access by invariants.
                 unsafe {
-                    (*prev).next = node_ptr;
                     addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
                     addr_of_mut!((*node_ptr).prev).write(prev);
                     addr_of_mut!((*node_ptr).next).write(ptr::null_mut());
                 }
+                //log::trace!("deallocate: ptr={ptr:#p} layout={layout:?} self={alloc:#?}");
+
                 // todo: coalesce
+
+                debug_assert!(
+                    alloc.free_list_valid(),
+                    "LinkedListAlloc::deallocate: free list was invalid after deallocation (path 2): {alloc:#?}"
+                );
                 return;
             }
 
             // if next > node_ptr, then we've found the right spot
-            // (because of our address-ordering invariant), so we ned
+            // (because of our address-ordering invariant), so we need
             // to splice the block into the list here.
             if next > node_ptr {
+                if prev.is_null() {
+                    alloc.free_list = node_ptr;
+                } else {
+                    // SAFETY: By invariants; null check
+                    unsafe {
+                        (*prev).next = node_ptr;
+                    }
+                }
+
                 // SAFETY: Exclusive access by
-                // invariants. Short-circuiting null check for `prev`
-                // on initial conditions and `next` on iteration
-                // above.
+                // invariants. Short-circuiting null check for `next`
+                // on iteration above.
                 unsafe {
-                    (*prev).next = node_ptr;
                     (*next).prev = node_ptr;
                     addr_of_mut!((*node_ptr).size_tag).write(node_size | (1 << 63));
                     addr_of_mut!((*node_ptr).prev).write(prev);
                     addr_of_mut!((*node_ptr).next).write(next);
                 }
+
+                debug_assert!(
+                    alloc.free_list_valid(),
+                    "LinkedListAlloc::deallocate: free list was invalid after deallocation (path 3): {alloc:#?}"
+                );
+                return;
             }
 
             // haven't found our spot yet, continue.
             prev = next;
+            // SAFETY: We have exclusive access to all freed nodes by
+            // our invariants.
+            next = unsafe { &*prev }.next;
         }
     }
 }

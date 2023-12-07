@@ -40,6 +40,14 @@ pub enum SyscallNumber {
     IntrHandlerBind = 17,
     IntrHandlerUnbind = 18,
     IntrPoolGet = 19,
+    EndpointSend = 20,
+    EndpointRecv = 21,
+    ThreadSetPriority = 22,
+    ThreadSetIpcBuffer = 23,
+    EndpointReply = 24,
+    EndpointCall = 25,
+    SaveCaller = 26,
+    RestoreCaller = 27,
     /// Print the debug representation of a capability to the kernel
     /// console.
     DebugCapSlot = 0xFFFF_0000,
@@ -521,14 +529,20 @@ pub mod thread {
 
     /// See [`Captr::<Thread>::configure`].
     #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
-    pub unsafe fn configure(thread: usize, captbl: usize, pgtbl: usize) -> CapResult<()> {
+    pub unsafe fn configure(
+        thread: usize,
+        captbl: usize,
+        pgtbl: usize,
+        ipc_buffer: usize,
+    ) -> CapResult<()> {
         // SAFETY: By invariants.
         let res = unsafe {
-            super::ecall3(
+            super::ecall4(
                 SyscallNumber::ThreadConfigure,
                 thread as u64,
                 captbl as u64,
                 pgtbl as u64,
+                ipc_buffer as u64,
             )
         };
 

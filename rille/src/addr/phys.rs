@@ -35,6 +35,11 @@ pub struct Physical<T, Map: Mapping, Mut: Mutability> {
     pub(super) phantom: PhantomData<(Map, Mut, Mut::RawPointer<T>)>,
 }
 
+// SAFETY: Physical pointers are valid for all threads.
+unsafe impl<T, Map: Mapping, Mut: Mutability> Send for Physical<T, Map, Mut> {}
+// SAFETY: See above.
+unsafe impl<T, Map: Mapping, Mut: Mutability> Sync for Physical<T, Map, Mut> {}
+
 impl<T, Map: Mapping, Mut: Mutability> Physical<T, Map, Mut> {
     /// Create a [`Physical`] address from a [`usize`].
     ///

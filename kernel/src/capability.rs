@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicI8, AtomicU16, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU64};
 use core::{cmp, mem};
 use core::{fmt, ptr};
 
@@ -15,12 +15,14 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 use rille::capability::paging::{
     BasePage, DynLevel, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel,
 };
-use rille::capability::{CapError, CapResult, CapRights, CapabilityType, UserRegisters};
+use rille::capability::{
+    CapError, CapResult, CapRights, CapabilityType, MessageHeader, UserRegisters,
+};
 
 pub use rille::capability::{
     paging::PageTable as PageTableCap, Allocator as AllocatorCap, AnyCap, Captbl as CaptblCap,
-    Empty as EmptyCap, InterruptHandler as InterruptHandlerCap, InterruptPool as InterruptPoolCap,
-    Notification as NotificationCap, Thread as ThreadCap,
+    Empty as EmptyCap, Endpoint as EndpointCap, InterruptHandler as InterruptHandlerCap,
+    InterruptPool as InterruptPoolCap, Notification as NotificationCap, Thread as ThreadCap,
 };
 
 pub type PageCap = rille::capability::paging::Page<DynLevel>;
@@ -78,6 +80,7 @@ pub enum CapabilityKind {
     Notification(Arc<Notification>) = CapabilityType::Notification as u8,
     InterruptPool(Arc<InterruptPool>) = CapabilityType::InterruptPool as u8,
     InterruptHandler(Arc<InterruptHandler>) = CapabilityType::InterruptHandler as u8,
+    Endpoint(Arc<Endpoint>) = CapabilityType::Endpoint as u8,
 }
 
 impl fmt::Debug for CapabilityKind {
@@ -94,6 +97,7 @@ impl fmt::Debug for CapabilityKind {
                 f.debug_tuple("InterruptHandler").field(handler).finish()
             }
             Self::InterruptPool(pool) => f.debug_tuple("InterruptPool").field(pool).finish(),
+            Self::Endpoint(endpoint) => f.debug_tuple("Endpoint").field(endpoint).finish(),
         }
     }
 }
@@ -166,6 +170,14 @@ impl CapabilityKind {
     pub fn intr_pool(&self) -> Option<&Arc<InterruptPool>> {
         if let Self::InterruptPool(pool) = self {
             Some(pool)
+        } else {
+            None
+        }
+    }
+
+    pub fn endpoint(&self) -> Option<&Arc<Endpoint>> {
+        if let Self::Endpoint(ep) = self {
+            Some(ep)
         } else {
             None
         }
@@ -304,6 +316,7 @@ pub enum AnyCapVal {
     Notification(Arc<Notification>),
     InterruptHandler(Arc<InterruptHandler>),
     InterruptPool(Arc<InterruptPool>),
+    Endpoint(Arc<Endpoint>),
     // TODO
 }
 
@@ -325,6 +338,7 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
             CapabilityKind::InterruptHandler(handler) => {
                 AnyCapVal::InterruptHandler(handler.clone())
             }
+            CapabilityKind::Endpoint(endpoint) => AnyCapVal::Endpoint(endpoint.clone()),
         }
     }
 }
@@ -348,6 +362,7 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
             CapabilityKind::InterruptHandler(handler) => {
                 AnyCapVal::InterruptHandler(handler.clone())
             }
+            CapabilityKind::Endpoint(endpoint) => AnyCapVal::Endpoint(endpoint.clone()),
         }
     }
 }
@@ -455,6 +470,7 @@ impl CapabilityValue for AnyCapVal {
             AnyCapVal::Notification(notif) => notif.into_kind(),
             AnyCapVal::InterruptHandler(handler) => handler.into_kind(),
             AnyCapVal::InterruptPool(pool) => pool.into_kind(),
+            AnyCapVal::Endpoint(endpoint) => endpoint.into_kind(),
         }
     }
 
@@ -471,6 +487,7 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::Notification(_) => Arc::<Notification>::copy_hook(slot),
                 CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::copy_hook(slot),
                 CapabilityKind::InterruptPool(_) => Arc::<InterruptPool>::copy_hook(slot),
+                CapabilityKind::Endpoint(_) => Arc::<Endpoint>::copy_hook(slot),
             }
         }
     }
@@ -488,6 +505,7 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::Notification(_) => Arc::<Notification>::delete_hook(slot),
                 CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::delete_hook(slot),
                 CapabilityKind::InterruptPool(_) => Arc::<InterruptPool>::delete_hook(slot),
+                CapabilityKind::Endpoint(_) => Arc::<Endpoint>::delete_hook(slot),
             }
         }
     }
@@ -537,9 +555,9 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
-    phys: PhysicalMut<u8, DirectMapped>,
-    size_log2: u8,
-    is_device: bool,
+    pub phys: PhysicalMut<u8, DirectMapped>,
+    pub size_log2: u8,
+    pub is_device: bool,
 }
 
 impl Page {
@@ -679,7 +697,12 @@ impl<'a> SlotRef<'a, ThreadCap> {
     /// See [`Captr::<Thread>::configure`][1].
     ///
     /// [1]: rille::capability::Captr::<rille::capability::Thread>::configure
-    pub fn configure(&self, captbl: Captbl, pgtbl: SharedPageTable) -> CapResult<()> {
+    pub fn configure(
+        &self,
+        captbl: Captbl,
+        pgtbl: SharedPageTable,
+        ipc_buffer: Option<PhysicalMut<u8, DirectMapped>>,
+    ) -> CapResult<()> {
         use crate::paging::PageTableFlags as KernelFlags;
         // SAFETY: Type check.
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
@@ -705,6 +728,7 @@ impl<'a> SlotRef<'a, ThreadCap> {
         );
 
         private.state = ThreadState::Suspended;
+        private.ipc_buffer = ipc_buffer;
 
         drop(private);
         thread.setup_page_table();
@@ -817,7 +841,6 @@ impl<'a> SlotRef<'a, ThreadCap> {
     }
 }
 
-#[repr(C)]
 pub struct Thread {
     pub trapframe: SpinMutex<OwnedTrapframe>,
     pub stack: ThreadKernelStack,
@@ -826,7 +849,7 @@ pub struct Thread {
     pub tid: usize,
     pub waiting_on: AtomicU64,
     pub slot_refcount: AtomicU64,
-    pub blocking_wqs: SpinMutex<Vec<OwnedWaitQueue>>,
+    pub blocking_wqs: SpinMutex<Vec<Arc<SpinMutex<WaitQueue>>>>,
     pub blocked_on_wq: SpinMutex<Option<Weak<SpinMutex<WaitQueue>>>>,
     pub affinity: SpinMutex<HartMask>,
 }
@@ -861,7 +884,7 @@ impl Thread {
                 // Prio dropped. We must recalculate the max from our
                 // blocking wait queues.
                 for wq in this.blocking_wqs.lock().iter() {
-                    let prio = wq.inner.lock().highest_prio();
+                    let prio = wq.lock().highest_prio();
 
                     new_prio = cmp::max(new_prio, prio);
                 }
@@ -966,29 +989,6 @@ impl Thread {
         if propagate {
             WaitQueue::waiters_changed(lock, old_prio);
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct OwnedWaitQueue {
-    inner: Arc<SpinMutex<WaitQueue>>,
-    owner: Weak<Thread>,
-}
-
-impl OwnedWaitQueue {
-    pub fn new(owner: Weak<Thread>) -> Self {
-        OwnedWaitQueue {
-            inner: Arc::new(SpinMutex::new(WaitQueue::new(Some(owner.clone())))),
-            owner,
-        }
-    }
-
-    pub fn enqueue(&self, thread: &Arc<Thread>, wq: &mut WaitQueue, prio: i8) {
-        wq.insert(prio, thread);
-    }
-
-    pub fn inner(&self) -> &Arc<SpinMutex<WaitQueue>> {
-        &self.inner
     }
 }
 
@@ -1145,6 +1145,9 @@ impl Thread {
                 },
                 state: ThreadState::Uninit,
                 hartid: u64::MAX,
+                ipc_buffer: None,
+                recv_fastpath: false,
+                send_fastpath: None,
             }),
             context: SpinMutex::new(Context::default()),
             tid: tid as usize,
@@ -1289,6 +1292,10 @@ pub struct ThreadProtected {
     pub prio: ThreadPriorities,
     pub state: ThreadState,
     pub hartid: u64,
+    // TODO: handle `Page`s being dropped--make this an Arc
+    pub ipc_buffer: Option<PhysicalMut<u8, DirectMapped>>,
+    pub send_fastpath: Option<MessageHeader>,
+    pub recv_fastpath: bool,
 }
 
 #[derive(Debug)]
@@ -1300,7 +1307,10 @@ pub struct ThreadPriorities {
 
 impl Thread {
     pub fn prio_boost(self: &Arc<Thread>) {
-        let mut private = self.private.lock();
+        self.prio_boost_dl(&mut self.private.lock())
+    }
+
+    pub fn prio_boost_dl(self: &Arc<Thread>, private: &mut ThreadProtected) {
         let prio = &mut private.prio;
         let old_eff_prio = prio.effective();
         prio.boost();
@@ -1551,8 +1561,73 @@ pub fn global_interrupt_pool() -> &'static Arc<InterruptPool> {
     })
 }
 
-mod impls {
+#[derive(Debug)]
+pub struct Endpoint {
+    pub recv_wait_queue: Arc<SpinMutex<WaitQueue>>,
+    pub send_wait_queue: Arc<SpinMutex<WaitQueue>>,
+    pub reply_cap: SpinMutex<Option<Arc<Endpoint>>>,
+}
 
+impl Endpoint {
+    //#[track_caller]
+    pub fn block_senders(
+        &self,
+        thread: &Arc<Thread>,
+        private: &mut ThreadProtected,
+        send_wq: &mut WaitQueue,
+    ) {
+        thread
+            .blocking_wqs
+            .lock()
+            .push(self.send_wait_queue.clone());
+        send_wq.owner.replace(Arc::downgrade(thread));
+        let old_prio = private.prio.effective();
+        private.prio.inherited_prio = send_wq.highest_prio();
+        if thread
+            .blocked_on_wq
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some()
+        {
+            thread.wait_queue_priority_changed(old_prio, private.prio.effective(), true);
+        }
+    }
+
+    pub fn unblock_senders(
+        &self,
+        thread: &Arc<Thread>,
+        private: &mut ThreadProtected,
+        send_wq: &mut WaitQueue,
+    ) {
+        thread
+            .blocking_wqs
+            .lock()
+            .retain(|x| Arc::ptr_eq(x, &self.send_wait_queue));
+        send_wq.owner.take();
+        let old_prio = private.prio.effective();
+        private.prio.inherited_prio = -1;
+        if thread
+            .blocked_on_wq
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some()
+        {
+            thread.wait_queue_priority_changed(old_prio, private.prio.effective(), true);
+        }
+    }
+}
+
+impl CapabilityValue for Arc<Endpoint> {
+    type Cap = EndpointCap;
+
+    fn into_kind(self) -> CapabilityKind {
+        CapabilityKind::Endpoint(self)
+    }
+}
+
+mod impls {
     use alloc::sync::Arc;
     use rille::capability::CapabilityType;
 
@@ -1560,8 +1635,9 @@ mod impls {
 
     use super::{
         Allocator, AllocatorCap, AnyCap, AnyCapVal, Capability, CaptblCap, Empty, EmptyCap,
-        InterruptHandler, InterruptHandlerCap, InterruptPool, InterruptPoolCap, Notification,
-        NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
+        Endpoint, EndpointCap, InterruptHandler, InterruptHandlerCap, InterruptPool,
+        InterruptPoolCap, Notification, NotificationCap, PageCap, PageTableCap, ThreadCap,
+        WeakCaptbl,
     };
     impl Capability for EmptyCap {
         type Value = Empty;
@@ -1622,6 +1698,13 @@ mod impls {
         type Value = Arc<InterruptPool>;
         fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::InterruptPool
+        }
+    }
+
+    impl Capability for EndpointCap {
+        type Value = Arc<Endpoint>;
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
+            cap_type == CapabilityType::Endpoint
         }
     }
 }

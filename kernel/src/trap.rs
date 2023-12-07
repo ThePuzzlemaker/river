@@ -1,20 +1,20 @@
-use core::{arch::global_asm, mem, num::NonZeroU64};
+use core::{arch::global_asm, mem, num::NonZeroU64, slice};
 
 use crate::{
     asm::{self, hartid, InterruptDisabler, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{global_interrupt_pool, Thread, ThreadState, THREAD_STACK_SIZE},
+    capability::{global_interrupt_pool, Thread, ThreadState, WaitQueue, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
     sched::Scheduler,
-    sync::OnceCell,
+    sync::{OnceCell, SpinMutex},
     trampoline::{self, trampoline, Trapframe},
     uart,
 };
 use alloc::sync::Arc;
 use atomic::Ordering;
 use rille::{
-    capability::{CapError, CapabilityType, Notification},
+    capability::{CapError, CapabilityType, Endpoint, MessageHeader, Notification},
     syscalls::SyscallNumber,
 };
 
@@ -128,14 +128,14 @@ fn device_interrupt(scause: u64) -> InterruptKind {
         if irq == 0x0 {
             // FIXME: I have no idea what the hell this means and why
             // it's being triggered here, but... sure it's fine
-            return InterruptKind::External;
+            return InterruptKind::Unknown;
         } else if let Some(handler) = global_interrupt_pool().map.read().get(&(irq as u16)) {
             if let Some((notif, badge)) = &*handler.notification.lock() {
                 let mut wq = notif.wait_queue.lock();
                 let word = &notif.word;
                 word.fetch_or(*badge, Ordering::Relaxed);
                 //    log::trace!("signal word={word:x?}");
-                log::trace!("wq={wq:?}");
+                //log::trace!("wq={wq:?}");
                 if let Some(thread) = wq.find_highest_thread() {
                     *thread.blocked_on_wq.lock() = None;
                     thread.prio_boost();
@@ -331,7 +331,7 @@ unsafe extern "C" fn user_trap() -> ! {
     );
 
     'syscall: {
-        let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+        let mut proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
         // We cannot deadlock here. Full stop. Here's why:
         // 1. We are the user trap handler. If this lock was held by
@@ -342,8 +342,7 @@ unsafe extern "C" fn user_trap() -> ! {
         // someone enabled interrupts while the lock was still held
         // (which is a bug itself).
         let mut trapframe_lock = proc.trapframe.lock();
-        let trapframe = &mut **trapframe_lock;
-        trapframe.user_epc = asm::read_sepc();
+        trapframe_lock.user_epc = asm::read_sepc();
 
         let scause = asm::read_scause();
         // Exception, not a syscall or interrupt.
@@ -362,130 +361,53 @@ unsafe extern "C" fn user_trap() -> ! {
             // syscall
 
             // `ecall` instrs are 4 bytes, skip to the instruction after
-            trapframe.user_epc += 4;
+            trapframe_lock.user_epc += 4;
 
-            match trapframe.a0.into() {
-                SyscallNumber::CopyDeep => sys_copy_deep(&proc, trapframe),
-                SyscallNumber::AllocateMany => sys_allocate_many(&proc, trapframe),
-                SyscallNumber::DebugCapSlot => sys_debug_cap_slot(&proc, trapframe),
-                SyscallNumber::DebugDumpRoot => sys_debug_dump_root(&proc, trapframe),
-                SyscallNumber::DebugPrint => sys_debug_print(&proc, trapframe),
-                SyscallNumber::Swap => sys_swap(&proc, trapframe),
-                SyscallNumber::Delete => sys_delete(&proc, trapframe),
-                // SyscallNumber::PageTableMap => sys_pgtbl_map(&mut private, trapframe),
-                SyscallNumber::PageMap => sys_page_map(&proc, trapframe),
+            let syscall_no = trapframe_lock.a0.into();
+            drop(trapframe_lock);
+            match syscall_no {
+                SyscallNumber::CopyDeep => intr = sys_copy_deep(proc, intr),
+                SyscallNumber::AllocateMany => intr = sys_allocate_many(proc, intr),
+                SyscallNumber::DebugCapSlot => intr = sys_debug_cap_slot(proc, intr),
+                SyscallNumber::DebugDumpRoot => intr = sys_debug_dump_root(proc, intr),
+                SyscallNumber::DebugPrint => intr = sys_debug_print(proc, intr),
+                SyscallNumber::Swap => intr = sys_swap(proc, intr),
+                SyscallNumber::Delete => intr = sys_delete(proc, intr),
+                SyscallNumber::PageMap => intr = sys_page_map(proc, intr),
                 SyscallNumber::DebugCapIdentify => {
-                    sys_debug_cap_identify(&proc, trapframe);
+                    intr = sys_debug_cap_identify(proc, intr);
                 }
-                SyscallNumber::ThreadSuspend => sys_thread_suspend(&proc, trapframe),
-                SyscallNumber::ThreadConfigure => sys_thread_configure(&proc, trapframe),
-                SyscallNumber::ThreadResume => sys_thread_resume(&proc, trapframe),
+                SyscallNumber::ThreadSuspend => intr = sys_thread_suspend(proc, intr),
+                SyscallNumber::ThreadConfigure => intr = sys_thread_configure(proc, intr),
+                SyscallNumber::ThreadResume => intr = sys_thread_resume(proc, intr),
                 SyscallNumber::ThreadWriteRegisters => {
-                    sys_thread_write_registers(&proc, trapframe);
+                    intr = sys_thread_write_registers(proc, intr);
                 }
-                SyscallNumber::Grant => sys_grant(&proc, trapframe),
-                SyscallNumber::NotificationWait => 'notif_wait: {
-                    let notification = trapframe.a1 as usize;
-
-                    let root_hdr = {
-                        let private = proc.private.lock();
-                        private.captbl.as_ref().unwrap().clone()
-                    };
-
-                    let notification = match root_hdr.get::<Notification>(notification) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            trapframe.a0 = e.into();
-                            break 'notif_wait;
-                        }
-                    };
-                    let wq = &notification.cap.notification().unwrap().wait_queue;
-                    let mut wq_lock = wq.lock();
-                    let mut private = proc.private.lock();
-
-                    let x = notification.word().swap(0, Ordering::Relaxed);
-                    if x != 0 {
-                        trapframe.a0 = CapError::NoError.into();
-                        trapframe.a1 = x;
-
-                        drop(wq_lock);
-                        break 'notif_wait;
-                    }
-
-                    private.state = ThreadState::Blocking;
-
-                    Scheduler::dequeue_dl(&proc, &mut private);
-
-                    proc.blocked_on_wq.lock().replace(Arc::downgrade(wq));
-
-                    wq_lock.insert(private.prio.effective(), &proc);
-
-                    drop(wq_lock);
-                    drop(private);
-                    // Make sure we don't hold any locks while we context
-                    // switch.
-                    drop(trapframe_lock);
-                    drop(proc);
-                    drop(intr);
-                    // SAFETY: This thread is currently running on this
-                    // hart, or is in the wait queue.
-                    unsafe {
-                        Thread::yield_to_scheduler();
-                    }
-                    intr = InterruptDisabler::new();
-
-                    let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
-
-                    let mut trapframe = proc.trapframe.lock();
-                    let trapframe = &mut **trapframe;
-
-                    trapframe.a0 = CapError::NoError.into();
-                    trapframe.a1 = notification.word().swap(0, Ordering::Relaxed);
-                    break 'syscall;
-                }
-                SyscallNumber::NotificationSignal => sys_notification_signal(&proc, trapframe),
-                SyscallNumber::NotificationPoll => sys_notification_poll(&proc, trapframe),
-                SyscallNumber::IntrPoolGet => sys_intr_pool_get(&proc, trapframe),
-                SyscallNumber::IntrHandlerBind => sys_intr_handler_bind(&proc, trapframe),
-                SyscallNumber::IntrHandlerAck => sys_intr_handler_ack(&proc, trapframe),
-                SyscallNumber::IntrHandlerUnbind => sys_intr_handler_unbind(&proc, trapframe),
-                SyscallNumber::Yield => {
-                    let mut private = proc.private.lock();
-                    let old_prio = private.prio.effective();
-                    Scheduler::dequeue_dl(&proc, &mut private);
-                    proc.prio_saturating_diminish_dl(&mut private);
-                    if private.prio.effective() > old_prio {
-                        Scheduler::enqueue_front_dl(&proc, Some(hartid()), &mut private);
-                    } else {
-                        Scheduler::enqueue_dl(&proc, Some(hartid()), &mut private);
-                    }
-
-                    drop(private);
-                    drop(trapframe_lock);
-                    drop(proc);
-                    drop(intr);
-                    // SAFETY: This thread is currently running on this hart.
-                    unsafe {
-                        Thread::yield_to_scheduler();
-                    }
-                    intr = InterruptDisabler::new();
-
-                    let proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
-
-                    let mut trapframe = proc.trapframe.lock();
-                    let trapframe = &mut **trapframe;
-
-                    trapframe.a0 = CapError::NoError.into();
-                    break 'syscall;
-                }
+                SyscallNumber::Grant => intr = sys_grant(proc, intr),
+                SyscallNumber::Yield => intr = sys_yield(proc, intr),
+                SyscallNumber::NotificationWait => intr = sys_notification_wait(proc, intr),
+                SyscallNumber::NotificationSignal => intr = sys_notification_signal(proc, intr),
+                SyscallNumber::NotificationPoll => intr = sys_notification_poll(proc, intr),
+                SyscallNumber::IntrPoolGet => intr = sys_intr_pool_get(proc, intr),
+                SyscallNumber::IntrHandlerBind => intr = sys_intr_handler_bind(proc, intr),
+                SyscallNumber::IntrHandlerAck => intr = sys_intr_handler_ack(proc, intr),
+                SyscallNumber::IntrHandlerUnbind => intr = sys_intr_handler_unbind(proc, intr),
+                SyscallNumber::EndpointRecv => intr = sys_endpoint_recv(proc, intr),
+                SyscallNumber::EndpointSend => intr = sys_endpoint_send(proc, intr),
+                SyscallNumber::EndpointReply => intr = sys_endpoint_reply(proc, intr),
+                SyscallNumber::EndpointCall => intr = sys_endpoint_call(proc, intr),
+                // TODO: MCP
+                SyscallNumber::ThreadSetPriority => intr = sys_thread_set_priority(proc, intr),
+                SyscallNumber::ThreadSetIpcBuffer => intr = sys_thread_set_ipc_buffer(proc, intr),
                 _ => {
-                    trapframe.a0 = CapError::InvalidOperation.into();
+                    proc.trapframe.lock().a0 = CapError::InvalidOperation.into();
                 }
             }
 
+            proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+
             let mut private = proc.private.lock();
             if private.state == ThreadState::Suspended {
-                drop(trapframe_lock);
                 drop(private);
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
@@ -494,7 +416,6 @@ unsafe extern "C" fn user_trap() -> ! {
             } else if private.state == ThreadState::Blocking {
                 // Make sure we don't hold any locks while we context
                 // switch.
-                drop(trapframe_lock);
 
                 private.state = ThreadState::Runnable;
                 drop(private);
@@ -511,7 +432,7 @@ unsafe extern "C" fn user_trap() -> ! {
                 kind != InterruptKind::Unknown,
                 "user trap from unknown device, pid={} sepc={:#x} stval={:#x} scause={:#x}",
                 proc.tid,
-                trapframe.user_epc,
+                trapframe_lock.user_epc,
                 asm::read_stval(),
                 scause
             );
@@ -540,7 +461,7 @@ unsafe extern "C" fn user_trap() -> ! {
                 }
                 // Never reschedule the idle process.
                 else if private.prio.effective() >= 0 && state != ThreadState::Blocking {
-                    log::trace!("timer, blocking, or IPI, thread={proc:?}, private={private:?}");
+                    //log::trace!("timer, blocking, or IPI, thread={proc:?}, private={private:?}");
 
                     if kind == InterruptKind::Timer {
                         //Scheduler::debug();
@@ -710,14 +631,21 @@ impl IntoTrapframe for CapabilityType {
     }
 }
 
+impl IntoTrapframe for MessageHeader {
+    fn into_trapframe(self) -> (u64, u64) {
+        (self.into_raw(), 0)
+    }
+}
+
 macro_rules! define_syscall {
     ($ident:ident, $arity:tt) => {
-	fn $ident(private: &::alloc::sync::Arc<$crate::capability::Thread>, trapframe: &mut $crate::trampoline::Trapframe) {
-	    define_syscall!(@arity private, trapframe, $ident, $arity);
+	fn $ident(thread: ::alloc::sync::Arc<$crate::capability::Thread>, intr: InterruptDisabler) -> InterruptDisabler {
+	    let trapframe_lock = thread.trapframe.lock();
+	    define_syscall!(@arity thread, trapframe_lock, $ident, intr, $arity)
 	}
     };
 
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 7) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 7) => {{
 	use $crate::trap::{FromTrapframe, IntoTrapframe};
 	let (
 	    arg1,
@@ -728,8 +656,10 @@ macro_rules! define_syscall {
 	    arg6,
 	    arg7,
 	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
 	let (a0, a1) = syscalls::$ident(
-	    $private,
+	    $thread,
+	    $intr,
 	    arg1,
 	    arg2,
 	    arg3,
@@ -738,10 +668,17 @@ macro_rules! define_syscall {
 	    arg6,
 	    arg7,
 	).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 6) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 6) => {{
 	use $crate::trap::{FromTrapframe, IntoTrapframe};
 	let (
 	    arg1,
@@ -751,8 +688,10 @@ macro_rules! define_syscall {
 	    arg5,
 	    arg6,
 	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
 	let (a0, a1) = syscalls::$ident(
-	    $private,
+	    $thread,
+	    $intr,
 	    arg1,
 	    arg2,
 	    arg3,
@@ -760,10 +699,18 @@ macro_rules! define_syscall {
 	    arg5,
 	    arg6,
 	).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
+
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 5) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 5) => {{
 	use $crate::trap::{FromTrapframe, IntoTrapframe};
 	let (
 	    arg1,
@@ -772,18 +719,27 @@ macro_rules! define_syscall {
 	    arg4,
 	    arg5,
 	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
 	let (a0, a1) = syscalls::$ident(
-	    $private,
+	    $thread,
+	    $intr,
 	    arg1,
 	    arg2,
 	    arg3,
 	    arg4,
 	    arg5,
 	).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 4) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 4) => {{
 	use $crate::trap::{FromTrapframe, IntoTrapframe};
 	let (
 	    arg1,
@@ -791,51 +747,107 @@ macro_rules! define_syscall {
 	    arg3,
 	    arg4,
 	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
 	let (a0, a1) = syscalls::$ident(
-	    $private,
+	    $thread,
+	    $intr,
 	    arg1,
 	    arg2,
 	    arg3,
 	    arg4,
 	).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 3) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 3) => {{
 	use $crate::trap::{FromTrapframe, IntoTrapframe};
-	let (arg1, arg2, arg3) = FromTrapframe::from_trapframe(&$trapframe);
+	let (
+	    arg1,
+	    arg2,
+	    arg3,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
 	let (a0, a1) = syscalls::$ident(
-	    $private,
+	    $thread,
+	    $intr,
 	    arg1,
 	    arg2,
 	    arg3,
 	).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 2) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 2) => {{
 	use $crate::trap::{FromTrapframe, IntoTrapframe};
-	let (arg1,arg2) = FromTrapframe::from_trapframe(&$trapframe);
+	let (
+	    arg1,
+	    arg2,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
 	let (a0, a1) = syscalls::$ident(
-	    $private,
+	    $thread,
+	    $intr,
 	    arg1,
 	    arg2,
 	).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 1) => {{
-	use $crate::trap::{FromTrapframe, IntoTrapframe};
-	let (arg1,) = FromTrapframe::from_trapframe(&$trapframe);
-	let (a0, a1) = syscalls::$ident($private, arg1).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 1) => {{
+	  use $crate::trap::{FromTrapframe, IntoTrapframe};
+	let (
+	    arg1,
+	) = FromTrapframe::from_trapframe(&$trapframe);
+	drop($trapframe);
+	let (a0, a1) = syscalls::$ident(
+	    $thread,
+	    $intr,
+	    arg1,
+	).into_trapframe();
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
-    (@arity $private:ident, $trapframe:ident, $ident:ident, 0) => {{
+    (@arity $thread:ident, $trapframe:ident, $ident:ident, $intr:ident, 0) => {{
 	use $crate::trap::IntoTrapframe;
-	let (a0, a1) = syscalls::$ident($private).into_trapframe();
-	$trapframe.a0 = a0;
-	$trapframe.a1 = a1;
+	drop($trapframe);
+	let (a0, a1) = syscalls::$ident($thread, $intr).into_trapframe();
+	let intr = InterruptDisabler::new();
+
+	let thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+	let mut trapframe_lock = thread.trapframe.lock();
+	let trapframe =  &mut **trapframe_lock;
+
+	trapframe.a0 = a0;
+	trapframe.a1 = a1;
+	intr
     }};
 }
 
@@ -850,7 +862,7 @@ define_syscall!(sys_page_map, 4);
 // define_syscall!(sys_pgtbl_map, 4);
 define_syscall!(sys_debug_cap_identify, 2);
 define_syscall!(sys_thread_suspend, 1);
-define_syscall!(sys_thread_configure, 3);
+define_syscall!(sys_thread_configure, 4);
 define_syscall!(sys_thread_resume, 1);
 define_syscall!(sys_thread_write_registers, 2);
 define_syscall!(sys_grant, 6);
@@ -860,3 +872,11 @@ define_syscall!(sys_intr_pool_get, 4);
 define_syscall!(sys_intr_handler_ack, 1);
 define_syscall!(sys_intr_handler_bind, 2);
 define_syscall!(sys_intr_handler_unbind, 1);
+define_syscall!(sys_thread_set_priority, 2);
+define_syscall!(sys_thread_set_ipc_buffer, 2);
+define_syscall!(sys_yield, 0);
+define_syscall!(sys_notification_wait, 1);
+define_syscall!(sys_endpoint_recv, 1);
+define_syscall!(sys_endpoint_send, 2);
+define_syscall!(sys_endpoint_reply, 2);
+define_syscall!(sys_endpoint_call, 2);

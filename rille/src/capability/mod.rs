@@ -88,6 +88,7 @@ pub enum CapabilityType {
     Notification = 6,
     InterruptPool = 7,
     InterruptHandler = 8,
+    Endpoint = 9,
     /// Any capability type `>=32` is undefined.
     #[num_enum(default)]
     Unknown = 32,
@@ -164,10 +165,7 @@ pub type CapResult<T> = Result<T, CapError>;
 #[repr(C)]
 pub struct Captr<C: Capability> {
     inner: Option<NonZeroUsize>,
-    /// N.B. we must be `!Send` + `!Sync` as threads we spawn have
-    /// different (but likely related) captbls. Owning a `*const _`
-    /// makes this true. `C` is so the type param is not unused.
-    _marker: PhantomData<*const C>,
+    _marker: PhantomData<C>,
 }
 
 impl<C: Capability> Captr<C> {
@@ -677,9 +675,17 @@ impl Captr<Thread> {
         &self,
         captbl: Captr<Captbl>,
         pgtbl: Captr<PageTable>,
+        ipc_buffer: paging::PageCaptr<paging::BasePage>,
     ) -> CapResult<()> {
         // SAFETY: By invariants.
-        unsafe { syscalls::thread::configure(self.into_raw(), captbl.into_raw(), pgtbl.into_raw()) }
+        unsafe {
+            syscalls::thread::configure(
+                self.into_raw(),
+                captbl.into_raw(),
+                pgtbl.into_raw(),
+                ipc_buffer.into_raw(),
+            )
+        }
     }
 
     /// Write registers of a suspended thread.
@@ -916,12 +922,89 @@ impl Capability for InterruptPool {
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::InterruptPool;
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Endpoint {}
+
+impl Capability for Endpoint {
+    type AllocateSizeSpec = ();
+
+    fn allocate_size_spec((): ()) -> usize {
+        0
+    }
+
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Endpoint;
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct MessageHeader(u64);
+
+impl From<u64> for MessageHeader {
+    fn from(value: u64) -> Self {
+        Self::from_raw(value)
+    }
+}
+
+impl From<MessageHeader> for u64 {
+    fn from(value: MessageHeader) -> Self {
+        value.into_raw()
+    }
+}
+
+impl MessageHeader {
+    const LENGTH_MASK: u64 = 0b1_1111_1111;
+    const PRIVATE_MASK: u64 = !Self::LENGTH_MASK;
+
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn length(self) -> usize {
+        ((self.0 & Self::LENGTH_MASK) as usize) + 1
+    }
+
+    pub const fn private(self) -> u64 {
+        (self.0 & Self::PRIVATE_MASK) >> 9
+    }
+
+    #[must_use]
+    pub const fn with_length(self, length: usize) -> Self {
+        let without_length = self.0 & !Self::LENGTH_MASK;
+        Self(without_length | (length.saturating_sub(1) as u64 & Self::LENGTH_MASK))
+    }
+
+    #[must_use]
+    pub const fn with_private(self, private: u64) -> Self {
+        let without_private = self.0 & !Self::PRIVATE_MASK;
+        let private = private << 9;
+        Self(without_private | (private & Self::PRIVATE_MASK))
+    }
+
+    pub const fn into_raw(self) -> u64 {
+        self.0
+    }
+}
+
 // == Unimportant or boilerplate-y impls below ==
+
+impl fmt::Debug for MessageHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessageHeader")
+            .field("length", &self.length())
+            .field("private", &self.private())
+            .finish()
+    }
+}
 
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Allocator, AnyCap, Captbl, Empty, InterruptHandler, InterruptPool, Notification, Thread,
+        Allocator, AnyCap, Captbl, Empty, Endpoint, InterruptHandler, InterruptPool, Notification,
+        Thread,
     };
 
     pub trait Sealed {}
@@ -940,6 +1023,7 @@ mod private {
     impl Sealed for AnyCap {}
     impl Sealed for InterruptPool {}
     impl Sealed for InterruptHandler {}
+    impl Sealed for Endpoint {}
 }
 
 // These impls are just so Capability doesn't have to impl all these

@@ -277,7 +277,7 @@ impl Scheduler {
         debug_assert!(prio >= 0);
 
         // crate::println!("before={:#?}", per_hart);
-        log::trace!("{:#?}", per_hart);
+        // log::trace!("{:#?}", per_hart);
 
         per_hart.remove_from_run_queue(thread, prio);
         // crate::println!("after={:#?}", per_hart);

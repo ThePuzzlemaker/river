@@ -169,6 +169,7 @@ impl Context {
     /// Both contexts must be distinct otherwise deadlock will occur.
     #[track_caller]
     pub unsafe fn switch(dst: &SpinMutex<Context>, src: &SpinMutex<Context>) {
+        let inhibit_intena = LOCAL_HART.inhibit_intena.get();
         #[cfg(debug_assertions)]
         {
             assert!(crate::hart_local::enabled(), "oops");
@@ -197,10 +198,12 @@ impl Context {
         let (dst, dst_lock) = dst.to_components();
         let (src, src_lock) = src.to_components();
 
+        LOCAL_HART.inhibit_intena.set(false);
         // SAFETY: Both contexts are locked and our caller guarantees
         // they are valid.
         unsafe {
             context_switch(src, dst, src_lock, dst_lock);
         }
+        LOCAL_HART.inhibit_intena.set(inhibit_intena);
     }
 }

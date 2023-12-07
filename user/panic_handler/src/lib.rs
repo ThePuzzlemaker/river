@@ -1,14 +1,14 @@
 #![no_std]
 #![feature(panic_info_message)]
 
-use core::{arch::asm, fmt, panic::PanicInfo};
+use core::{arch::asm, fmt, panic::PanicInfo, ptr};
 
 use rille::syscalls;
 
 macro_rules! println {
     ($($tt:tt)*) => {{
 	core::fmt::write(&mut DebugPrint, format_args!($($tt)*)).unwrap();
-	syscalls::debug::debug_print_string("\n")
+	print("\n")
     }}
 }
 
@@ -16,7 +16,7 @@ struct DebugPrint;
 
 impl fmt::Write for DebugPrint {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        syscalls::debug::debug_print_string(s);
+        print(s);
         Ok(())
     }
 }
@@ -45,5 +45,18 @@ unsafe fn panic(panic: &PanicInfo<'_>) -> ! {
 
     loop {
         asm!("pause");
+    }
+}
+
+// TODO
+pub fn print(s: &str) {
+    let serial = 0x80000000 as *mut u8;
+    for b in s.as_bytes() {
+        // SAFETY: The invariants of the serial driver ensure this is valid.
+        while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
+            core::hint::spin_loop();
+        }
+        // SAFETY: See above.
+        unsafe { ptr::write_volatile(serial, *b) }
     }
 }
