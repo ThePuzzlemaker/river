@@ -1,7 +1,8 @@
 #![allow(
     clippy::needless_pass_by_ref_mut,
     clippy::unnecessary_wraps,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value
 )]
 use core::{
     cmp,
@@ -31,9 +32,10 @@ use rille::{
 use crate::{
     asm::{self, InterruptDisabler},
     capability::{
-        captbl::Captbl, slotref::SlotRefMut, CapToOwned, Endpoint, InterruptHandlerCap,
-        InterruptPoolCap, Notification, NotificationCap, Page, PageCap, Thread, ThreadProtected,
-        ThreadState, WaitQueue,
+        captbl::Captbl,
+        slotref::{SlotRef, SlotRefMut},
+        CapToOwned, Endpoint, InterruptHandlerCap, InterruptPoolCap, Notification, NotificationCap,
+        Page, PageCap, Thread, ThreadProtected, ThreadState, WaitQueue,
     },
     hart_local::LOCAL_HART,
     kalloc::{self, phys::PMAlloc},
@@ -45,7 +47,7 @@ use crate::{
     sync::{SpinMutex, SpinRwLock},
 };
 
-pub fn sys_debug_dump_root(_thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
+pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
     //crate::println!("{:#x?}", _thread.private.lock().captbl);
     let (free, total) = {
         let pma = PMAlloc::get();
@@ -61,7 +63,7 @@ pub fn sys_debug_dump_root(_thread: Arc<Thread>, _intr: InterruptDisabler) -> Re
         total,
         free
     );
-    crate::info!("thread.prio={:#?}", &_thread.private.lock().prio);
+    crate::info!("thread.prio={:#?}", &thread.private.lock().prio);
     Ok(())
 }
 
@@ -619,7 +621,7 @@ fn perform_endpoint_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
 
 pub fn sys_page_map(
     thread: Arc<Thread>,
-    intr: InterruptDisabler,
+    _intr: InterruptDisabler,
     from_page: u64,
     into_pgtbl: u64,
     addr: VirtualConst<u8, Identity>,
@@ -1092,6 +1094,7 @@ pub fn sys_notification_wait(
 
         let x = notification.word.swap(0, Ordering::Relaxed);
         if x != 0 {
+            drop(wq_lock);
             return Ok(x);
         }
 
@@ -1115,6 +1118,8 @@ pub fn sys_endpoint_recv(
     thread: Arc<Thread>,
     intr: InterruptDisabler,
     endpoint: u64,
+    _: u64,
+    _dst_slot: u64,
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 
@@ -1209,11 +1214,29 @@ fn endpoint_recv(
         *sender.blocked_on_wq.lock() = None;
     }
 
+    let src_slot = { sender.trapframe.lock().a3 };
+    let dest_slot = { thread.trapframe.lock().a3 };
+
+    let sender_root = sender_private.captbl.clone().unwrap();
+    let receiver_root = private.captbl.clone().unwrap();
+
     let hdr = if send_fastpath {
         private.send_fastpath.unwrap()
     } else {
         MessageHeader::from_raw(sender.trapframe.lock().a2)
     };
+
+    if src_slot != 0 && dest_slot != 0 {
+        let src = sender_root.get::<AnyCap>(src_slot as usize).unwrap();
+        let slot = receiver_root
+            .get_mut::<AnyCap>(thread.trapframe.lock().a3 as usize)
+            .unwrap();
+        let slot = slot.delete();
+        let mut slot = slot.replace(src.to_owned_cap());
+        // TODO: cap rights here
+        slot.set_badge(src.badge);
+        slot.update_rights(src.rights);
+    }
 
     let len = cmp::min(hdr.length(), 4.kib() / mem::size_of::<u64>());
     let tx_trapframe = sender.trapframe.lock();
@@ -1240,13 +1263,18 @@ fn endpoint_recv(
         _ => {
             if let Some(recv_buffer) = private.ipc_buffer {
                 if let Some(send_buffer) = sender_private.ipc_buffer {
-                    // SAFETY: TODO: deal with page dealloc
-                    unsafe {
-                        core::ptr::copy(
-                            send_buffer.into_virt().into_ptr(),
-                            recv_buffer.into_virt().into_ptr_mut(),
-                            len * mem::size_of::<u64>(),
-                        );
+                    if recv_buffer == send_buffer {
+                        // buffers are aliased, no-op (buffers must be
+                        // page-aligned).
+                    } else {
+                        // SAFETY: TODO: deal with page dealloc
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                send_buffer.into_virt().into_ptr(),
+                                recv_buffer.into_virt().into_ptr_mut(),
+                                len * mem::size_of::<u64>(),
+                            );
+                        }
                     }
                 }
             }
@@ -1292,6 +1320,7 @@ pub fn sys_endpoint_send(
     intr: InterruptDisabler,
     endpoint: u64,
     hdr: MessageHeader,
+    _src_slot: u64,
 ) -> CapResult<()> {
     let endpoint = endpoint as usize;
 
@@ -1376,6 +1405,7 @@ pub fn sys_endpoint_reply(
     intr: InterruptDisabler,
     base_endpoint: u64,
     hdr: MessageHeader,
+    _src_slot: u64,
 ) -> CapResult<()> {
     let base_endpoint = base_endpoint as usize;
 
@@ -1394,13 +1424,14 @@ pub fn sys_endpoint_reply(
     sys_endpoint_send_inner(thread, intr, &endpoint, hdr).map(|_| ())
 }
 
-// TODO: reply_recv a1 = endpt, a2 = hdr, a3 = &badge, a4-a7 = MRs
+// TODO: reply_recv a1 = endpt, a2 = hdr, a3 = &badge, a4_in=cap a4_lateout-a7 = MRs
 
 pub fn sys_endpoint_call(
     mut thread: Arc<Thread>,
     mut intr: InterruptDisabler,
     endpoint: u64,
     hdr: MessageHeader,
+    _cap_slot: u64,
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 

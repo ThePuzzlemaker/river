@@ -22,7 +22,7 @@ use crate::sync::SpinRwLock;
 use alloc::{collections::BTreeMap, string::String};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use log::LevelFilter;
-use owo_colors::{OwoColorize, Style, Styled};
+use owo_colors::{OwoColorize, Style};
 
 static HART_FILTER: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LOG_FILTER: SpinRwLock<Option<BTreeMap<String, Option<LevelFilter>>>> =
@@ -30,6 +30,7 @@ static LOG_FILTER: SpinRwLock<Option<BTreeMap<String, Option<LevelFilter>>>> =
 static LOG_LEVEL: AtomicUsize = AtomicUsize::new(LevelFilter::Info as usize);
 pub static USE_COLOR: AtomicBool = AtomicBool::new(true);
 
+#[allow(clippy::missing_panics_doc)]
 pub fn parse_log_filter(filter: Option<&str>) {
     if let Some(filter) = filter {
         let mut map = BTreeMap::new();
@@ -38,17 +39,18 @@ pub fn parse_log_filter(filter: Option<&str>) {
             let name = parts.next().unwrap();
 
             match name {
-                "ignore-harts" => match parts.next() {
-                    Some(list) => {
+                "ignore-harts" => {
+                    if let Some(list) = parts.next() {
                         let mut mask = 0;
                         for n in list.split(',').filter_map(|n| n.parse::<usize>().ok()) {
                             mask |= 1 << n;
                         }
 
                         HART_FILTER.fetch_xor(mask, Ordering::Relaxed);
+                    } else {
+                        log::warn!("Missing hart list for `ignore-harts`");
                     }
-                    None => log::warn!("Missing hart list for `ignore-harts`"),
-                },
+                }
                 _ => {
                     if let Some(level) = level_from_str(name) {
                         set_max_level(level);
@@ -58,13 +60,14 @@ pub fn parse_log_filter(filter: Option<&str>) {
             }
 
             let level = match parts.next() {
-                Some(level) => match level_from_str(level) {
-                    Some(level) => Some(level),
-                    None => {
+                Some(level) => {
+                    if let Some(level) = level_from_str(level) {
+                        Some(level)
+                    } else {
                         log::warn!("Bad level filter: '{}', skipping", level);
                         continue;
                     }
-                },
+                }
                 None => None,
             };
 
@@ -99,7 +102,7 @@ impl log::Log for Logger {
 
         let max_level = max_level();
 
-        let mut mod_path = metadata.target();
+        let mod_path = metadata.target();
 
         let filter = LOG_FILTER.read();
         match &*filter {
@@ -118,7 +121,7 @@ impl log::Log for Logger {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            let mut mod_path = record
+            let mod_path = record
                 .module_path_static()
                 .or_else(|| record.module_path())
                 .unwrap_or("<n/a>");
@@ -165,15 +168,18 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+#[allow(clippy::missing_panics_doc)]
 pub fn init_logging() {
     log::set_logger(&Logger).expect("failed to init logging");
     log::set_max_level(log::LevelFilter::Trace);
 }
 
 fn max_level() -> LevelFilter {
+    // SAFETY: These types are of the same size and are valid to
+    // transmute.
     unsafe { core::mem::transmute(LOG_LEVEL.load(Ordering::Relaxed)) }
 }
 
 fn set_max_level(filter: LevelFilter) {
-    LOG_LEVEL.store(filter as usize, Ordering::Relaxed)
+    LOG_LEVEL.store(filter as usize, Ordering::Relaxed);
 }

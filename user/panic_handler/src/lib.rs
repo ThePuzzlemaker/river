@@ -3,8 +3,6 @@
 
 use core::{arch::asm, fmt, panic::PanicInfo, ptr};
 
-use rille::syscalls;
-
 macro_rules! println {
     ($($tt:tt)*) => {{
 	core::fmt::write(&mut DebugPrint, format_args!($($tt)*)).unwrap();

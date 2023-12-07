@@ -78,10 +78,7 @@ use uart::UART;
 use crate::{
     asm::InterruptDisabler,
     boot::HartBootData,
-    capability::{
-        captbl::Captbl, global_interrupt_pool, InterruptHandler, InterruptPool, Page, Thread,
-        ThreadState,
-    },
+    capability::{captbl::Captbl, global_interrupt_pool, Page, Thread, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
@@ -549,7 +546,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         core::hint::spin_loop();
     }
 
-    crate::info!("tp: {:#x?}", &LOCAL_HART);
     // SAFETY: The scheduler is only started once on the main hart.
     unsafe { Scheduler::start() }
 }
@@ -579,12 +575,7 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     });
 
     info!("hart {} starting", hartid());
-    crate::info!("tp: {:#x?}", &LOCAL_HART);
 
-    let uart = fdt.chosen().stdout().unwrap();
-    let uart_irq = uart.interrupts().unwrap().next().unwrap() as u32;
-    //PLIC.set_priority(uart_irq, 1);
-    //PLIC.hart_senable(uart_irq);
     PLIC.hart_set_spriority(0);
     // SAFETY: The address provided is valid.
     unsafe { asm::write_stvec(trap::kernel_trapvec as *const u8) };

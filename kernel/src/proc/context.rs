@@ -167,13 +167,13 @@ impl Context {
     /// # Deadlock Safety
     ///
     /// Both contexts must be distinct otherwise deadlock will occur.
+    ///
     #[track_caller]
+    #[allow(clippy::missing_panics_doc)]
     pub unsafe fn switch(dst: &SpinMutex<Context>, src: &SpinMutex<Context>) {
         let inhibit_intena = LOCAL_HART.inhibit_intena.get();
         #[cfg(debug_assertions)]
         {
-            assert!(crate::hart_local::enabled(), "oops");
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 LOCAL_HART.holding_locks.get(),
                 0,

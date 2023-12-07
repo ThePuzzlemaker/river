@@ -1,20 +1,18 @@
-use core::{arch::global_asm, mem, num::NonZeroU64, slice};
+use core::{arch::global_asm, mem};
 
 use crate::{
     asm::{self, hartid, InterruptDisabler, SCAUSE_INTR_BIT, SSTATUS_SPP},
-    capability::{global_interrupt_pool, Thread, ThreadState, WaitQueue, THREAD_STACK_SIZE},
+    capability::{global_interrupt_pool, Thread, ThreadState, THREAD_STACK_SIZE},
     hart_local::LOCAL_HART,
     paging::Satp,
     plic::PLIC,
     sched::Scheduler,
-    sync::{OnceCell, SpinMutex},
+    sync::OnceCell,
     trampoline::{self, trampoline, Trapframe},
-    uart,
 };
-use alloc::sync::Arc;
 use atomic::Ordering;
 use rille::{
-    capability::{CapError, CapabilityType, Endpoint, MessageHeader, Notification},
+    capability::{CapError, CapabilityType, MessageHeader},
     syscalls::SyscallNumber,
 };
 
@@ -876,7 +874,7 @@ define_syscall!(sys_thread_set_priority, 2);
 define_syscall!(sys_thread_set_ipc_buffer, 2);
 define_syscall!(sys_yield, 0);
 define_syscall!(sys_notification_wait, 1);
-define_syscall!(sys_endpoint_recv, 1);
-define_syscall!(sys_endpoint_send, 2);
-define_syscall!(sys_endpoint_reply, 2);
-define_syscall!(sys_endpoint_call, 2);
+define_syscall!(sys_endpoint_recv, 3);
+define_syscall!(sys_endpoint_send, 3);
+define_syscall!(sys_endpoint_reply, 3);
+define_syscall!(sys_endpoint_call, 3);

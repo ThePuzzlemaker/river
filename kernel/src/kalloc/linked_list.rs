@@ -135,6 +135,7 @@ impl fmt::Debug for FreeListDebugAdapter {
             if current.is_null() {
                 break;
             }
+            // SAFETY: By invariants.
             let node = unsafe { &*current };
             l.entry(&(current, node));
             current = node.next;
@@ -297,6 +298,7 @@ impl LinkedListAllocInner {
             if cur.is_null() {
                 break true;
             }
+            // SAFETY: By invariants.
             let node = unsafe { &*cur };
             if (node.prev != prev) || (node.size_tag & (1 << 63)) == 0 {
                 break false;

@@ -1,5 +1,5 @@
 [package]
-name = "syncutils"
+name = "rille_user"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,4 +7,3 @@ edition = "2021"
 
 [dependencies]
 rille = { path = "../../rille" }
-lock_api = "0.4.11"

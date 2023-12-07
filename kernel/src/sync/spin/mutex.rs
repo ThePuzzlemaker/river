@@ -120,9 +120,10 @@ impl<T> SpinMutex<T> {
         // which is mega-unsound. Thus we need to ensure it was
         // **definitely** unlocked when we swap, not just lock it
         // anyway.
-        if let Err(held_by) =
-            self.locked
-                .compare_exchange(0, hartid + 1, Ordering::Acquire, Ordering::Relaxed)
+        if self
+            .locked
+            .compare_exchange(0, hartid + 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
         {
             // assert!(
             //     held_by != hartid + 1,

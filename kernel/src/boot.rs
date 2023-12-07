@@ -25,8 +25,7 @@ use rille::{
 };
 
 use crate::{
-    asm::{self, hartid, tp},
-    hart_local,
+    asm::{self, hartid},
     kalloc::phys::PMAlloc,
     paging::{PageTable, PageTableFlags, RawSatp, Satp},
     symbol,
@@ -363,8 +362,6 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
     unsafe {
         asm!("lla {}, __global_pointer$", out(reg) gp);
     }
-
-    let tp = tp();
 
     // Fixup sp and gp to be in the right address space
     //

@@ -1,15 +1,15 @@
+use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU64};
+use core::sync::atomic::{AtomicU16, AtomicU64};
 use core::{cmp, mem};
-use core::{fmt, ptr};
 
-use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use atomic::{Atomic, Ordering};
+use atomic::Ordering;
 use bytemuck::NoUninit;
 use num_enum::{FromPrimitive, IntoPrimitive};
 use rille::capability::paging::{
@@ -720,7 +720,8 @@ impl<'a> SlotRef<'a, ThreadCap> {
         let trampoline_virt =
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
 
-        private.root_pgtbl.as_mut().unwrap().map(
+        // SAFETY: Type check.
+        unsafe { private.root_pgtbl.as_mut().unwrap_unchecked() }.map(
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
             KernelFlags::VAD | KernelFlags::RX,
@@ -968,6 +969,7 @@ impl Thread {
     }
 
     #[track_caller]
+    #[allow(clippy::missing_panics_doc)]
     pub fn wait_queue_priority_changed(
         self: &Arc<Thread>,
         old_prio: i8,
@@ -1223,6 +1225,7 @@ impl Thread {
         ));
         drop(ctx_lock);
         drop(self);
+        drop(intr);
         {
             // SAFETY: The scheduler context is always valid, as
             // guaranteed by the scheduler.
@@ -1264,6 +1267,7 @@ impl Thread {
             // safely dequeue a process without it being suspended
             // first). Thus, this pointer remains valid.
             let context = unsafe { &*ctx_ptr };
+            drop(intr);
             // SAFETY: The scheduler context is always valid, as
             // guaranteed by the scheduler.
             unsafe { Context::switch(&LOCAL_HART.context, context) }
@@ -1307,7 +1311,7 @@ pub struct ThreadPriorities {
 
 impl Thread {
     pub fn prio_boost(self: &Arc<Thread>) {
-        self.prio_boost_dl(&mut self.private.lock())
+        self.prio_boost_dl(&mut self.private.lock());
     }
 
     pub fn prio_boost_dl(self: &Arc<Thread>, private: &mut ThreadProtected) {
@@ -1315,7 +1319,6 @@ impl Thread {
         let old_eff_prio = prio.effective();
         prio.boost();
         let new_eff_prio = prio.effective();
-        drop(private);
         if self
             .blocked_on_wq
             .lock()
@@ -1534,6 +1537,13 @@ impl CapabilityValue for Arc<InterruptHandler> {
 }
 
 impl<'a> SlotRefMut<'a, InterruptPoolCap> {
+    /// Create an interrupt handler from the pool, with the given IRQ
+    /// number.
+    ///
+    /// # Errors
+    ///
+    /// - [`CapError::InvalidOperation`]: The IRQ number was already
+    ///   allocated from the pool.
     pub fn make_handler(&mut self, irq: u16) -> CapResult<Arc<InterruptHandler>> {
         let handler = Arc::new(InterruptHandler {
             notification: SpinMutex::new(None),

@@ -6,23 +6,19 @@ use core::{
     arch::{asm, global_asm},
     cmp,
     ffi::CStr,
-    fmt,
-    num::NonZeroU64,
-    ptr, slice,
-    sync::atomic::{AtomicU64, Ordering},
+    fmt, ptr,
 };
 
 use rille::{
     addr::VirtualConst,
     capability::{
         paging::{BasePage, MegaPage, Page, PageTableFlags, PagingLevel},
-        CapError, CapResult, CapRights, Captr, Endpoint, MessageHeader, Notification, RemoteCaptr,
-        Thread,
+        CapError, CapRights, Captr, Endpoint, MessageHeader, Notification, RemoteCaptr, Thread,
     },
     init::{BootInfo, InitCapabilities},
-    syscalls::{self, ecall1, ecall2, ecall4, ecall6, ecall7, SyscallNumber},
+    syscalls::{self, ecall1, ecall2, ecall3, ecall4, ecall6, ecall7, SyscallNumber},
 };
-use syncutils::{mutex::Mutex, once_cell::OnceCell};
+use rille_user::sync::{mutex::Mutex, once_cell::OnceCell};
 
 extern crate panic_handler;
 
@@ -103,7 +99,7 @@ extern "C" fn thread_entry(_thread: Captr<Thread>, ep: usize) -> ! {
     println!("{:#?}", time());
     loop {
         let info = MessageHeader::from_raw(unsafe {
-            ecall1(SyscallNumber::EndpointRecv, ep as u64).unwrap()
+            ecall3(SyscallNumber::EndpointRecv, ep as u64, 0, 0).unwrap()
         });
         if info.private() >= 100_000 {
             break;
@@ -139,6 +135,7 @@ extern "C" fn thread_entry(_thread: Captr<Thread>, ep: usize) -> ! {
         //         "Hello from thread 2!\0".len(),
         //     );
         // }
+
         unsafe {
             ecall7(
                 SyscallNumber::EndpointReply,
@@ -177,8 +174,8 @@ extern "C" fn thread3_entry(
     init_info: *const BootInfo,
     ep: Captr<Endpoint>,
 ) -> ! {
-    let init_info = unsafe { &*init_info };
-    let init_caps = unsafe { InitCapabilities::new() };
+    let _init_info = unsafe { &*init_info };
+    let _init_caps = unsafe { InitCapabilities::new() };
 
     for _ in 0..1_100_000 {
         unsafe {
@@ -196,16 +193,18 @@ extern "C" fn thread3_entry(
         let val: u64;
         let hdr = unsafe {
             core::arch::asm!(
-            "ecall",
-            in("a0") u64::from(SyscallNumber::EndpointRecv),
-            in("a1") ep.into_raw() as u64,
-            lateout("a0") err,
+                        "ecall",
+                        in("a0") u64::from(SyscallNumber::EndpointRecv),
+                        in("a1") ep.into_raw() as u64,
+                        lateout("a0") err,
             lateout("a1") val,
-            out("a4") mr0,
-            out("a5") mr1,
-            out("a6") mr2,
-            out("a7") mr3
-                );
+            in("a2") 0,
+                in("a3") 0,
+                        out("a4") mr0,
+                        out("a5") mr1,
+                        out("a6") mr2,
+                        out("a7") mr3
+                    );
 
             if err != 0 {
                 panic!("{:?}", CapError::from(err));
@@ -244,10 +243,11 @@ extern "C" fn thread3_entry(
         }
 
         unsafe {
-            let _ = ecall2(
+            let _ = ecall3(
                 SyscallNumber::EndpointReply,
                 ep.into_raw() as u64,
                 MessageHeader::new().with_length(1).into_raw(),
+                0,
             );
         }
     }
@@ -434,7 +434,6 @@ unsafe impl Sync for UartInner {}
 static UART_LOCK: OnceCell<Mutex<UartInner>> = OnceCell::new();
 static UART_NOTIF: OnceCell<Captr<Notification>> = OnceCell::new();
 
-static SHARED: AtomicU64 = AtomicU64::new(0);
 static SHARED2: OnceCell<Mutex<u64>> = OnceCell::new();
 
 pub fn time() -> (u64, u64) {
@@ -711,13 +710,14 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         // }
 
         info = MessageHeader::from_raw(unsafe {
-            ecall2(
+            ecall3(
                 SyscallNumber::EndpointCall,
                 ep.into_raw() as u64,
                 MessageHeader::new()
                     .with_length(0)
                     .with_private(info.private() + 1)
                     .into_raw(),
+                0,
             )
             .unwrap()
         });
@@ -779,7 +779,7 @@ struct DebugPrint;
 
 impl fmt::Write for DebugPrint {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        print_backup(s);
+        print(s);
         Ok(())
     }
 }
@@ -821,47 +821,4 @@ pub fn print(s: &str) {
         )
         .unwrap()
     };
-
-    // let serial = 0x80000000 as *mut u8;
-    // for b in s.as_bytes() {
-    //     // SAFETY: The invariants of the serial driver ensure this is valid.
-    //     while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
-    //         core::hint::spin_loop();
-    //     }
-    //     // SAFETY: See above.
-    //     unsafe { ptr::write_volatile(serial, *b) }
-    // }
 }
-
-pub fn print_backup(s: &str) {
-    if s.len() > 4096 {
-        todo!();
-    }
-    // let tp = {
-    //     let x: u64;
-    //     unsafe { core::arch::asm!("mv {}, tp", out(reg) x, options(nostack)) };
-    //     x
-    // };
-
-    // let base = if tp == 1 { 0x6100_0000 } else { 0x6000_0000 };
-    // unsafe { ptr::copy_nonoverlapping(s.as_ptr(), base as *mut _, s.len()) };
-    // unsafe { ecall1(SyscallNumber::EndpointCall, 60000).unwrap() };
-    let serial = 0x80000000 as *mut u8;
-    for b in s.as_bytes() {
-        // SAFETY: The invariants of the serial driver ensure this is valid.
-        while (unsafe { ptr::read_volatile(serial.add(5)) } & (1 << 5)) == 0 {
-            core::hint::spin_loop();
-        }
-        // SAFETY: See above.
-        unsafe { ptr::write_volatile(serial, *b) }
-    }
-}
-
-//
-//
-//
-//
-//
-//
-//
-//

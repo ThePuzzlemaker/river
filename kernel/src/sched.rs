@@ -1,4 +1,5 @@
-use core::{cmp, sync::atomic::AtomicU64};
+#![allow(clippy::missing_panics_doc)]
+use core::sync::atomic::AtomicU64;
 
 use alloc::{
     boxed::Box,
@@ -19,7 +20,7 @@ use crate::{
     capability::{HartMask, Thread, ThreadPriorities, ThreadProtected, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::phys::PMAlloc,
-    paging::{PageTable, PageTableFlags, PagingAllocator, SharedPageTable},
+    paging::{PageTableFlags, PagingAllocator, SharedPageTable},
     proc::Context,
     sync::{OnceCell, SpinMutex, SpinRwLock},
     N_HARTS,
@@ -111,7 +112,7 @@ impl Scheduler {
 impl SchedulerInner {
     fn find_highest_prio(&mut self) -> Option<Arc<Thread>> {
         let mut x = None;
-        for (i, queue) in self.queues.iter_mut().rev().enumerate() {
+        for queue in self.queues.iter_mut().rev() {
             if let Some(thread) = queue.front().cloned() {
                 queue.rotate_left(1);
                 x = Some(thread.clone());
@@ -124,6 +125,10 @@ impl SchedulerInner {
 
 // TODO: bitmap
 impl Scheduler {
+    /// # Safety
+    ///
+    /// This function must be called only once per hart.
+    #[allow(unused_assignments)]
     pub unsafe fn start() -> ! {
         let hartid = LOCAL_HART.hartid.get();
         // Avoid deadlock, make sure this core can interrupt. N.B. the
@@ -295,6 +300,7 @@ impl Scheduler {
     }
 
     #[track_caller]
+    #[allow(clippy::cast_sign_loss)]
     pub fn enqueue_dl(thread: &Arc<Thread>, hartid: Option<u64>, private: &mut ThreadProtected) {
         let hart = hartid.unwrap_or_else(|| Scheduler::choose_hart_dl(thread, private));
         let mut per_hart = SCHED.per_hart.expect("sched").get(&hart).unwrap().lock();
@@ -429,7 +435,7 @@ impl Scheduler {
     }
 
     pub fn choose_hart(thread: &Arc<Thread>) -> u64 {
-        Self::choose_hart_dl(thread, &mut *thread.private.lock())
+        Self::choose_hart_dl(thread, &mut thread.private.lock())
     }
 
     pub fn is_idle(hartid: u64) -> bool {

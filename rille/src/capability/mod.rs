@@ -935,6 +935,10 @@ impl Capability for Endpoint {
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Endpoint;
 }
 
+/// A header for an IPC message. Consists of a 9-bit length (1 to 512)
+/// and a arbitrary, user-defined 55-bit private value.
+///
+/// Note that message lengths are in units of words, not bytes.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct MessageHeader(u64);
@@ -955,28 +959,39 @@ impl MessageHeader {
     const LENGTH_MASK: u64 = 0b1_1111_1111;
     const PRIVATE_MASK: u64 = !Self::LENGTH_MASK;
 
+    /// Create a new, empty `MessageHeader` with a minimum length.
     pub const fn new() -> Self {
         Self(0)
     }
 
+    /// Convert a `MessageHeader` from its raw `u64` representation.
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
+    /// Get the length of this `MessageHeader`. Note that this is in
+    /// units of words, not bytes.
     pub const fn length(self) -> usize {
         ((self.0 & Self::LENGTH_MASK) as usize) + 1
     }
 
+    /// Get the private value of this `MessageHeader`.
     pub const fn private(self) -> u64 {
         (self.0 & Self::PRIVATE_MASK) >> 9
     }
 
+    /// Set the length of the provided `MessageHeader`, and return the
+    /// new header.
+    ///
+    /// Note that the length is in units of words, not bytes.
     #[must_use]
     pub const fn with_length(self, length: usize) -> Self {
         let without_length = self.0 & !Self::LENGTH_MASK;
         Self(without_length | (length.saturating_sub(1) as u64 & Self::LENGTH_MASK))
     }
 
+    /// Set the private value of the provided `MessageHeader`, and
+    /// return the new header.
     #[must_use]
     pub const fn with_private(self, private: u64) -> Self {
         let without_private = self.0 & !Self::PRIVATE_MASK;
@@ -984,6 +999,7 @@ impl MessageHeader {
         Self(without_private | (private & Self::PRIVATE_MASK))
     }
 
+    /// Convert a `MessageHeader` into its raw `u64` representation.
     pub const fn into_raw(self) -> u64 {
         self.0
     }
