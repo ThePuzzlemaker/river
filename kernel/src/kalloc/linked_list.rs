@@ -300,7 +300,14 @@ impl LinkedListAllocInner {
             }
             // SAFETY: By invariants.
             let node = unsafe { &*cur };
-            if (node.prev != prev) || (node.size_tag & (1 << 63)) == 0 {
+            if (node.prev != prev)
+                || (node.size_tag & (1 << 63)) == 0
+                || (!prev.is_null() && prev >= cur)
+                || (!prev.is_null()
+		    // SAFETY: By invariants.
+                    && ((prev as usize + (unsafe { &*prev }.size_tag & !(1 << 63)) + 8).saturating_sub(cur as usize)
+                        > 0))
+            {
                 break false;
             }
             prev = cur;
@@ -438,10 +445,17 @@ unsafe impl Allocator for LinkedListAlloc {
                 n_bytes_padding,
                 node_size,
             } => {
-                // Check if our size excess is more than our threshold.
-                if
-                // node_size - needed_size >= BLOCK_SPLIT_THRESHOLD
-                false {
+                debug_assert_ne!(needed_size, 0);
+                // Check if our size excess is more than our
+                // threshold.  The
+                // `.saturating_sub(mem::size_of::<usize>())` is for
+                // the size tag of the next block, which is not
+                // included in `node_size` or `needed_size`.
+                if node_size
+                    .saturating_sub(needed_size)
+                    .saturating_sub(mem::size_of::<usize>())
+                    >= BLOCK_SPLIT_THRESHOLD
+                {
                     // SAFETY: This pointer is valid as needed_size
                     // accounts for the data size *and* the padding
                     // size, and is also 8-aligned. Also, we account
@@ -455,7 +469,13 @@ unsafe impl Allocator for LinkedListAlloc {
                             .cast::<FreeNode>()
                     };
 
-                    let next_size = node_size - needed_size;
+                    // The `- mem::size_of::<usize>()` is for the size
+                    // tag of the next block, which is not included in
+                    // `node_size` or `needed_size`.
+                    let next_size = node_size - needed_size - mem::size_of::<usize>();
+                    debug_assert_ne!(next_size, 0);
+                    debug_assert_ne!(node_size, 0);
+                    debug_assert_ne!(needed_size, 0);
 
                     // SAFETY: We have exclusive access to all free
                     // nodes, by our invariants. Additionally, this
@@ -464,26 +484,30 @@ unsafe impl Allocator for LinkedListAlloc {
 
                     node.size_tag = needed_size;
 
+                    let node_prev = node.prev;
+                    let node_next = node.next;
+
                     // SAFETY: Ibid.
-                    unsafe {
+                    let next = unsafe {
                         addr_of_mut!((*next).size_tag).write(next_size | (1 << 63));
-                        addr_of_mut!((*next).prev).write(node.prev);
-                        addr_of_mut!((*next).next).write(node.next);
-                    }
+                        addr_of_mut!((*next).prev).write(node_prev);
+                        addr_of_mut!((*next).next).write(node_next);
+                        &mut *next
+                    };
 
                     // N.B. null prev == node is at head of free-list
-                    if node.prev.is_null() {
-                        alloc.free_list = next;
+                    if next.prev.is_null() {
+                        alloc.free_list = addr_of_mut!(*next);
                     } else {
                         // SAFETY: Exclusive access by invariants &
                         // null check above.
-                        unsafe { (*node.prev).next = next };
+                        unsafe { (*next.prev).next = next };
                     }
 
-                    if !node.next.is_null() {
+                    if !next.next.is_null() {
                         // SAFETY: Exclusive access by invariants &
                         // null check above.
-                        unsafe { (*node.next).prev = next };
+                        unsafe { (*next.next).prev = next };
                     }
 
                     debug_assert_ne!(n_bytes_padding, 0);
@@ -509,9 +533,10 @@ unsafe impl Allocator for LinkedListAlloc {
                     // nodes by our invariants. Additionally, this
                     // pointer is valid and aligned.
                     let node = unsafe { &mut *ptr };
+                    debug_assert_ne!(node_size, 0);
                     node.size_tag = node_size;
 
-                    //log::trace!("{:?}", alloc);
+                    // log::trace!("{:?}", alloc);
                     // N.B. null prev == node is at head of free-list
                     if node.prev.is_null() {
                         alloc.free_list = node.next;
@@ -552,7 +577,7 @@ unsafe impl Allocator for LinkedListAlloc {
             "kalloc::linked_list: allocator allocated unaligned block"
         );
 
-        log::trace!("allocate: layout={layout:?}, ptr={ptr:#p}, self={alloc:#?}");
+        //log::trace!("allocate: layout={layout:?}, ptr={ptr:#p}, self={alloc:#?}");
 
         debug_assert!(
             alloc.free_list_valid(),
@@ -678,6 +703,7 @@ unsafe impl Allocator for LinkedListAlloc {
                     addr_of_mut!((*node_ptr).next).write(next);
                 }
 
+                //log::trace!("deallocate: ptr={ptr:#p} layout={layout:?} self={alloc:#?}");
                 debug_assert!(
                     alloc.free_list_valid(),
                     "LinkedListAlloc::deallocate: free list was invalid after deallocation (path 3): {alloc:#?}"
