@@ -265,14 +265,11 @@ pub mod allocator {
 
     use super::SyscallNumber;
 
-    /// Allocate 1 or more capabilities from an [`allocator`][2] capability.
+    /// Allocate 1 or more capabilities from an capability.
     ///
-    /// See [`Captr::<Allocator>::allocate_many`][1].
+    /// See [`RemoteCaptr::<Captbl>::allocate_many`][1].
     ///
     /// # Description
-    ///
-    /// - `allocator` must be a valid index to an [`Allocator`][2]
-    /// capability in the thread's root captbl.
     ///
     /// - `into_ref` may be a valid index to a [`Captbl`][3], or
     /// null. If null, it is taken to be the thread's root captbl.
@@ -316,11 +313,9 @@ pub mod allocator {
     /// - This function will return [`CapError::InvalidSize`] if
     /// `size` was invalid.
     ///    
-    /// [1]: crate::capability::Captr::<Allocator>::allocate_many
-    /// [2]: crate::capability::Allocator
+    /// [1]: crate::capability::RemoteCaptr::<crate::capability::Captbl>::allocate_many
     /// [3]: crate::capability::Captbl
     pub fn allocate_many(
-        allocator: usize,
         into_ref: usize,
         into_index: usize,
         starting_at: usize,
@@ -330,9 +325,8 @@ pub mod allocator {
     ) -> CapResult<()> {
         // SAFETY: retype_many is always safe.
         let res = unsafe {
-            super::ecall7(
+            super::ecall6(
                 SyscallNumber::AllocateMany,
-                allocator as u64,
                 into_ref as u64,
                 into_index as u64,
                 starting_at as u64,

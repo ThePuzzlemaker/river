@@ -854,7 +854,7 @@ define_syscall!(sys_debug_cap_slot, 2);
 define_syscall!(sys_debug_print, 2);
 define_syscall!(sys_copy_deep, 6);
 define_syscall!(sys_swap, 4);
-define_syscall!(sys_allocate_many, 7);
+define_syscall!(sys_allocate_many, 6);
 define_syscall!(sys_delete, 2);
 define_syscall!(sys_page_map, 4);
 // define_syscall!(sys_pgtbl_map, 4);

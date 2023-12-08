@@ -4,13 +4,7 @@
 
 use crate::capability::{
     paging::{BasePage, Page, PageCaptr, PageTable},
-    Allocator, //Untyped,
-    Captbl,
-    Captr,
-    CaptrRange,
-    Empty,
-    InterruptPool,
-    Thread,
+    Captbl, Captr, CaptrRange, Empty, InterruptPool, Thread,
 };
 
 /// Information provided to the initial process.
@@ -41,8 +35,6 @@ pub struct InitCapabilities {
     pub pgtbl: Captr<PageTable>,
     /// The initial process's thread capability.
     pub thread: Captr<Thread>,
-    /// The kernel allocator.
-    pub allocator: Captr<Allocator>,
     /// The page backing the [`BootInfo`] passed to the init proces.
     pub bootinfo_page: PageCaptr<BasePage>,
     /// The global interrupt pool.
@@ -61,7 +53,6 @@ impl InitCapabilities {
             captbl: Captr::from_raw_unchecked(1),
             pgtbl: Captr::from_raw_unchecked(2),
             thread: Captr::from_raw_unchecked(3),
-            allocator: Captr::from_raw_unchecked(4),
             bootinfo_page: Captr::from_raw_unchecked(5),
             intr_pool: Captr::from_raw_unchecked(6),
         }

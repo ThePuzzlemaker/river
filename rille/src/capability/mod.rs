@@ -75,8 +75,6 @@ pub enum CapabilityType {
     Empty = 0,
     /// Capability tables, or [`Captbl`]s.
     Captbl = 1,
-    /// The [`Allocator`] capability.
-    Allocator = 2,
     /// [`PageTable`]s.
     PgTbl = 3,
     /// [`Page`][paging::Page]s that can be mapped into
@@ -335,31 +333,6 @@ impl Capability for Empty {
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Empty;
 }
 
-/// The allocator capability corresponds to the privilege to allocate
-/// kernel memory for many purposes; for example, [virtual memory
-/// pages][paging::Page] and [capability tables][Captbl].
-///
-/// While this capabiltiy represents the ability to allocate large
-/// chunks of kernel memory, small allocations happen in the kernel
-/// with other operations. For this reason, river does not have as
-/// strong memory exhaustion guarantees as something like seL4.
-///
-/// For more information on allocation, see
-/// [`Captr<Allocator>::allocate`].
-#[derive(Copy, Clone, Debug)]
-pub struct Allocator(#[doc(hidden)] Infallible);
-
-impl Capability for Allocator {
-    /// Allocators cannot allocate allocator capabilities.
-    type AllocateSizeSpec = Infallible;
-
-    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
-        0
-    }
-
-    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Allocator;
-}
-
 impl RemoteCaptr<Captbl> {
     /// Copy a capability in a potentially remote [`Captbl`] into
     /// another slot in another potentially remote [`Captbl`].
@@ -471,14 +444,14 @@ impl<C: Capability> RemoteCaptr<C> {
     }
 }
 
-impl Captr<Allocator> {
-    /// Allocate 1 or more capabilities from an [`Allocator`] capability.
+impl RemoteCaptr<Captbl> {
+    /// Allocate 1 or more capabilities.
     ///
-    /// This will allocate `count` capabilities from this [`Allocator`]
-    /// capability, putting the resulting capabilities into the slots
-    /// starting at `into[starting_at]` to, but not including
-    /// `into[starting_at + count]`. Note that all these slots within
-    /// this range must be [`Empty`] capabilities.
+    /// This will allocate `count` capabilities, putting the resulting
+    /// capabilities into the slots starting at `self[starting_at]`
+    /// to, but not including `self[starting_at + count]`. Note that
+    /// all these slots within this range must be [`Empty`]
+    /// capabilities.
     ///
     /// The resultant iterator provides [`Captr<C>`]'s over the range
     /// `starting_at..(starting_at + count)` from the empty
@@ -507,15 +480,13 @@ impl Captr<Allocator> {
     /// `size` was invalid.
     pub fn allocate_many<C: Capability>(
         self,
-        into: RemoteCaptr<Captbl>,
         starting_at: Captr<Empty>,
         count: usize,
         size: C::AllocateSizeSpec,
     ) -> CapResult<AllocateIter<C>> {
         syscalls::allocator::allocate_many(
-            self.into_raw(),
-            into.reftbl().into_raw(),
-            into.local_index().into_raw(),
+            self.reftbl().into_raw(),
+            self.local_index().into_raw(),
             starting_at.into_raw(),
             count,
             C::CAPABILITY_TYPE,
@@ -533,11 +504,10 @@ impl Captr<Allocator> {
         })
     }
 
-    /// Allocate a capability from an [`Allocator`] capability.
+    /// Allocate a capability.
     ///
-    /// This will allocate 1 capability from this [`Allocator`]
-    /// capability, putting the resulting capabilities into the slot
-    /// indexed by `into[at]`.
+    /// This will allocate 1 capability, putting the resulting
+    /// capability into the slot indexed by `self[at]`.
     ///
     /// The resultant [`Captr<C>`] is simply a casted version of `at`,
     /// with the capability now ensured to be present.
@@ -551,14 +521,12 @@ impl Captr<Allocator> {
     /// TODO
     pub fn allocate<C: Capability>(
         self,
-        into: RemoteCaptr<Captbl>,
         at: Captr<Empty>,
         size: C::AllocateSizeSpec,
     ) -> CapResult<Captr<C>> {
         syscalls::allocator::allocate_many(
-            self.into_raw(),
-            into.reftbl().into_raw(),
-            into.local_index().into_raw(),
+            self.reftbl().into_raw(),
+            self.local_index().into_raw(),
             at.into_raw(),
             1,
             C::CAPABILITY_TYPE,
@@ -1019,8 +987,7 @@ impl fmt::Debug for MessageHeader {
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        Allocator, AnyCap, Captbl, Empty, Endpoint, InterruptHandler, InterruptPool, Notification,
-        Thread,
+        AnyCap, Captbl, Empty, Endpoint, InterruptHandler, InterruptPool, Notification, Thread,
     };
 
     pub trait Sealed {}
@@ -1033,7 +1000,6 @@ mod private {
     impl Sealed for PageTable {}
     impl Sealed for Captbl {}
     impl Sealed for Empty {}
-    impl Sealed for Allocator {}
     impl Sealed for Thread {}
     impl Sealed for Notification {}
     impl Sealed for AnyCap {}

@@ -259,29 +259,14 @@ extern "C" fn thread2_entry(_thread: Captr<Thread>, init_info: *const BootInfo) 
     }
     let init_info = unsafe { &*init_info };
     let init_caps = unsafe { InitCapabilities::new() };
-    let notif: Captr<Notification> = init_caps
-        .allocator
-        .allocate(
-            RemoteCaptr::local(init_caps.captbl),
-            init_info.free_slots.lo.add(1),
-            (),
-        )
+    let notif: Captr<Notification> = RemoteCaptr::local(init_caps.captbl)
+        .allocate(init_info.free_slots.lo.add(1), ())
         .unwrap();
-    let lock_notif: Captr<Notification> = init_caps
-        .allocator
-        .allocate(
-            RemoteCaptr::local(init_caps.captbl),
-            init_info.free_slots.lo.add(50),
-            (),
-        )
+    let lock_notif: Captr<Notification> = RemoteCaptr::local(init_caps.captbl)
+        .allocate(init_info.free_slots.lo.add(50), ())
         .unwrap();
-    let uart_notif: Captr<Notification> = init_caps
-        .allocator
-        .allocate(
-            RemoteCaptr::local(init_caps.captbl),
-            init_info.free_slots.lo.add(51),
-            (),
-        )
+    let uart_notif: Captr<Notification> = RemoteCaptr::local(init_caps.captbl)
+        .allocate(init_info.free_slots.lo.add(51), ())
         .unwrap();
 
     unsafe {
@@ -470,66 +455,47 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         )
         .unwrap();
 
-    let thread: Captr<Thread> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65534) }, ())
+    let thread: Captr<Thread> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(65534) }, ())
         .unwrap();
-    let thread2: Captr<Thread> = caps
-        .allocator
-        .allocate(root_captbl, init_info.free_slots.lo, ())
-        .unwrap();
-    let thread3: Captr<Thread> = caps
-        .allocator
-        .allocate(root_captbl, init_info.free_slots.lo.add(60), ())
+    let thread2: Captr<Thread> = root_captbl.allocate(init_info.free_slots.lo, ()).unwrap();
+    let thread3: Captr<Thread> = root_captbl
+        .allocate(init_info.free_slots.lo.add(60), ())
         .unwrap();
 
-    let pg: Captr<Page<MegaPage>> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65000) }, ())
+    let pg: Captr<Page<MegaPage>> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(65000) }, ())
         .unwrap();
-    let pg2: Captr<Page<MegaPage>> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65001) }, ())
+    let pg2: Captr<Page<MegaPage>> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(65001) }, ())
         .unwrap();
 
-    let pg3: Captr<Page<MegaPage>> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(64000) }, ())
+    let pg3: Captr<Page<MegaPage>> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(64000) }, ())
         .unwrap();
 
-    let ep: Captr<Endpoint> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65002) }, ())
+    let ep: Captr<Endpoint> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(65002) }, ())
         .unwrap();
 
-    let uart_ep: Captr<Endpoint> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(60000) }, ())
+    let uart_ep: Captr<Endpoint> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(60000) }, ())
         .unwrap();
 
-    let ipc_buf: Captr<Page<BasePage>> = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65003) }, ())
+    let ipc_buf: Captr<Page<BasePage>> = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(65003) }, ())
         .unwrap();
 
-    let ipc2_buf = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(65004) }, ())
+    let ipc2_buf = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(65004) }, ())
         .unwrap();
 
-    let ipc3_buf = caps
-        .allocator
-        .allocate(root_captbl, unsafe { Captr::from_raw_unchecked(64004) }, ())
+    let ipc3_buf = root_captbl
+        .allocate(unsafe { Captr::from_raw_unchecked(64004) }, ())
         .unwrap();
 
-    let mut notifs = caps
-        .allocator
-        .allocate_many(
-            root_captbl,
-            unsafe { Captr::from_raw_unchecked(65531) },
-            2,
-            (),
-        )
+    let mut notifs = root_captbl
+        .allocate_many(unsafe { Captr::from_raw_unchecked(65531) }, 2, ())
         .unwrap();
 
     let out_notif = notifs.next().unwrap();

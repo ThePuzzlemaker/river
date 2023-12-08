@@ -23,7 +23,7 @@ use rille::{
     capability::{
         self,
         paging::{BasePage, DynLevel, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel},
-        Allocator, AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, MessageHeader,
+        AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, MessageHeader,
         UserRegisters,
     },
     units::StorageUnits,
@@ -416,7 +416,6 @@ pub fn sys_delete(
 pub fn sys_allocate_many(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
-    allocator: u64,
     into_ref: u64,
     into_index: u64,
     starting_at: u64,
@@ -424,8 +423,7 @@ pub fn sys_allocate_many(
     cap_type: CapabilityType,
     size: u64,
 ) -> Result<(), CapError> {
-    let (allocator, into_ref, into_index, starting_at, count) = (
-        allocator as usize,
+    let (into_ref, into_index, starting_at, count) = (
         into_ref as usize,
         into_index as usize,
         starting_at as usize,
@@ -440,10 +438,6 @@ pub fn sys_allocate_many(
         .as_ref()
         .cloned()
         .ok_or(CapError::NotPresent)?;
-
-    // Check that we actually have an allocator cap, before we do more
-    // processing.
-    let _alloc = root_hdr.get::<Allocator>(allocator)?;
 
     let into_ref = if into_ref == 0 {
         root_hdr.clone()
@@ -460,11 +454,6 @@ pub fn sys_allocate_many(
         .to_owned_cap()
         .upgrade()
         .ok_or(CapError::NotPresent)?;
-
-    if &into_index == root_hdr && (starting_at..starting_at + count).contains(&allocator) {
-        // Captrs are aliased, this is invalid.
-        return Err(CapError::InvalidOperation);
-    }
 
     match cap_type {
         CapabilityType::Empty => {}

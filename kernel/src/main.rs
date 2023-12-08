@@ -217,8 +217,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     {
         let slot = captbl.get_mut::<Empty>(1).unwrap();
         slot.replace(Captbl::clone(&captbl).downgrade());
-        let slot = captbl.get_mut::<Empty>(4).unwrap();
-        slot.replace(capability::Allocator);
     }
 
     let init_padded = INIT.len().next_multiple_of(4.kib());

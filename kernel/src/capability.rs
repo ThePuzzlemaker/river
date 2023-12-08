@@ -20,8 +20,8 @@ use rille::capability::{
 };
 
 pub use rille::capability::{
-    paging::PageTable as PageTableCap, Allocator as AllocatorCap, AnyCap, Captbl as CaptblCap,
-    Empty as EmptyCap, Endpoint as EndpointCap, InterruptHandler as InterruptHandlerCap,
+    paging::PageTable as PageTableCap, AnyCap, Captbl as CaptblCap, Empty as EmptyCap,
+    Endpoint as EndpointCap, InterruptHandler as InterruptHandlerCap,
     InterruptPool as InterruptPoolCap, Notification as NotificationCap, Thread as ThreadCap,
 };
 
@@ -73,7 +73,6 @@ pub struct CapabilitySlotInner {
 pub enum CapabilityKind {
     Empty = CapabilityType::Empty as u8,
     Captbl(WeakCaptbl) = CapabilityType::Captbl as u8,
-    Allocator = CapabilityType::Allocator as u8,
     PgTbl(SharedPageTable) = CapabilityType::PgTbl as u8,
     Page(Page) = CapabilityType::Page as u8,
     Thread(Arc<Thread>) = CapabilityType::Thread as u8,
@@ -88,7 +87,6 @@ impl fmt::Debug for CapabilityKind {
         match self {
             Self::Empty => write!(f, "Empty"),
             Self::Captbl(captbl) => f.debug_tuple("Captbl").field(captbl).finish(),
-            Self::Allocator => write!(f, "Allocator"),
             Self::PgTbl(pgtbl) => f.debug_tuple("PgTbl").field(pgtbl).finish(),
             Self::Page(page) => f.debug_tuple("Page").field(page).finish(),
             Self::Thread(thread) => write!(f, "Thread(<opaque:{:#p}>", Arc::as_ptr(thread)),
@@ -309,7 +307,6 @@ impl<'a> CapToOwned for SlotRefMut<'a, EmptyCap> {
 pub enum AnyCapVal {
     Empty,
     Captbl(WeakCaptbl),
-    Allocator,
     Page(Page),
     PgTbl(SharedPageTable),
     Thread(Arc<Thread>),
@@ -327,7 +324,6 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
         match &self.cap {
             CapabilityKind::Empty => AnyCapVal::Empty,
             CapabilityKind::Captbl(tbl) => AnyCapVal::Captbl(tbl.clone()),
-            CapabilityKind::Allocator => AnyCapVal::Allocator,
             CapabilityKind::Page(page) => AnyCapVal::Page(page.clone()),
             CapabilityKind::PgTbl(pgtbl) => AnyCapVal::PgTbl(pgtbl.clone()),
             CapabilityKind::Thread(thread) => AnyCapVal::Thread(thread.clone()),
@@ -350,7 +346,6 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
         match &self.cap {
             CapabilityKind::Empty => AnyCapVal::Empty,
             CapabilityKind::Captbl(tbl) => AnyCapVal::Captbl(tbl.clone()),
-            CapabilityKind::Allocator => AnyCapVal::Allocator,
             CapabilityKind::Page(page) => AnyCapVal::Page(page.clone()),
             CapabilityKind::PgTbl(pgtbl) => AnyCapVal::PgTbl(pgtbl.clone()),
             CapabilityKind::Thread(thread) => AnyCapVal::Thread(thread.clone()),
@@ -395,12 +390,6 @@ impl CapabilityValue for Empty {
     type Cap = EmptyCap;
     fn into_kind(self) -> CapabilityKind {
         CapabilityKind::Empty
-    }
-}
-impl CapabilityValue for Allocator {
-    type Cap = AllocatorCap;
-    fn into_kind(self) -> CapabilityKind {
-        CapabilityKind::Allocator
     }
 }
 impl CapabilityValue for Page {
@@ -463,7 +452,6 @@ impl CapabilityValue for AnyCapVal {
         match self {
             AnyCapVal::Empty => Empty.into_kind(),
             AnyCapVal::Captbl(captbl) => captbl.into_kind(),
-            AnyCapVal::Allocator => Allocator.into_kind(),
             AnyCapVal::Page(pg) => pg.into_kind(),
             AnyCapVal::PgTbl(pgtbl) => pgtbl.into_kind(),
             AnyCapVal::Thread(thread) => thread.into_kind(),
@@ -480,7 +468,6 @@ impl CapabilityValue for AnyCapVal {
             match slot.cap {
                 CapabilityKind::Empty => Empty::copy_hook(slot),
                 CapabilityKind::Captbl(_) => WeakCaptbl::copy_hook(slot),
-                CapabilityKind::Allocator => Allocator::copy_hook(slot),
                 CapabilityKind::PgTbl(_) => SharedPageTable::copy_hook(slot),
                 CapabilityKind::Page(_) => Page::copy_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::copy_hook(slot),
@@ -498,7 +485,6 @@ impl CapabilityValue for AnyCapVal {
             match slot.cap {
                 CapabilityKind::Empty => Empty::delete_hook(slot),
                 CapabilityKind::Captbl(_) => WeakCaptbl::delete_hook(slot),
-                CapabilityKind::Allocator => Allocator::delete_hook(slot),
                 CapabilityKind::PgTbl(_) => SharedPageTable::delete_hook(slot),
                 CapabilityKind::Page(_) => Page::delete_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::delete_hook(slot),
@@ -1644,10 +1630,9 @@ mod impls {
     use crate::paging::SharedPageTable;
 
     use super::{
-        Allocator, AllocatorCap, AnyCap, AnyCapVal, Capability, CaptblCap, Empty, EmptyCap,
-        Endpoint, EndpointCap, InterruptHandler, InterruptHandlerCap, InterruptPool,
-        InterruptPoolCap, Notification, NotificationCap, PageCap, PageTableCap, ThreadCap,
-        WeakCaptbl,
+        AnyCap, AnyCapVal, Capability, CaptblCap, Empty, EmptyCap, Endpoint, EndpointCap,
+        InterruptHandler, InterruptHandlerCap, InterruptPool, InterruptPoolCap, Notification,
+        NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
     };
     impl Capability for EmptyCap {
         type Value = Empty;
@@ -1659,12 +1644,6 @@ mod impls {
         type Value = WeakCaptbl;
         fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Captbl
-        }
-    }
-    impl Capability for AllocatorCap {
-        type Value = Allocator;
-        fn is_valid_type(cap_type: CapabilityType) -> bool {
-            cap_type == CapabilityType::Allocator
         }
     }
     impl Capability for PageTableCap {
