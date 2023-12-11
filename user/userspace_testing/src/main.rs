@@ -9,6 +9,7 @@ use core::{
     fmt, ptr,
 };
 
+use alloc::string::String;
 use rille::{
     addr::VirtualConst,
     capability::{
@@ -18,8 +19,12 @@ use rille::{
     init::{BootInfo, InitCapabilities},
     syscalls::{self, ecall1, ecall2, ecall3, ecall4, ecall6, ecall7, SyscallNumber},
 };
-use rille_user::sync::{mutex::Mutex, once_cell::OnceCell};
+use rille_user::{
+    malloc::LinkedListAlloc,
+    sync::{mutex::Mutex, once_cell::OnceCell},
+};
 
+extern crate alloc;
 extern crate panic_handler;
 
 #[allow(unused_macros)]
@@ -64,6 +69,9 @@ done_clear_bss:
 .popsection
 "
 );
+
+#[global_allocator]
+static GLOBAL_ALLOC: OnceCell<LinkedListAlloc> = OnceCell::new();
 
 extern "C" fn thread_entry(_thread: Captr<Thread>, ep: usize) -> ! {
     unsafe {
@@ -639,6 +647,24 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             .unwrap()
     };
 
+    unsafe {
+        GLOBAL_ALLOC
+            .get_or_init(|| {
+                LinkedListAlloc::new(
+                    root_captbl
+                        .allocate(Captr::from_raw_unchecked(63000), ())
+                        .unwrap(),
+                    caps.pgtbl,
+                    caps.captbl,
+                )
+            })
+            .init(0xF000_0000 as *mut u8);
+    }
+
+    let mut s = String::new();
+    s.push_str("Hello, ");
+    s.push_str("world!");
+
     unsafe { thread2.resume().unwrap() }
 
     unsafe { thread3.resume().unwrap() }
@@ -700,6 +726,7 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     // }
 
     println!("{:#?}", time());
+    println!("{:#?}", s);
     // loop {
     //     let mut lock = SHARED2.expect("oops").lock();
     //     let n = *lock;

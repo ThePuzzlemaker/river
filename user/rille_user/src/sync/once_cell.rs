@@ -112,6 +112,11 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Initialize the `OnceCell` with a value, but don't return it.
+    pub fn init(&self, value: T) {
+        self.get_or_init(|| value);
+    }
+
     /// This function will attempt to get the inner data of the `OnceCell`, or
     /// will panic with the given `message`.
     ///
