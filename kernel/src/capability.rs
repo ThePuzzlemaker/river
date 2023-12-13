@@ -2,7 +2,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU16, AtomicU64};
+use core::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize};
 use core::{cmp, mem};
 
 use alloc::collections::{BTreeMap, VecDeque};
@@ -211,10 +211,11 @@ where
     fn is_valid_type(cap_type: CapabilityType) -> bool;
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 #[repr(align(64))]
 pub struct CaptblHeader {
     n_slots_log2: u8,
+    slot_rc: AtomicUsize,
 }
 
 const _ASSERT_CAPTBLHEADER_SIZE_EQ_64: () = assert!(
@@ -444,6 +445,43 @@ impl CapabilityValue for WeakCaptbl {
     type Cap = CaptblCap;
     fn into_kind(self) -> CapabilityKind {
         CapabilityKind::Captbl(self)
+    }
+
+    unsafe fn copy_hook(slot: &SpinRwLockWriteGuard<'_, CapabilitySlotInner>) {
+        // SAFETY: By invariants.
+        let captbl = unsafe { slot.cap.captbl().unwrap_unchecked() };
+        if let Some(captbl) = captbl.upgrade() {
+            let x = captbl.hdr().slot_rc.fetch_add(1, Ordering::Relaxed);
+
+            if x == 0 {
+                // Carefully leak this captbl.
+                let _ = Arc::into_raw(captbl.inner.clone());
+            }
+            assert!(
+                x <= (u32::MAX - 1) as usize,
+                "too many references to captbl"
+            );
+        }
+    }
+
+    unsafe fn delete_hook(slot: &mut SpinRwLockWriteGuard<'_, CapabilitySlotInner>) {
+        // SAFETY: By invariants.
+        let captbl = unsafe { slot.cap.captbl().unwrap_unchecked() };
+        if let Some(captbl) = captbl.upgrade() {
+            // If we're an orphan, un-leak ourself.
+            if captbl.hdr().slot_rc.fetch_sub(1, Ordering::Release) == 1 {
+                atomic::fence(Ordering::Acquire);
+                let x = Arc::into_raw(captbl.inner.clone());
+                // SAFETY: This pointer was obtained from into_raw,
+                // and if our slot_rc was > 0, we have at least one
+                // leaked captbl.
+                unsafe {
+                    Arc::decrement_strong_count(x);
+                }
+                // SAFETY: This pointer was obtained from into_raw.
+                drop(unsafe { Arc::from_raw(x) });
+            }
+        }
     }
 }
 impl CapabilityValue for AnyCapVal {

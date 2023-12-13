@@ -3,6 +3,7 @@ use core::{
     marker::PhantomData,
     mem::{self, ManuallyDrop, MaybeUninit},
     ptr::{self},
+    sync::atomic::AtomicUsize,
 };
 
 use alloc::sync::{Arc, Weak};
@@ -18,7 +19,7 @@ use super::{CapToOwned, Capability, CapabilitySlot, CaptblHeader, SlotRef, SlotR
 
 pub union CaptblInner {
     pub(super) slot: ManuallyDrop<CapabilitySlot>,
-    pub(super) hdr: CaptblHeader,
+    pub(super) hdr: ManuallyDrop<CaptblHeader>,
 }
 
 #[derive(Clone)]
@@ -70,7 +71,7 @@ impl Drop for Captbl {
                 let hdr = unsafe { &*inner.0 };
                 // SAFETY: By our invariants, the 0th element must be
                 // the header, and must be valid and initialized.
-                let n_slots_log2 = unsafe { hdr[0].hdr }.n_slots_log2;
+                let n_slots_log2 = unsafe { &hdr[0].hdr }.n_slots_log2;
                 kalloc::phys::what_order(1 << (n_slots_log2 + 6))
             };
             let ptr_raw = inner.0.as_ptr().cast_mut();
@@ -99,14 +100,19 @@ impl Captbl {
     ///
     /// - `n_slots_log2` must not be 0.
     pub unsafe fn new(base: VirtualMut<u8, DirectMapped>, n_slots_log2: u8) -> Self {
-        let header = CaptblHeader { n_slots_log2 };
+        let header = CaptblHeader {
+            n_slots_log2,
+            slot_rc: AtomicUsize::new(0),
+        };
 
         let captbl: *mut [MaybeUninit<CaptblInner>] =
             ptr::slice_from_raw_parts_mut(base.into_ptr_mut().cast(), 1 << n_slots_log2);
         // SAFETY: This memory is valid, and it is valid to read it as
         // MaybeUninit even if it's uninitialized.
         let captbl = unsafe { &mut *captbl };
-        captbl[0].write(CaptblInner { hdr: header });
+        captbl[0].write(CaptblInner {
+            hdr: ManuallyDrop::new(header),
+        });
 
         for slot in captbl.iter_mut().skip(1) {
             slot.write(CaptblInner {
@@ -121,6 +127,10 @@ impl Captbl {
         Self {
             inner: Arc::new(UnsafeCaptblPtr(captbl)),
         }
+    }
+
+    pub fn hdr(&self) -> &CaptblHeader {
+        unsafe { &(&*self.inner.0)[0].hdr }
     }
 }
 
