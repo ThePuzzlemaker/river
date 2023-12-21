@@ -38,6 +38,10 @@ pub struct BuildOptions {
     /// Extra options to pass to the underlying command
     #[clap(last = true, required = false)]
     extra: Vec<String>,
+
+    /// Build OpenSBI with a non-LLVM compiler
+    #[clap(long)]
+    no_llvm: bool,
 }
 
 impl BuildCtx {
@@ -163,9 +167,10 @@ impl BuildCtx {
 
             let target_profile_path = if opts.release { "release" } else { "debug" };
 
+            let llvm = if opts.no_llvm { "0" } else { "1" };
             cmd!(
 		self.shell,
-		"make PLATFORM=generic LLVM=1 FW_PAYLOAD=../target/riscv64gc-unknown-none-elf/{target_profile_path}/river"
+		"make PLATFORM=generic LLVM={llvm} FW_PAYLOAD=../target/riscv64gc-unknown-none-elf/{target_profile_path}/river"
 	    ).run()?;
         }
 
