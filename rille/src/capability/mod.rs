@@ -37,6 +37,7 @@ use core::{
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     ops::Deref,
+    ptr,
 };
 
 use num_enum::{FromPrimitive, IntoPrimitive};
@@ -721,6 +722,144 @@ impl Endpoint {
         res.map(|x| Captr::from_raw(x as usize))
             .map(Self::from_captr)
             .map_err(CapError::from)
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn recv_with_regs(self, cap: Option<&mut Captr>) -> CapResult<(MessageHeader, [u64; 4])> {
+        let mr0: u64;
+        let mr1: u64;
+        let mr2: u64;
+        let mr3: u64;
+        let err: u64;
+        let val: u64;
+        // SAFETY: endpoint_recv is always safe.
+        let hdr = unsafe {
+            #[rustfmt::skip]
+	    core::arch::asm!(
+                "ecall",
+                in("a0") u64::from(SyscallNumber::EndpointRecv),
+                in("a1") self.into_raw() as u64,
+                lateout("a0") err,
+		lateout("a1") val,
+		in("a2") 0,
+                in("a3") cap.map(|x| x as *mut _ as u64).unwrap_or_default(),
+                out("a4") mr0,
+                out("a5") mr1,
+                out("a6") mr2,
+                out("a7") mr3
+            );
+
+            if err != 0 {
+                return Err(CapError::from(err));
+            }
+
+            val
+        };
+
+        Ok((MessageHeader(hdr), [mr0, mr1, mr2, mr3]))
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    #[allow(clippy::similar_names)]
+    pub fn call_with_regs(
+        self,
+        hdr: MessageHeader,
+        cap: &mut Captr,
+        mrs: [u64; 4],
+    ) -> CapResult<(MessageHeader, [u64; 4])> {
+        let mut mr0: u64 = mrs[0];
+        let mut mr1: u64 = mrs[1];
+        let mut mr2: u64 = mrs[2];
+        let mut mr3: u64 = mrs[3];
+        let err: u64;
+        let val: u64;
+        // SAFETY: endpoint_recv is always safe.
+        let hdr = unsafe {
+            #[rustfmt::skip]
+	    core::arch::asm!(
+                "ecall",
+                in("a0") u64::from(SyscallNumber::EndpointCall),
+                in("a1") self.into_raw() as u64,
+                lateout("a0") err,
+		lateout("a1") val,
+		in("a2") hdr.0,
+                in("a3") ptr::addr_of!(cap) as u64,
+                inout("a4") mr0,
+                inout("a5") mr1,
+                inout("a6") mr2,
+                inout("a7") mr3
+            );
+
+            if err != 0 {
+                return Err(CapError::from(err));
+            }
+
+            val
+        };
+
+        Ok((MessageHeader(hdr), [mr0, mr1, mr2, mr3]))
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn send_with_regs(self, hdr: MessageHeader, cap: Captr, mrs: [u64; 4]) -> CapResult<()> {
+        // SAFETY: endpoint_send is always safe.
+        let res = unsafe {
+            syscalls::ecall7(
+                SyscallNumber::EndpointSend,
+                self.into_raw() as u64,
+                hdr.0,
+                ptr::addr_of!(cap) as u64,
+                mrs[0],
+                mrs[1],
+                mrs[2],
+                mrs[3],
+            )
+        };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn reply_with_regs(self, hdr: MessageHeader, cap: Captr, mrs: [u64; 4]) -> CapResult<()> {
+        // SAFETY: endpoint_send is always safe.
+        let res = unsafe {
+            syscalls::ecall7(
+                SyscallNumber::EndpointReply,
+                self.into_raw() as u64,
+                hdr.0,
+                ptr::addr_of!(cap) as u64,
+                mrs[0],
+                mrs[1],
+                mrs[2],
+                mrs[3],
+            )
+        };
+
+        if let Err(e) = res {
+            Err(CapError::from(e))
+        } else {
+            Ok(())
+        }
     }
 }
 

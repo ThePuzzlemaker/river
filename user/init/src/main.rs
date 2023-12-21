@@ -4,9 +4,11 @@
 
 use core::{
     arch::{asm, global_asm},
-    cmp, fmt, ptr, slice,
+    cmp, fmt, mem, ptr, slice,
 };
 
+use alloc::vec;
+use bootfs::{BootFsEntry, BootFsHeader};
 use rille::{
     addr::{VirtualConst, VirtualMut},
     capability::paging::*,
@@ -425,10 +427,7 @@ pub fn time() -> (u64, u64) {
     (sec, us)
 }
 
-// TODO: find out how to make this better(tm)
-// For now we'll just have to adjust the length if procsvr gets larger
-#[link_section = ".procsvr"]
-static PROCSVR: [u8; 4096 * 2] = *include_bytes!(env!("CARGO_BUILD_PROCSVR_PATH"));
+static BOOTFS: &[u8] = include_bytes!(env!("CARGO_BUILD_BOOTFS_PATH"));
 
 #[no_mangle]
 extern "C" fn entry(init_info: *const BootInfo) -> ! {
@@ -488,8 +487,6 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         }
     }
 
-    // let captr_alloc = CAPTR_ALLOC.expect("");
-
     let job = Job::create(caps.job).unwrap();
     let procsvr = job.create_thread("procsvr").unwrap();
 
@@ -514,18 +511,64 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         )
         .unwrap();
 
-    let procsvr_n_pages = PROCSVR.len().next_multiple_of(4096) / 4096;
-    let procsvr_start = PROCSVR.as_ptr() as usize - 0x1000_0000;
-    let procsvr_offset_pages = procsvr_start / 4096;
+    let bootfs = lz4_flex::decompress_size_prepended(BOOTFS).unwrap();
 
-    for i in 0..procsvr_n_pages {
-        Page::<BasePage>::from_captr(init_info.init_pages.lo.add(procsvr_offset_pages + i))
-            .map(
-                procsvr_pgtbl,
-                VirtualConst::from_usize(0x1040_0000 + 4096 * i),
-                PageTableFlags::RWX,
-            )
+    // SAFETY: We assume the BOOTFS to be correct, by our build
+    // script. Of course, if it's not, we have bigger problems.
+    let procsvr_data = unsafe {
+        let hdr = *bootfs.as_ptr().cast::<BootFsHeader>();
+        debug_assert_eq!(hdr.magic, 0x0B007F50);
+        let entries = slice::from_raw_parts(
+            bootfs
+                .as_ptr()
+                .add(mem::size_of::<BootFsHeader>())
+                .cast::<BootFsEntry>(),
+            hdr.n_entries as usize,
+        );
+
+        let procsvr_entry = entries
+            .iter()
+            .find(|x| {
+                let s = core::str::from_utf8_unchecked(slice::from_raw_parts(
+                    bootfs.as_ptr().add(x.name_offset as usize),
+                    x.name_length as usize,
+                ));
+
+                s == "procsvr"
+            })
             .unwrap();
+        slice::from_raw_parts(
+            bootfs.as_ptr().add(procsvr_entry.offset as usize),
+            procsvr_entry.length as usize,
+        )
+    };
+
+    let procsvr_n_pages = procsvr_data.len().next_multiple_of(4096) / 4096;
+
+    let mut procsvr_pages = vec![];
+    for i in 0..procsvr_n_pages {
+        let pg = Page::<BasePage>::create().unwrap();
+        procsvr_pages.push(pg);
+        pg.map(
+            procsvr_pgtbl,
+            VirtualConst::from_usize(0x1040_0000 + 4096 * i),
+            PageTableFlags::RWX,
+        )
+        .unwrap();
+
+        pg.map(
+            caps.pgtbl,
+            VirtualConst::from_usize(0x6000_0000),
+            PageTableFlags::RW,
+        )
+        .unwrap();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                procsvr_data[i * 4096..(i + 1) * 4096].as_ptr(),
+                0x6000_0000 as *mut _,
+                4096,
+            )
+        };
     }
 
     unsafe {
@@ -535,261 +578,31 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
                 VirtualConst::from_usize(0x1040_0000),
                 VirtualMut::from_usize(0x1040_0000),
                 procsvr_endpoint.into_captr(),
-                0,
+                procsvr_n_pages as u64,
             )
             .unwrap();
     }
 
-    // unsafe {
-    //     ecall6(
-    //         SyscallNumber::Grant,
-    //         caps.captbl.into_raw() as u64,
-    //         out_notif.into_raw() as u64,
-    //         caps.captbl.into_raw() as u64,
-    //         out_notif.into_raw() as u64,
-    //         CapRights::all().bits(),
-    //         0xDEAD0000,
-    //     )
-    //     .unwrap();
-    // }
-
-    // unsafe {
-    //     ecall6(
-    //         SyscallNumber::Grant,
-    //         caps.captbl.into_raw() as u64,
-    //         in_notif.into_raw() as u64,
-    //         caps.captbl.into_raw() as u64,
-    //         in_notif.into_raw() as u64,
-    //         CapRights::all().bits(),
-    //         0xDEAD0000,
-    //     )
-    //     .unwrap();
-    // }
-
-    // pg.map(
-    //     caps.pgtbl,
-    //     VirtualConst::from_usize(0x8200000),
-    //     PageTableFlags::RW,
-    // )
-    // .unwrap();
-    // pg2.map(
-    //     caps.pgtbl,
-    //     VirtualConst::from_usize(0x8600000),
-    //     PageTableFlags::RW,
-    // )
-    // .unwrap();
-    // pg3.map(
-    //     caps.pgtbl,
-    //     VirtualConst::from_usize(0x9000000),
-    //     PageTableFlags::RW,
-    // )
-    // .unwrap();
-    // ipc_buf
-    //     .map(
-    //         caps.pgtbl,
-    //         VirtualConst::from_usize(0x60000000),
-    //         PageTableFlags::RW,
-    //     )
-    //     .unwrap();
-    // ipc2_buf
-    //     .map(
-    //         caps.pgtbl,
-    //         VirtualConst::from_usize(0x61000000),
-    //         PageTableFlags::RW,
-    //     )
-    //     .unwrap();
-    // ipc3_buf
-    //     .map(
-    //         caps.pgtbl,
-    //         VirtualConst::from_usize(0x62000000),
-    //         PageTableFlags::RW,
-    //     )
-    //     .unwrap();
-
-    // // unsafe { Captr::<Page<BasePage>>::from_raw_unchecked(65533) }
-    // //     .map(
-    // //         caps.pgtbl,
-    // //         VirtualConst::from_usize(0xDEAD0000),
-    // //         PageTableFlags::RW,
-    // //     )
-    // //     .unwrap();
-
-    // // unsafe {
-    // //     core::ptr::write_volatile(0xdead0000 as *mut u64, 0xc0ded00d);
-    // // }
-
-    // unsafe {
-    //     thread
-    //         .configure(Captr::null(), Captr::null(), ipc2_buf)
-    //         .unwrap()
-    // };
-    // unsafe {
-    //     ecall2(
-    //         SyscallNumber::ThreadSetIpcBuffer,
-    //         caps.thread.into_raw() as u64,
-    //         ipc_buf.into_raw() as u64,
-    //     )
-    //     .unwrap();
-    // }
-    // unsafe {
-    //     thread2
-    //         .configure(Captr::null(), Captr::null(), Captr::null())
-    //         .unwrap()
-    // };
-
-    // unsafe {
-    //     thread3
-    //         .configure(Captr::null(), Captr::null(), ipc3_buf)
-    //         .unwrap()
-    // };
-    // unsafe {
-    //     thread
-    //         .write_registers(&rille::capability::UserRegisters {
-    //             pc: thread_entry as usize as u64,
-    //             sp: 0x8200000 + (1 << MegaPage::PAGE_SIZE_LOG2),
-    //             a0: thread.into_raw() as u64,
-    //             a1: ep.into_raw() as u64,
-    //             ..Default::default()
-    //         })
-    //         .unwrap()
-    // };
-    // unsafe {
-    //     thread2
-    //         .write_registers(&rille::capability::UserRegisters {
-    //             pc: thread2_entry as usize as u64,
-    //             sp: 0x8600000 + (1 << MegaPage::PAGE_SIZE_LOG2),
-    //             a0: thread2.into_raw() as u64,
-    //             a1: init_info as *const _ as u64,
-    //             ..Default::default()
-    //         })
-    //         .unwrap()
-    // };
-
-    // unsafe {
-    //     thread3
-    //         .write_registers(&rille::capability::UserRegisters {
-    //             pc: thread3_entry as usize as u64,
-    //             sp: 0x9000000 + (1 << MegaPage::PAGE_SIZE_LOG2),
-    //             a0: thread3.into_raw() as u64,
-    //             a1: init_info as *const _ as u64,
-    //             a2: uart_ep.into_raw() as u64,
-    //             ..Default::default()
-    //         })
-    //         .unwrap()
-    // };
-
-    // let mut s = String::new();
-    // s.push_str("Hello, ");
-    // s.push_str("world!");
-
-    // unsafe { thread2.resume().unwrap() }
-
-    // unsafe { thread3.resume().unwrap() }
-
-    // unsafe { thread.resume().unwrap() }
-
-    // SHARED2.get_or_init(|| Mutex::new(0, in_notif));
-
-    // // for _ in 0..100_000_000 {
-    // //     unsafe {
-    // //         core::arch::asm!("pause");
-    // //     }
-    // // }
-
-    // // unsafe {
-    // //     ecall2(
-    // //         SyscallNumber::ThreadSetPriority,
-    // //         caps.thread.into_raw() as u64,
-    // //         31,
-    // //     )
-    // //     .unwrap();
-    // // }
-
-    // let mut info = MessageHeader::new().with_length(8).with_private(0);
-    // loop {
-    //     if info.private() >= 100_000 {
-    //         break;
-    //     }
-    //     // unsafe {
-    //     //     ptr::copy(
-    //     //         "Hello, world!".as_ptr(),
-    //     //         0x60000000 as *mut _,
-    //     //         "Hello, world!".len(),
-    //     //     );
-    //     // }
-
-    //     info = MessageHeader::from_raw(unsafe {
-    //         ecall3(
-    //             SyscallNumber::EndpointCall,
-    //             ep.into_raw() as u64,
-    //             MessageHeader::new()
-    //                 .with_length(0)
-    //                 .with_private(info.private() + 1)
-    //                 .into_raw(),
-    //             0,
-    //         )
-    //         .unwrap()
-    //     });
-    // }
-    // // let tm = time();
-    // // let mut buf = [0; 64];
-    // // buf.copy_from_slice(unsafe { slice::from_raw_parts(0x6000_0000 as *const i8, 64) });
-    // // println!("{:#?}", tm);
-    // // {
-    // //     // let lock = SHARED2.expect("oops").lock();
-    // //     println!("Call response: {info:x?}:");
-    // //     let s = unsafe { CStr::from_ptr(buf.as_ptr()) };
-    // //     println!("{:#?}", s);
-    // // }
-
-    // println!("{:#?}", time());
-    // println!("{:#?}", s);
-    // // loop {
-    // //     let mut lock = SHARED2.expect("oops").lock();
-    // //     let n = *lock;
-
-    // //     if n >= 50_000 {
-    // //         println!("");
-    // //         break;
-    // //     }
-    // //     *lock += 1;
-    // //     print!("\rthread 1: {}       {:?}      ", n, time());
-    // // }
-
-    // // while in_notif.wait().is_ok() {
-    // //     let n = SHARED.fetch_add(1, Ordering::Relaxed);
-
-    // //     //        print!("\rping!: {}       {:?}     ", n, time());
-    // //     if n == 50_000 {
-    // //         println!("\ndone! {:#?}", time());
-    // //         break;
-    // //     }
-    // //     out_notif.signal().unwrap();
-    // // }
-
-    // syscalls::debug::debug_dump_root();
+    procsvr_endpoint
+        .send_with_regs(
+            MessageHeader::new().with_length(0).with_private(0),
+            *job,
+            [0; 4],
+        )
+        .unwrap();
 
     loop {
         unsafe {
             core::arch::asm!("nop");
         }
     }
-
-    // println!("\nthread 1 sent!");
-
-    // loop {
-    //     // print!("\rthread 1!");
-    //     unsafe {
-    //         core::arch::asm!("nop");
-    //     }
-    // }
 }
 
 struct DebugPrint;
 
 impl fmt::Write for DebugPrint {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        print(s);
+        syscalls::debug::debug_print_string(s);
         Ok(())
     }
 }

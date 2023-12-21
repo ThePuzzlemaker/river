@@ -1,9 +1,13 @@
 #![no_std]
 #![no_main]
+#![feature(maybe_uninit_slice)]
 
-use core::arch::global_asm;
+use core::{arch::global_asm, mem::MaybeUninit};
 
-use rille::syscalls;
+use rille::{
+    capability::{Captr, Endpoint},
+    syscalls,
+};
 use rille_user::{malloc::LinkedListAlloc, sync::once_cell::OnceCell};
 
 global_asm!(
@@ -38,8 +42,14 @@ done_clear_bss:
 static GLOBAL_ALLOC: OnceCell<LinkedListAlloc> = OnceCell::new();
 
 #[no_mangle]
-unsafe extern "C" fn entry() -> ! {
+unsafe extern "C" fn entry(ep: Endpoint, n_pages: usize) -> ! {
+    let mut job = Captr::null();
+
+    ep.recv_with_regs(Some(&mut job)).unwrap();
+
     syscalls::debug::debug_dump_root();
+    syscalls::debug::debug_cap_slot(job.into_raw()).unwrap();
+
     loop {
         core::arch::asm!("nop");
     }
@@ -49,5 +59,14 @@ unsafe extern "C" fn entry() -> ! {
 unsafe fn panic_handler(_: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         core::arch::asm!("nop")
+    }
+}
+
+struct DebugPrint;
+
+impl core::fmt::Write for DebugPrint {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        syscalls::debug::debug_print_string(s);
+        Ok(())
     }
 }
