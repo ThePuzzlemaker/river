@@ -8,7 +8,7 @@ use core::{
     cmp,
     mem::{self, MaybeUninit},
     num::NonZeroU64,
-    slice,
+    ptr, slice,
     sync::atomic::AtomicU64,
 };
 
@@ -19,12 +19,11 @@ use alloc::{
 };
 use atomic::Ordering;
 use rille::{
-    addr::{Identity, Kernel, VirtualConst},
+    addr::{Identity, Virtual, VirtualConst},
     capability::{
         self,
-        paging::{BasePage, DynLevel, GigaPage, MegaPage, PageSize, PageTableFlags, PagingLevel},
-        AnyCap, CapError, CapResult, CapRights, CapabilityType, Empty, MessageHeader,
-        UserRegisters,
+        paging::{BasePage, DynLevel, GigaPage, MegaPage, PageTableFlags, PagingLevel},
+        AnyCap, CapError, CapResult, CapRights, CapabilityType, MessageHeader, UserRegisters,
     },
     units::StorageUnits,
 };
@@ -32,10 +31,8 @@ use rille::{
 use crate::{
     asm::{self, InterruptDisabler},
     capability::{
-        captbl::Captbl,
-        slotref::{SlotRef, SlotRefMut},
-        CapToOwned, Endpoint, InterruptHandlerCap, InterruptPoolCap, Notification, NotificationCap,
-        Page, PageCap, Thread, ThreadProtected, ThreadState, WaitQueue,
+        CapToOwned, Endpoint, InterruptHandlerCap, InterruptPoolCap, Job, JobCap, Notification,
+        NotificationCap, Page, PageCap, Thread, ThreadProtected, ThreadState, WaitQueue,
     },
     hart_local::LOCAL_HART,
     kalloc::{self, phys::PMAlloc},
@@ -43,12 +40,12 @@ use crate::{
     plic::PLIC,
     print, println,
     sched::Scheduler,
-    symbol,
     sync::{SpinMutex, SpinRwLock},
+    trampoline::Trapframe,
 };
 
 pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
-    //crate::println!("{:#x?}", _thread.private.lock().captbl);
+    crate::println!("{:#x?}", thread.job.captbl);
     let (free, total) = {
         let pma = PMAlloc::get();
         (pma.num_free_pages(), pma.num_pages())
@@ -70,75 +67,28 @@ pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Res
 pub fn sys_debug_cap_identify(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
-    tbl: u64,
     index: u64,
 ) -> Result<CapabilityType, CapError> {
-    let (tbl, index) = (tbl as usize, index as usize);
+    let index = index as usize;
 
-    let root_hdr = &thread
-        .private
-        .lock()
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr_lock = root_hdr.read();
 
-    let tbl = if tbl == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(tbl)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-
-    let slot = tbl.get::<AnyCap>(index)?;
+    let slot = root_hdr_lock.get::<AnyCap>(index)?;
     Ok(slot.cap.cap_type())
 }
 
 pub fn sys_debug_cap_slot(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
-    tbl: u64,
     index: u64,
 ) -> Result<(), CapError> {
-    let (tbl, index) = (tbl as usize, index as usize);
+    let index = index as usize;
 
-    let root_hdr = &thread
-        .private
-        .lock()
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)
-        .map(|x| {
-            println!("present 1");
-            x
-        })?;
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr_lock = root_hdr.read();
 
-    let tbl = if tbl == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(tbl)
-            .map(|x| {
-                println!("present 2");
-                x
-            })?
-            .to_owned_cap()
-            .upgrade()
-            .map(|x| {
-                println!("present 3");
-                x
-            })
-            .ok_or(CapError::NotPresent)?
-    };
-
-    let slot = tbl.get::<AnyCap>(index).map(|x| {
-        println!("present 4");
-        x
-    })?;
+    let slot = root_hdr_lock.get::<AnyCap>(index)?;
     println!("{:#x?}", slot);
 
     Ok(())
@@ -181,352 +131,143 @@ pub fn sys_debug_print(
     print!("{}", s);
 }
 
-pub fn sys_copy_deep(
-    thread: Arc<Thread>,
-    _intr: InterruptDisabler,
-    from_tbl_ref: u64,
-    from_tbl_index: u64,
-    from_index: u64,
-    into_tbl_ref: u64,
-    into_tbl_index: u64,
-    into_index: u64,
-) -> Result<(), CapError> {
-    let from_tbl_ref = from_tbl_ref as usize;
-    let from_tbl_index = from_tbl_index as usize;
-    let from_index = from_index as usize;
-    let into_tbl_ref = into_tbl_ref as usize;
-    let into_tbl_index = into_tbl_index as usize;
-    let into_index = into_index as usize;
-
-    let private = thread.private.lock();
-
-    let root_hdr = &private
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
-
-    let from_tbl_ref = if from_tbl_ref == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(from_tbl_ref)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-
-    let from_tbl_index = from_tbl_ref
-        .get::<capability::Captbl>(from_tbl_index)?
-        .to_owned_cap()
-        .upgrade()
-        .ok_or(CapError::NotPresent)?;
-    drop(from_tbl_ref);
-
-    let into_tbl_ref = if into_tbl_ref == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(into_tbl_ref)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-
-    let into_tbl_index = into_tbl_ref
-        .get::<capability::Captbl>(into_tbl_index)?
-        .to_owned_cap()
-        .upgrade()
-        .ok_or(CapError::NotPresent)?;
-    drop(into_tbl_ref);
-
-    if from_tbl_index == into_tbl_index && from_index == into_index {
-        // Captrs are aliased, this is a no-op.
-        return Ok(());
-    }
-
-    let into_index = into_tbl_index.get_mut::<Empty>(into_index)?;
-
-    let from_index = from_tbl_index.get_mut::<AnyCap>(from_index)?;
-
-    // We don't need to call copy_hook here since replace handles that
-    // for us.
-    let mut _into_index = into_index.replace(from_index.to_owned_cap());
-
-    Ok(())
-}
-
 pub fn sys_grant(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
-    from_table: u64,
     from_index: u64,
-    into_table: u64,
-    into_index: u64,
     rights: CapRights,
     badge: u64,
-) -> CapResult<()> {
-    let (from_table, from_index, into_table, into_index) = (
-        from_table as usize,
-        from_index as usize,
-        into_table as usize,
-        into_index as usize,
-    );
-    let (from_table_, from_index_, into_table_, into_index_) =
-        (from_table, from_index, into_table, into_index);
+) -> CapResult<u64> {
+    let from_index = from_index as usize;
 
-    let private = thread.private.lock();
-
-    let root_hdr = &private
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
-
-    let from_table = if from_table == 0 {
-        root_hdr.clone()
-    } else {
+    let root_hdr = thread.job.captbl.clone();
+    let from_index = {
         root_hdr
-            .get::<capability::Captbl>(from_table)?
+            .read()
+            .get_mut::<AnyCap>(from_index)?
             .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
     };
 
-    let into_table = if into_table == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(into_table)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-
-    if from_table_ == into_table_ && from_index_ == into_index_ {
-        let mut into = into_table.get_mut::<AnyCap>(into_index)?;
-        // Captrs are aliased, we just need to mutate.
-        into.set_badge(NonZeroU64::new(badge));
-        into.update_rights(rights);
-        return Ok(());
-    }
-
-    let from = from_table.get_mut::<AnyCap>(from_index)?;
-    let into = into_table.get_mut::<Empty>(into_index)?;
+    let mut into_table = root_hdr.write();
+    let captr = into_table.next_slot();
+    let into_index = into_table.get_or_insert_mut(captr)?;
 
     // We don't need to call copy_hook here since replace handles that
     // for us.
-    let mut into = into.replace(from.to_owned_cap());
-
+    let mut into = into_index.replace(from_index);
     // TODO: badge validation
     into.set_badge(NonZeroU64::new(badge));
     into.update_rights(rights);
 
-    Ok(())
+    Ok(captr as u64)
 }
 
-pub fn sys_swap(
-    thread: Arc<Thread>,
-    _intr: InterruptDisabler,
-    cap1_table: u64,
-    cap1_index: u64,
-    cap2_table: u64,
-    cap2_index: u64,
-) -> Result<(), CapError> {
-    let (cap1_table, cap1_index, cap2_table, cap2_index) = (
-        cap1_table as usize,
-        cap1_index as usize,
-        cap2_table as usize,
-        cap2_index as usize,
-    );
+pub fn sys_delete(thread: Arc<Thread>, _intr: InterruptDisabler, index: u64) -> CapResult<()> {
+    let index = index as usize;
 
-    let private = thread.private.lock();
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr_lock = root_hdr.read();
 
-    let root_hdr = &private
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
-
-    if cap1_table == cap2_table && cap1_index == cap2_index {
-        // Captrs are aliased, this is a no-op
-        return Ok(());
-    }
-
-    let cap1_table = if cap1_table == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(cap1_table)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-
-    let cap2_table = if cap2_table == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(cap2_table)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-
-    let cap1 = cap1_table.get_mut::<AnyCap>(cap1_index)?;
-    let cap2 = cap2_table.get_mut::<AnyCap>(cap2_index)?;
-
-    cap1.swap(cap2);
-
-    Ok(())
-}
-
-pub fn sys_delete(
-    thread: Arc<Thread>,
-    _intr: InterruptDisabler,
-    table: u64,
-    index: u64,
-) -> CapResult<()> {
-    let (table, index) = (table as usize, index as usize);
-
-    let private = thread.private.lock();
-
-    let root_hdr = &private
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
-
-    let table = if table == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(table)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
-    let slot = table.get_mut::<AnyCap>(index)?;
+    let slot = root_hdr_lock.get_mut::<AnyCap>(index)?;
 
     let _ = slot.delete();
 
     Ok(())
 }
 
-pub fn sys_allocate_many(
+// pub fn sys_create_object(
+//     thread: Arc<Thread>,
+//     _intr: InterruptDisabler,
+//     cap_type: CapabilityType,
+//     size: u64,
+// ) -> Result<u64, CapError> {
+//     let size = size as u8;
+
+//     let private = thread.private.lock();
+
+//     let root_hdr = &private
+//         .captbl
+//         .as_ref()
+//         .cloned()
+//         .ok_or(CapError::NotPresent)?;
+
+//     let mut into_index = root_hdr.write();
+//     let captr = into_index.next_slot();
+
+//     match cap_type {
+//         CapabilityType::Page => {
+//             let slot = into_index.get_or_insert_mut(captr)?;
+//             perform_page_alloc(size, slot)?;
+//         }
+//         CapabilityType::PgTbl => {
+//             let slot = into_index.get_or_insert_mut(captr)?;
+//             perform_pgtbl_alloc(slot)?;
+//         }
+//         CapabilityType::Thread => {
+//             let slot = into_index.get_or_insert_mut(captr)?;
+//             perform_thread_alloc(slot)?;
+//         }
+//         CapabilityType::Notification => {
+//             let slot = into_index.get_or_insert_mut(captr)?;
+//             perform_notification_alloc(slot)?;
+//         }
+
+//         CapabilityType::Endpoint => {
+//             let slot = into_index.get_or_insert_mut(captr)?;
+//             perform_endpoint_alloc(slot)?;
+//         }
+
+//         _ => return Err(CapError::InvalidOperation),
+//     }
+
+//     Ok(captr as u64)
+// }
+
+pub fn sys_notification_create(thread: Arc<Thread>, _intr: InterruptDisabler) -> CapResult<u64> {
+    let root_hdr = thread.job.captbl.clone();
+    let mut root_hdr = root_hdr.write();
+    let captr = root_hdr.next_slot();
+
+    let slot = root_hdr.get_or_insert_mut(captr)?;
+
+    let _ = slot.replace(Arc::new(Notification {
+        word: AtomicU64::new(0),
+        wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
+    }));
+
+    Ok(captr as u64)
+}
+
+pub fn sys_job_create(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
-    into_ref: u64,
-    into_index: u64,
-    starting_at: u64,
-    count: u64,
-    cap_type: CapabilityType,
-    size: u64,
-) -> Result<(), CapError> {
-    let (into_ref, into_index, starting_at, count) = (
-        into_ref as usize,
-        into_index as usize,
-        starting_at as usize,
-        count as usize,
-    );
-    let size = size as u8;
+    parent: u64,
+) -> CapResult<u64> {
+    let parent = parent as usize;
 
-    let private = thread.private.lock();
-
-    let root_hdr = &private
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
-
-    let into_ref = if into_ref == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(into_ref)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
+    let root_hdr = thread.job.captbl.clone();
+    let parent = {
+        let root_hdr = root_hdr.read();
+        let job = root_hdr.get::<JobCap>(parent)?;
+        job.cap.job().unwrap().clone()
     };
 
-    let into_index = into_ref
-        .get::<capability::Captbl>(into_index)?
-        .to_owned_cap()
-        .upgrade()
-        .ok_or(CapError::NotPresent)?;
+    let mut root_hdr = root_hdr.write();
+    let captr = root_hdr.next_slot();
 
-    match cap_type {
-        CapabilityType::Empty => {}
-        CapabilityType::Captbl => {
-            for i in 0..count {
-                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_captbl_alloc(size, slot)?;
-            }
-        }
-        CapabilityType::Page => {
-            for i in 0..count {
-                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_page_alloc(size, slot)?;
-            }
-        }
-        CapabilityType::PgTbl => {
-            for i in 0..count {
-                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_pgtbl_alloc(slot)?;
-            }
-        }
-        CapabilityType::Thread => {
-            for i in 0..count {
-                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_thread_alloc(slot)?;
-            }
-        }
-        CapabilityType::Notification => {
-            for i in 0..count {
-                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_notification_alloc(slot)?;
-            }
-        }
+    let slot = root_hdr.get_or_insert_mut(captr)?;
 
-        CapabilityType::Endpoint => {
-            for i in 0..count {
-                let slot = into_index.get_mut::<Empty>(starting_at + i)?;
-                perform_endpoint_alloc(slot)?;
-            }
-        }
+    let _ = slot.replace(Job::new(Some(parent)).ok_or(CapError::InvalidOperation)?);
 
-        _ => return Err(CapError::InvalidOperation),
-    }
-
-    Ok(())
+    Ok(captr as u64)
 }
 
-fn perform_captbl_alloc(n_slots_log2: u8, slot: SlotRefMut<'_, Empty>) -> Result<(), CapError> {
-    let size_bytes_log2 = n_slots_log2 + 6;
-    if !(12..=64).contains(&size_bytes_log2) {
-        return Err(CapError::InvalidSize);
-    }
-    let size_bytes = 1 << size_bytes_log2;
-
-    let ptr = {
-        let mut pma = PMAlloc::get();
-        pma.allocate(kalloc::phys::what_order(size_bytes))
-    };
-
-    if ptr.is_none() {
-        return Err(CapError::NotEnoughResources);
-    }
-
-    let ptr = ptr.unwrap();
-
-    // SAFETY: This captbl is valid as the memory has been zeroed (by
-    // the invariants of PMAlloc), and is of the proper size.
-    let _ = slot.replace(unsafe { Captbl::new(ptr.into_virt(), n_slots_log2) }.downgrade());
-
-    Ok(())
-}
-
-fn perform_page_alloc(size_log2: u8, slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
+pub fn sys_page_create(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    size_log2: u64,
+) -> CapResult<u64> {
+    let size_log2 = size_log2 as u8;
     if ![
         BasePage::PAGE_SIZE_LOG2 as u8,
         MegaPage::PAGE_SIZE_LOG2 as u8,
@@ -537,28 +278,35 @@ fn perform_page_alloc(size_log2: u8, slot: SlotRefMut<'_, Empty>) -> CapResult<(
         return Err(CapError::InvalidSize);
     }
 
+    let root_hdr = &thread.job.captbl;
+
+    let mut root_hdr = root_hdr.write();
+    let captr = root_hdr.next_slot();
+
+    let slot = root_hdr.get_or_insert_mut(captr)?;
+
     let size_bytes = 1 << size_log2;
 
     let ptr = {
         let mut pma = PMAlloc::get();
         pma.allocate(kalloc::phys::what_order(size_bytes))
-    };
-
-    if ptr.is_none() {
-        return Err(CapError::NotEnoughResources);
     }
+    .expect("out of memory");
 
-    let ptr = ptr.unwrap();
-
-    // SAFETY: The page is valid as the memory has been zeroed (by the
-    // invariants of PMAlloc) and it is of the proper size.
+    // SAFETY: This page is valid as the memory has been
+    // zeroed (by the invariants of PMAlloc, TODO: check
+    // this), and it is of the proper size.
     let _ = slot.replace(unsafe { Page::new(ptr, size_log2) });
 
-    Ok(())
+    Ok(captr as u64)
 }
 
-fn perform_pgtbl_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
-    use crate::paging::PageTableFlags as KernelFlags;
+pub fn sys_pgtbl_create(thread: Arc<Thread>, _intr: InterruptDisabler) -> CapResult<u64> {
+    let root_hdr = thread.job.captbl.clone();
+    let mut root_hdr = root_hdr.write();
+    let captr = root_hdr.next_slot();
+
+    let slot = root_hdr.get_or_insert_mut(captr)?;
 
     // SAFETY: The page is zeroed and thus is well-defined and valid.
     let pgtbl =
@@ -566,46 +314,25 @@ fn perform_pgtbl_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
     let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
 
-    let trampoline_virt =
-        VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
-
-    pgtbl.map(
-        trampoline_virt.into_phys().into_identity(),
-        VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
-        KernelFlags::VAD | KernelFlags::RX,
-        PageSize::Base,
-    );
-
     let _ = slot.replace(pgtbl);
 
-    Ok(())
+    Ok(captr as u64)
 }
 
-fn perform_thread_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
-    let thread = Thread::new(String::new(), None, None);
+pub fn sys_endpoint_create(thread: Arc<Thread>, _intr: InterruptDisabler) -> CapResult<u64> {
+    let root_hdr = thread.job.captbl.clone();
+    let mut root_hdr = root_hdr.write();
+    let captr = root_hdr.next_slot();
 
-    let _ = slot.replace(thread);
+    let slot = root_hdr.get_or_insert_mut(captr)?;
 
-    Ok(())
-}
-
-fn perform_notification_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
-    let _ = slot.replace(Arc::new(Notification {
-        word: AtomicU64::new(0),
-        wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
-    }));
-
-    Ok(())
-}
-
-fn perform_endpoint_alloc(slot: SlotRefMut<'_, Empty>) -> CapResult<()> {
     let _ = slot.replace(Arc::new(Endpoint {
         recv_wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
         send_wait_queue: Arc::new(SpinMutex::new(WaitQueue::new(None))),
         reply_cap: SpinMutex::new(None),
     }));
 
-    Ok(())
+    Ok(captr as u64)
 }
 
 pub fn sys_page_map(
@@ -618,18 +345,12 @@ pub fn sys_page_map(
 ) -> CapResult<()> {
     let (from_page, into_pgtbl) = (from_page as usize, into_pgtbl as usize);
 
-    let private = thread.private.lock();
-
-    let root_hdr = &private
-        .captbl
-        .as_ref()
-        .cloned()
-        .ok_or(CapError::NotPresent)?;
-
+    let root_hdr = thread.job.captbl.clone();
     if from_page == into_pgtbl {
         return Err(CapError::InvalidOperation);
     }
 
+    let root_hdr = root_hdr.read();
     let mut from_page = root_hdr.get_mut::<capability::paging::Page<DynLevel>>(from_page)?;
     let mut into_pgtbl = root_hdr.get_mut::<capability::paging::PageTable>(into_pgtbl)?;
 
@@ -644,10 +365,10 @@ pub fn sys_thread_suspend(
     thread_cap: u64,
 ) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
+
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
     thread_cap.suspend();
@@ -661,10 +382,9 @@ pub fn sys_thread_resume(
     thread_cap: u64,
 ) -> CapResult<()> {
     let thread_cap = thread_cap as usize;
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
@@ -673,44 +393,92 @@ pub fn sys_thread_resume(
     Ok(())
 }
 
+pub fn sys_thread_start(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    thread_cap: u64,
+    entry: u64,
+    stack: u64,
+    arg1: u64,
+    arg2: u64,
+) -> CapResult<()> {
+    let thread_cap = thread_cap as usize;
+
+    let root_hdr = &thread.job.captbl;
+
+    let thread_cap = {
+        let root_hdr = root_hdr.read();
+        let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
+        thread_cap.cap.thread().unwrap().clone()
+    };
+
+    // TODO: make sure this thread hasn't been run to begin with.
+    if thread_cap.private.lock().state != ThreadState::Suspended {
+        return Err(CapError::InvalidOperation);
+    }
+
+    let cap = {
+        let root_hdr = root_hdr.read();
+
+        root_hdr
+            .get::<AnyCap>(arg1 as usize)
+            .ok()
+            .map(|x| (x.to_owned_cap(), x.badge, x.rights))
+    };
+
+    let captr = if let Some((cap, badge, rights)) = cap {
+        let mut captbl = thread_cap.job.captbl.write();
+        let captr = captbl.next_slot();
+        let mut slot = captbl.get_or_insert_mut(captr).unwrap().replace(cap);
+        slot.set_badge(badge);
+        slot.update_rights(rights);
+        captr
+    } else {
+        0
+    };
+
+    let mut trapframe = thread_cap.trapframe.lock();
+    let trapframe = &mut **trapframe;
+    trapframe.user_epc = entry;
+    trapframe.sp = stack;
+    trapframe.a0 = captr as u64;
+    trapframe.a1 = arg2;
+
+    let cont = {
+        let private = thread_cap.private.lock();
+        private.root_pgtbl.is_some()
+    };
+
+    if !cont {
+        return Err(CapError::InvalidOperation);
+    }
+
+    thread_cap.private.lock().state = ThreadState::Runnable;
+    Scheduler::enqueue_dl(&thread_cap, None, &mut thread_cap.private.lock());
+
+    Ok(())
+}
+
 pub fn sys_thread_configure(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
     thread_cap: u64,
-    captbl: u64,
     pgtbl: u64,
     ipc_buffer: u64,
 ) -> CapResult<()> {
-    let (thread_cap, captbl, pgtbl, ipc_buffer) = (
-        thread_cap as usize,
-        captbl as usize,
-        pgtbl as usize,
-        ipc_buffer as usize,
-    );
+    let (thread_cap, pgtbl, ipc_buffer) =
+        (thread_cap as usize, pgtbl as usize, ipc_buffer as usize);
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr_lock = root_hdr.read();
 
-    let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
-    let captbl = if captbl == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(captbl)?
-            .cap
-            .captbl()
-            .unwrap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
+    let thread_cap = root_hdr_lock.get::<capability::Thread>(thread_cap)?;
 
     let pgtbl = if pgtbl == 0 {
         let private = thread.private.lock();
         private.root_pgtbl.as_ref().unwrap().clone()
     } else {
-        root_hdr
+        root_hdr_lock
             .get::<capability::paging::PageTable>(pgtbl)?
             .cap
             .pgtbl()
@@ -721,7 +489,7 @@ pub fn sys_thread_configure(
     let ipc_buffer = if ipc_buffer == 0 {
         None
     } else {
-        root_hdr
+        root_hdr_lock
             .get::<capability::paging::Page<DynLevel>>(ipc_buffer)
             .ok()
     };
@@ -735,9 +503,9 @@ pub fn sys_thread_configure(
         {
             return Err(CapError::InvalidOperation);
         }
-        thread_cap.configure(captbl, pgtbl, Some(ipc_buffer.cap.page().unwrap().phys))?;
+        thread_cap.configure(pgtbl, Some(ipc_buffer.cap.page().unwrap().phys))?;
     } else {
-        thread_cap.configure(captbl, pgtbl, None)?;
+        thread_cap.configure(pgtbl, None)?;
     }
 
     Ok(())
@@ -754,14 +522,29 @@ pub fn sys_thread_write_registers(
         VirtualConst::<UserRegisters, Identity>::from_usize(regs_vaddr as usize),
     );
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
+    let Some((addr, flags)) = thread
+        .private
+        .lock()
+        .root_pgtbl
+        .as_ref()
+        .unwrap()
+        .walk(regs_vaddr)
+    else {
+        return Err(CapError::InvalidOperation);
+    };
+    if !flags.contains(
+        crate::paging::PageTableFlags::USER
+            | crate::paging::PageTableFlags::READ
+            | crate::paging::PageTableFlags::VALID,
+    ) {
+        return Err(CapError::InvalidOperation);
+    }
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
-    thread_cap.write_registers(regs_vaddr)?;
+    thread_cap.write_registers(addr.into_virt())?;
 
     Ok(())
 }
@@ -774,10 +557,8 @@ pub fn sys_notification_signal(
 ) -> CapResult<()> {
     let notification = notification as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let notification = root_hdr.get::<NotificationCap>(notification)?;
 
@@ -787,8 +568,6 @@ pub fn sys_notification_signal(
         notification.badge().map_or(0, NonZeroU64::get),
         Ordering::Relaxed,
     );
-    //    log::trace!("signal word={word:x?}");
-    log::trace!("wq={wq:?}");
     if let Some(thread) = wq.find_highest_thread() {
         *thread.blocked_on_wq.lock() = None;
         thread.prio_boost();
@@ -823,10 +602,8 @@ pub fn sys_notification_poll(
 ) -> CapResult<u64> {
     let notification = notification as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let notification = root_hdr.get::<NotificationCap>(notification)?;
 
@@ -840,48 +617,27 @@ pub fn sys_intr_pool_get(
     thread: Arc<Thread>,
     _intr: InterruptDisabler,
     pool: u64,
-    into_table: u64,
-    into_index: u64,
     irq: u64,
-) -> CapResult<()> {
-    let (pool, into_table, into_index, irq) = (
-        pool as usize,
-        into_table as usize,
-        into_index as usize,
-        irq as u16,
-    );
+) -> CapResult<u64> {
+    let (pool, irq) = (pool as usize, irq as u16);
 
     if irq > 1023 || irq == 0 {
         return Err(CapError::InvalidOperation);
     }
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
-
-    if into_table == 0 && pool == into_index {
-        // Captrs are aliased, this is invalid.
-        return Err(CapError::InvalidOperation);
-    }
-
-    let into_table = if into_table == 0 {
-        root_hdr.clone()
-    } else {
-        root_hdr
-            .get::<capability::Captbl>(into_table)?
-            .to_owned_cap()
-            .upgrade()
-            .ok_or(CapError::NotPresent)?
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let mut root_hdr = root_hdr.write();
 
     let mut pool = root_hdr.get_mut::<InterruptPoolCap>(pool)?;
-    let into_index = into_table.get_mut::<capability::Empty>(into_index)?;
-
     let handler = pool.make_handler(irq)?;
+    drop(pool);
+
+    let captr = root_hdr.next_slot();
+    let into_index = root_hdr.get_or_insert_mut(captr)?;
+
     let _ = into_index.replace(handler);
 
-    Ok(())
+    Ok(captr as u64)
 }
 
 pub fn sys_intr_handler_ack(
@@ -891,10 +647,8 @@ pub fn sys_intr_handler_ack(
 ) -> CapResult<()> {
     let handler = handler as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let handler = root_hdr.get::<InterruptHandlerCap>(handler)?;
 
@@ -915,10 +669,8 @@ pub fn sys_intr_handler_bind(
         return Err(CapError::InvalidOperation);
     }
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let handler = root_hdr.get_mut::<InterruptHandlerCap>(handler)?;
     let notification = root_hdr.get::<NotificationCap>(notification)?;
@@ -947,10 +699,8 @@ pub fn sys_intr_handler_unbind(
 ) -> CapResult<()> {
     let handler = handler as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let handler = root_hdr.get::<InterruptHandlerCap>(handler)?;
 
@@ -973,10 +723,8 @@ pub fn sys_thread_set_priority(
         return Err(CapError::InvalidOperation);
     }
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
@@ -1015,10 +763,8 @@ pub fn sys_thread_set_ipc_buffer(
     let thread_cap = thread_cap as usize;
     let ipc_buffer = ipc_buffer as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
@@ -1068,10 +814,8 @@ pub fn sys_notification_wait(
 ) -> CapResult<u64> {
     let notification = notification as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let notification = root_hdr.get::<NotificationCap>(notification)?;
 
@@ -1112,10 +856,8 @@ pub fn sys_endpoint_recv(
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
     let endpoint = endpoint.cap.endpoint().unwrap();
@@ -1206,8 +948,8 @@ fn endpoint_recv(
     let src_slot = { sender.trapframe.lock().a3 };
     let dest_slot = { thread.trapframe.lock().a3 };
 
-    let sender_root = sender_private.captbl.clone().unwrap();
-    let receiver_root = private.captbl.clone().unwrap();
+    let sender_root = sender.job.captbl.clone();
+    let receiver_root = thread.job.captbl.clone();
 
     let hdr = if send_fastpath {
         private.send_fastpath.unwrap()
@@ -1215,16 +957,73 @@ fn endpoint_recv(
         MessageHeader::from_raw(sender.trapframe.lock().a2)
     };
 
-    if src_slot != 0 && dest_slot != 0 {
-        let src = sender_root.get::<AnyCap>(src_slot as usize).unwrap();
-        let slot = receiver_root
-            .get_mut::<AnyCap>(thread.trapframe.lock().a3 as usize)
-            .unwrap();
-        let slot = slot.delete();
-        let mut slot = slot.replace(src.to_owned_cap());
-        // TODO: cap rights here
-        slot.set_badge(src.badge);
-        slot.update_rights(src.rights);
+    'cap_transfer: {
+        if src_slot != 0 && dest_slot != 0 {
+            let src_addr = {
+                let Some(sender_pgtbl) = sender_private.root_pgtbl.as_ref() else {
+                    break 'cap_transfer;
+                };
+                let Some((src_slot, src_flags)) =
+                    sender_pgtbl.walk(VirtualConst::from_ptr(src_slot as *const usize))
+                else {
+                    break 'cap_transfer;
+                };
+                if src_flags.contains(
+                    crate::paging::PageTableFlags::READ
+                        | crate::paging::PageTableFlags::USER
+                        | crate::paging::PageTableFlags::VALID,
+                ) {
+                    src_slot.into_virt().into_ptr()
+                } else {
+                    break 'cap_transfer;
+                }
+            };
+            let dest_addr = {
+                let Some(receiver_pgtbl) = private.root_pgtbl.as_ref() else {
+                    break 'cap_transfer;
+                };
+                let Some((dest_slot, dest_flags)) =
+                    receiver_pgtbl.walk(VirtualConst::from_ptr(dest_slot as *const usize))
+                else {
+                    break 'cap_transfer;
+                };
+                if dest_flags.contains(
+                    crate::paging::PageTableFlags::WRITE
+                        | crate::paging::PageTableFlags::USER
+                        | crate::paging::PageTableFlags::VALID,
+                ) {
+                    dest_slot.into_virt().into_ptr()
+                } else {
+                    break 'cap_transfer;
+                }
+            };
+            if !src_addr.is_null()
+                && !dest_addr.is_null()
+                && src_addr.is_aligned()
+                && dest_addr.is_aligned()
+            {
+                // SAFETY: This address is valid.
+                let src_slot = unsafe { *src_addr };
+                // SAFETY: See above.
+                let dest_slot = unsafe { &mut *dest_addr.cast_mut() };
+                let (cap, badge, rights) = {
+                    let sender_root = sender_root.read();
+                    let Ok(cap) = sender_root.get_mut::<AnyCap>(src_slot) else {
+                        break 'cap_transfer;
+                    };
+                    (cap.to_owned_cap(), cap.badge, cap.rights)
+                };
+                let mut receiver_root = receiver_root.write();
+                let captr = receiver_root.next_slot();
+                if let Ok(slot) = receiver_root.get_or_insert_mut(captr) {
+                    let mut slot = slot.replace(cap);
+                    // TODO: cap rights here
+                    slot.set_badge(badge);
+                    slot.update_rights(rights);
+                }
+                *dest_slot = captr;
+            }
+        }
     }
 
     let len = cmp::min(hdr.length(), 4.kib() / mem::size_of::<u64>());
@@ -1313,10 +1112,8 @@ pub fn sys_endpoint_send(
 ) -> CapResult<()> {
     let endpoint = endpoint as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
     let endpoint = endpoint.cap.endpoint().unwrap();
@@ -1398,10 +1195,8 @@ pub fn sys_endpoint_reply(
 ) -> CapResult<()> {
     let base_endpoint = base_endpoint as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let base_endpoint = root_hdr.get::<capability::Endpoint>(base_endpoint)?;
     let base_endpoint = base_endpoint.cap.endpoint().unwrap();
@@ -1424,10 +1219,8 @@ pub fn sys_endpoint_call(
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 
-    let root_hdr = {
-        let private = thread.private.lock();
-        private.captbl.as_ref().unwrap().clone()
-    };
+    let root_hdr = thread.job.captbl.clone();
+    let root_hdr = root_hdr.read();
 
     let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
 
@@ -1452,4 +1245,74 @@ pub fn sys_endpoint_call(
     };
 
     Ok(hdr)
+}
+// TODO: somehow prevent the system from blocking completely if the
+// thread being sent to doesn't have an ipc buffer
+
+pub fn sys_job_create_thread(
+    thread: Arc<Thread>,
+    _intr: InterruptDisabler,
+    job: u64,
+    name_ptr: VirtualConst<u8, Identity>,
+    name_len: u64,
+) -> CapResult<u64> {
+    let job = job as usize;
+    let name_len = name_len as usize;
+
+    let root_hdr = thread.job.captbl.clone();
+
+    let private = thread.private.lock();
+
+    let root_hdr_lock = root_hdr.read();
+    let job = root_hdr_lock.get::<JobCap>(job)?.cap.job().unwrap().clone();
+
+    // TODO: revive copy_from_user.
+    if name_len >= 4usize.kib() - name_ptr.page_offset().into_usize() {
+        return Err(CapError::InvalidOperation);
+    }
+
+    let name = if name_ptr == VirtualConst::null() {
+        String::new()
+    } else {
+        let mut name = String::with_capacity(name_len);
+        let name_addr = 'addr: {
+            let Some(pgtbl) = private.root_pgtbl.as_ref() else {
+                break 'addr ptr::null();
+            };
+            let Some((addr, flags)) = pgtbl.walk(name_ptr) else {
+                break 'addr ptr::null();
+            };
+            if flags.contains(
+                crate::paging::PageTableFlags::READ
+                    | crate::paging::PageTableFlags::USER
+                    | crate::paging::PageTableFlags::VALID,
+            ) {
+                addr.into_virt().into_ptr()
+            } else {
+                break 'addr ptr::null();
+            }
+        };
+
+        if !name_addr.is_null() {
+            // SAFETY: This memory must be valid for up to the length we determined.
+            let slice = core::str::from_utf8(unsafe { slice::from_raw_parts(name_addr, name_len) })
+                .map_err(|_| CapError::InvalidOperation)?;
+
+            // SAFETY: This memory is valid and initialized. We will validate UTF-8
+            name.push_str(slice);
+        }
+
+        name
+    };
+
+    drop(root_hdr_lock);
+    let mut root_hdr = root_hdr.write();
+
+    let captr = root_hdr.next_slot();
+
+    let slot = root_hdr.get_or_insert_mut(captr)?;
+
+    let _ = slot.replace(Thread::new(name, None, job));
+
+    Ok(captr as u64)
 }

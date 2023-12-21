@@ -32,34 +32,35 @@
 
 use core::{
     cmp,
-    convert::Infallible,
     fmt::{self, Debug},
     hash::{self, Hash},
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Deref,
 };
 
 use num_enum::{FromPrimitive, IntoPrimitive};
 
-use crate::syscalls;
+use crate::{
+    addr::{Identity, VirtualConst, VirtualMut},
+    syscalls::{self, SyscallNumber},
+};
 
 use self::paging::{PageTable, PageTableFlags};
 
 pub mod paging;
 
 /// This trait is implemented by all of the opaque types representing
-/// objects in the kernel. [`Captr`]s have a generic type parameter
-/// `C: Capability` to ensure type-safety of typical `Captr` usage.
-pub trait Capability: Copy + Clone + Debug + private::Sealed {
-    /// A value, with a maximum size of `u64` by convention, that
-    /// provides size information for dynamically-sized kernel objects
-    /// when retyping.
-    type AllocateSizeSpec;
+/// objects in the kernel.
+pub trait Capability: Copy + Clone + Debug + private::Sealed + Deref<Target = Captr> {
+    /// Convert a [`Captr`] to this capability type, without checking if
+    /// it is of the correct type.
+    fn from_captr(c: Captr) -> Self;
 
-    /// Convert a [`Self::AllocateSizeSpec`] into a [`usize`]. Because
-    /// of some funky type system stuff we don't just put an
-    /// [`Into<usize>`] bound on `AllocateSizeSpec`.
-    fn allocate_size_spec(spec: Self::AllocateSizeSpec) -> usize;
+    /// Convert this capability into its underlying [`Captr`].
+    fn into_captr(self) -> Captr {
+        *self
+    }
 
     /// What [`CapabilityType`] does this `Capability` correspond to?
     const CAPABILITY_TYPE: CapabilityType;
@@ -73,8 +74,6 @@ pub trait Capability: Copy + Clone + Debug + private::Sealed {
 pub enum CapabilityType {
     /// The [`Empty`] capability.
     Empty = 0,
-    /// Capability tables, or [`Captbl`]s.
-    Captbl = 1,
     /// [`PageTable`]s.
     PgTbl = 3,
     /// [`Page`][paging::Page]s that can be mapped into
@@ -84,9 +83,14 @@ pub enum CapabilityType {
     Thread = 5,
     /// [`Notification`]s.
     Notification = 6,
+    /// [`InterruptPool`]s.
     InterruptPool = 7,
+    /// [`InterruptHandler`]s.
     InterruptHandler = 8,
+    /// [`Endpoint`]s.
     Endpoint = 9,
+    /// [`Job`]s.
+    Job = 10,
     /// Any capability type `>=32` is undefined.
     #[num_enum(default)]
     Unknown = 32,
@@ -161,25 +165,16 @@ pub type CapResult<T> = Result<T, CapError>;
 /// [module-level documentation][self].
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub struct Captr<C: Capability> {
+pub struct Captr {
     inner: Option<NonZeroUsize>,
-    _marker: PhantomData<C>,
 }
 
-impl<C: Capability> Captr<C> {
-    /// Create a `Captr` from a given raw capability pointer,
-    /// without checking if it is valid or of the proper capability
-    /// type.
-    ///
-    /// # Safety
-    ///
-    /// The capability must be valid and of the type indicated by the
-    /// type parameter `C`.
+impl Captr {
+    /// Create a `Captr` from a given raw capability pointer.
     #[inline]
-    pub const unsafe fn from_raw_unchecked(inner: usize) -> Self {
+    pub const fn from_raw(inner: usize) -> Self {
         Self {
             inner: NonZeroUsize::new(inner),
-            _marker: PhantomData,
         }
     }
 
@@ -199,10 +194,7 @@ impl<C: Capability> Captr<C> {
     #[inline]
     /// Create a null `Captr`.
     pub const fn null() -> Self {
-        Self {
-            inner: None,
-            _marker: PhantomData,
-        }
+        Self { inner: None }
     }
 
     /// Offset a `Captr` by an [`isize`]. Note that this function may
@@ -213,7 +205,7 @@ impl<C: Capability> Captr<C> {
         let inner = self
             .inner
             .and_then(|x| NonZeroUsize::new(x.get().wrapping_add_signed(by)));
-        Self { inner, ..self }
+        Self { inner }
     }
 
     /// Offset a `Captr` by a [`usize`]. Note that this function may
@@ -225,169 +217,32 @@ impl<C: Capability> Captr<C> {
         let inner = self
             .inner
             .and_then(|x| NonZeroUsize::new(x.get().wrapping_add(by)));
-        Self { inner, ..self }
+        Self { inner }
     }
-}
-
-/// A `RemoteCaptr` is a capability pointer referenced to a child
-/// capability table of the current process, i.e. it consists of two
-/// capability pointers, one pointing to the [`Captbl`] it references
-/// from, and one indexed within that capability table.
-///
-/// When the reference table pointer is null, it refers to the root
-/// capability table of the current thread.
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub struct RemoteCaptr<C: Capability> {
-    reftbl: Captr<Captbl>,
-    index: Captr<C>,
-}
-
-impl<C: Capability> RemoteCaptr<C> {
-    /// Create a `RemoteCaptr` that refers to a capability within the
-    /// provided reference captbl (`reftbl`).
-    #[inline]
-    pub const fn remote(reftbl: Captr<Captbl>, index: Captr<C>) -> RemoteCaptr<C> {
-        Self { reftbl, index }
-    }
-
-    /// Create a `RemoteCaptr` that refers to a capability local to
-    /// the current thread's root capability table.
-    #[inline]
-    pub const fn local(index: Captr<C>) -> RemoteCaptr<C> {
-        Self::remote(Captr::null(), index)
-    }
-
-    /// Returns true if this `RemoteCaptr` is local, i.e. the
-    /// reference table `Captr` is null.
-    #[inline]
-    pub const fn is_local(self) -> bool {
-        self.reftbl.is_null()
-    }
-
-    /// Returns the local index of this `RemoteCaptr`.
-    #[inline]
-    pub const fn local_index(self) -> Captr<C> {
-        self.index
-    }
-
-    /// Returns the reference table index of this `RemoteCaptr`.
-    pub const fn reftbl(self) -> Captr<Captbl> {
-        self.reftbl
-    }
-}
-
-/// A capability table corresponds to the kernel's map from [`Captr`]
-/// indices to capability objects in the kernel. Additional metadata
-/// is associated with capabilities in the kernel as needed; most of
-/// which is not accessible to userspace code as it is not relevant
-/// there.
-///
-/// Captbls have a certain number of "slots" of [`Empty`]
-/// capabilities, where capabilities can be stored. By convention, the
-/// "null capability" (index 0) is always empty and it is prohibited
-/// to store a capability there. This is so the representation of an
-/// `Option<Captr<_>>` can be the same size as a `Captr<_>`.
-///
-/// Each slot in the capability table is 32 bytes wide. When
-/// calculating the size, the null capability is included as it is
-/// used internally in the kernel to store additional metadata about
-/// the captbl overall.
-#[derive(Copy, Clone, Debug)]
-pub struct Captbl(#[doc(hidden)] Infallible);
-
-impl Capability for Captbl {
-    type AllocateSizeSpec = CaptblSizeSpec;
-
-    fn allocate_size_spec(spec: Self::AllocateSizeSpec) -> usize {
-        spec.n_slots_log2
-    }
-
-    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Captbl;
-}
-
-/// Options for allocating from an [`Allocator`] capability into a
-/// [`Captbl`] capability.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct CaptblSizeSpec {
-    /// The base-2 logarithm of the number of slots of the new
-    /// [`Captbl`]. The overall byte size of the captbl is given as
-    /// follows: `2.pow(n_slots_log2) * 32`.
-    pub n_slots_log2: usize,
 }
 
 /// The empty capability corresponds to an empty slot in the
 /// capability table, into which any capability can be placed.
 #[derive(Copy, Clone, Debug)]
-pub struct Empty(#[doc(hidden)] Infallible);
+pub struct Empty(Captr);
+
+impl Deref for Empty {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
 
 impl Capability for Empty {
-    /// Allocators cannot allocate Empty capabilities.
-    type AllocateSizeSpec = Infallible;
-
-    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
-        0
-    }
-
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Empty;
-}
 
-impl RemoteCaptr<Captbl> {
-    /// Copy a capability in a potentially remote [`Captbl`] into
-    /// another slot in another potentially remote [`Captbl`].
-    ///
-    /// Note that `self` and `into` can refer to the same [`Captbl`].
-    ///    
-    /// # Errors
-    ///
-    /// If any capability was not present and was required,
-    /// [`CapError::NotPresent`] will be returned. If any capability
-    /// was of an invalid type, [`CapError::InvalidType`] is returned.
-    pub fn copy_deep<C: Capability>(
-        self,
-        from_index: Captr<C>,
-        into: RemoteCaptr<Captbl>,
-        into_index: Captr<Empty>,
-    ) -> CapResult<Captr<C>> {
-        syscalls::captbl::copy_deep(
-            self.reftbl().into_raw(),
-            self.local_index().into_raw(),
-            from_index.into_raw(),
-            into.reftbl().into_raw(),
-            into.local_index().into_raw(),
-            into_index.into_raw(),
-        )?;
-
-        // SAFETY: By the invariants of the copy_deep syscall, this is valid.
-        Ok(unsafe { Captr::from_raw_unchecked(into_index.into_raw()) })
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
     }
 }
 
-impl<C: Capability> RemoteCaptr<C> {
-    /// Split a `RemoteCaptr<C>` into a local `RemoteCaptr<Captbl>`
-    /// (from the `reftbl`) and a `Captr<C>`.
-    #[inline]
-    #[must_use]
-    pub const fn split(self) -> (RemoteCaptr<Captbl>, Captr<C>) {
-        (RemoteCaptr::local(self.reftbl), self.index)
-    }
-
-    /// Copy the capability referred to by this `RemoteCaptr` into
-    /// another empty slot, returning the new `RemoteCaptr`.
-    ///
-    /// # Errors
-    ///
-    /// If any capability was not present and was required,
-    /// [`CapError::NotPresent`] will be returned. If any capability
-    /// was of an invalid type, [`CapError::InvalidType`] is returned.
-    pub fn copy(self, into: RemoteCaptr<Empty>) -> CapResult<RemoteCaptr<C>> {
-        let (from, from_index) = self.split();
-        let (into, into_index) = into.split();
-        let res = from.copy_deep(from_index, into, into_index)?;
-        Ok(RemoteCaptr::remote(from.local_index(), res))
-    }
-
+/// Extension trait for the universal `captr_delete` syscall.
+pub trait DeleteExt {
     /// Remove the capability from the slot referred to by this
     /// `RemoteCaptr`. Children capabilities derived from it are not
     /// affected.
@@ -398,178 +253,15 @@ impl<C: Capability> RemoteCaptr<C> {
     /// # Errors
     ///
     /// TODO
-    pub fn delete(self) -> CapResult<RemoteCaptr<Empty>> {
-        syscalls::captbl::delete(self.reftbl().into_raw(), self.local_index().into_raw())?;
 
-        // SAFETY: We have just deleted the capability and succeeded,
-        // therefore it is empty.
-        Ok(RemoteCaptr::remote(self.reftbl(), unsafe {
-            Captr::from_raw_unchecked(self.local_index().into_raw())
-        }))
-    }
-
-    /// Atomically swap the capabilities referred to by two
-    /// `RemoteCaptr`s, potentially of different types.
-    ///
-    /// # Errors
-    ///
-    /// TODO
-    pub fn swap<C2: Capability>(
-        self,
-        other: RemoteCaptr<C2>,
-    ) -> CapResult<(RemoteCaptr<C2>, RemoteCaptr<C>)> {
-        syscalls::captbl::swap(
-            self.reftbl().into_raw(),
-            self.local_index().into_raw(),
-            other.reftbl().into_raw(),
-            other.local_index().into_raw(),
-        )?;
-
-        Ok((
-            RemoteCaptr::remote(
-                self.reftbl,
-                Captr {
-                    inner: self.index.inner,
-                    _marker: PhantomData,
-                },
-            ),
-            RemoteCaptr::remote(
-                self.reftbl,
-                Captr {
-                    inner: self.index.inner,
-                    _marker: PhantomData,
-                },
-            ),
-        ))
-    }
+    fn delete(self) -> CapResult<()>;
 }
 
-impl RemoteCaptr<Captbl> {
-    /// Allocate 1 or more capabilities.
-    ///
-    /// This will allocate `count` capabilities, putting the resulting
-    /// capabilities into the slots starting at `self[starting_at]`
-    /// to, but not including `self[starting_at + count]`. Note that
-    /// all these slots within this range must be [`Empty`]
-    /// capabilities.
-    ///
-    /// The resultant iterator provides [`Captr<C>`]'s over the range
-    /// `starting_at..(starting_at + count)` from the empty
-    /// `Captr<Empty>` range provided to the function.
-    ///
-    /// `size` and [`Capability::AllocateSizeSpec`] are used to
-    /// determine the size of dynamic objects. See the capability's
-    /// documentation for more information.
-    ///
-    /// # Errors
-    ///
-    /// - This function will return [`CapError::NotPresent`] if any
-    /// required capability was not present.
-    ///
-    /// - This function will return [`CapError::InvalidType`] if any
-    /// capability was not of the correct type.
-    ///
-    /// - This function will return [`CapError::InvalidOperation`] if
-    /// the capability requested cannot be allocated.
-    ///
-    /// - This function will return [`CapError::NotEnoughResources`]
-    /// if the capability table or allocator did not have enough space
-    /// for the requested capabilities.
-    ///
-    /// - This function will return [`CapError::InvalidSize`] if
-    /// `size` was invalid.
-    pub fn allocate_many<C: Capability>(
-        self,
-        starting_at: Captr<Empty>,
-        count: usize,
-        size: C::AllocateSizeSpec,
-    ) -> CapResult<AllocateIter<C>> {
-        syscalls::allocator::allocate_many(
-            self.reftbl().into_raw(),
-            self.local_index().into_raw(),
-            starting_at.into_raw(),
-            count,
-            C::CAPABILITY_TYPE,
-            C::allocate_size_spec(size),
-        )?;
+impl<C: Capability> DeleteExt for C {
+    fn delete(self) -> CapResult<()> {
+        syscalls::captr::delete(self.into_raw())?;
 
-        // SAFETY: We know that starting_at points to a valid
-        // capability due to the invariants of the retype_many
-        // syscall.
-        let starting_at = unsafe { Captr::from_raw_unchecked(starting_at.into_raw()) };
-
-        Ok(AllocateIter {
-            starting_at,
-            end: starting_at.add(count),
-        })
-    }
-
-    /// Allocate a capability.
-    ///
-    /// This will allocate 1 capability, putting the resulting
-    /// capability into the slot indexed by `self[at]`.
-    ///
-    /// The resultant [`Captr<C>`] is simply a casted version of `at`,
-    /// with the capability now ensured to be present.
-    ///
-    /// `size` and [`Capability::AllocateSizeSpec`] are used to
-    /// determine the size of dynamic objects. See the capability's
-    /// documentation for more information.
-    ///
-    /// # Errors
-    ///
-    /// TODO
-    pub fn allocate<C: Capability>(
-        self,
-        at: Captr<Empty>,
-        size: C::AllocateSizeSpec,
-    ) -> CapResult<Captr<C>> {
-        syscalls::allocator::allocate_many(
-            self.reftbl().into_raw(),
-            self.local_index().into_raw(),
-            at.into_raw(),
-            1,
-            C::CAPABILITY_TYPE,
-            C::allocate_size_spec(size),
-        )?;
-
-        // SAFETY: By the invariants of the retype_many syscall, this
-        // is valid.
-        let at = unsafe { Captr::from_raw_unchecked(at.into_raw()) };
-        Ok(at)
-    }
-}
-
-/// An iterator that provides the resulting [`Captr`]s from a
-/// [`Captr::<Allocator>::allocate_many`] invocation.
-#[derive(Clone, Debug)]
-pub struct AllocateIter<C: Capability> {
-    starting_at: Captr<C>,
-    end: Captr<C>,
-}
-
-impl<C: Capability> Iterator for AllocateIter<C> {
-    type Item = Captr<C>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.starting_at >= self.end {
-            None
-        } else {
-            let cap = self.starting_at;
-            self.starting_at = self.starting_at.add(1);
-            Some(cap)
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let n = self.end.into_raw() - self.starting_at.into_raw();
-        (n, Some(n))
-    }
-}
-
-impl<C: Capability> ExactSizeIterator for AllocateIter<C> {
-    fn len(&self) -> usize {
-        self.end.into_raw() - self.starting_at.into_raw()
+        Ok(())
     }
 }
 
@@ -582,25 +274,31 @@ impl<C: Capability> ExactSizeIterator for AllocateIter<C> {
 /// See [`Captr<Thread>`][Captr#impl-Captr<Thread>] for operations on
 /// this capability.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Thread {}
+#[repr(transparent)]
+pub struct Thread(Captr);
 
-impl Capability for Thread {
-    type AllocateSizeSpec = ();
-
-    fn allocate_size_spec((): Self::AllocateSizeSpec) -> usize {
-        0
+impl Deref for Thread {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
     }
-
-    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Thread;
 }
 
-impl Captr<Thread> {
+impl Capability for Thread {
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Thread;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
+}
+
+impl Thread {
     /// Suspend the thread referred to by this Captr.
     ///
     /// # Errors
     ///
     /// TODO
-    pub fn suspend(&self) -> CapResult<()> {
+    pub fn suspend(self) -> CapResult<()> {
         syscalls::thread::suspend(self.into_raw())
     }
 
@@ -620,7 +318,7 @@ impl Captr<Thread> {
     ///
     /// When resumed, the thread must not cause undefined behaviour
     /// with respect to the current thread.
-    pub unsafe fn resume(&self) -> CapResult<()> {
+    pub unsafe fn resume(self) -> CapResult<()> {
         syscalls::thread::resume(self.into_raw())
     }
 
@@ -636,23 +334,17 @@ impl Captr<Thread> {
     ///
     /// # Safety
     ///
-    /// The capabiltiy table and page table, when configured for the
+    /// The capability table and page table, when configured for the
     /// thread, must not cause the thread to perform undefined
     /// behaviour with respect to the running thread when resumed.
     pub unsafe fn configure(
-        &self,
-        captbl: Captr<Captbl>,
-        pgtbl: Captr<PageTable>,
-        ipc_buffer: paging::PageCaptr<paging::BasePage>,
+        self,
+        pgtbl: PageTable,
+        ipc_buffer: paging::Page<paging::BasePage>,
     ) -> CapResult<()> {
         // SAFETY: By invariants.
         unsafe {
-            syscalls::thread::configure(
-                self.into_raw(),
-                captbl.into_raw(),
-                pgtbl.into_raw(),
-                ipc_buffer.into_raw(),
-            )
+            syscalls::thread::configure(self.into_raw(), pgtbl.into_raw(), ipc_buffer.into_raw())
         }
     }
 
@@ -671,8 +363,57 @@ impl Captr<Thread> {
     /// The registers, when written to the thread, must not cause the
     /// thread to perform undefined behaviour with respect to the
     /// running thread when resumed.
-    pub unsafe fn write_registers(&self, registers: &UserRegisters) -> CapResult<()> {
+    pub unsafe fn write_registers(self, registers: &UserRegisters) -> CapResult<()> {
         syscalls::thread::write_registers(self.into_raw(), registers as *const _)
+    }
+
+    /// Write initial registers to an unstarted thread, then start it.
+    ///
+    /// The thread will be started with its `pc` from `entry` and `sp`
+    /// from `stack`.
+    ///
+    /// The first argument (`arg1`), if non-null, will be the `Captr`
+    /// of an initial capability used to bootstrap the
+    /// process. Typically this should be an [`Endpoint`] capability,
+    /// to allow sending further capabilities to this process. This
+    /// capability will be sent to the process and the `Captr` of the
+    /// capability will be put in the `a0` register.
+    ///
+    /// Note that if no capability is provided, and this thread does
+    /// not share a [`Job`] with any other threads, no capabilities
+    /// will be able to be sent to this job.
+    ///
+    /// The second argument (`arg2`) will be put in the `a1` register.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    ///
+    /// # Safety
+    ///
+    /// When started with these values and in its context, this thread
+    /// must not cause any undefined behaviour.
+    pub unsafe fn start(
+        self,
+        entry: VirtualConst<u8, Identity>,
+        stack: VirtualMut<u8, Identity>,
+        arg1: Captr,
+        arg2: u64,
+    ) -> CapResult<()> {
+        let res = syscalls::ecall5(
+            SyscallNumber::ThreadStart,
+            self.into_raw() as u64,
+            entry.into(),
+            stack.into(),
+            arg1.into_raw() as u64,
+            arg2,
+        );
+
+        if let Err(e) = res {
+            Err(e.into())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -685,19 +426,38 @@ impl Captr<Thread> {
 /// See [`Captr<Notification>`][Captr#impl-Captr<Notification>] for
 /// operations on this capability.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Notification {}
+pub struct Notification(Captr);
 
-impl Capability for Notification {
-    type AllocateSizeSpec = ();
-
-    fn allocate_size_spec((): Self::AllocateSizeSpec) -> usize {
-        0
+impl Deref for Notification {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
     }
-
-    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Notification;
 }
 
-impl Captr<Notification> {
+impl Capability for Notification {
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Notification;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
+}
+
+impl Notification {
+    /// Create a new notification.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn create() -> CapResult<Self> {
+        // SAFETY: notification_create is always safe.
+        let res = unsafe { syscalls::ecall0(SyscallNumber::NotificationCreate) };
+
+        res.map(|x| Captr::from_raw(x as usize))
+            .map(Notification::from_captr)
+            .map_err(CapError::from)
+    }
+
     /// Read the semaphore without blocking. If the semaphore was
     /// non-zero, clear it.
     ///
@@ -705,7 +465,7 @@ impl Captr<Notification> {
     ///
     /// - [`CapError::NotPresent`]: The notification capability was
     ///   not present.
-    /// - [`CapError::InvalidType`]: The capabiltiy in the provided
+    /// - [`CapError::InvalidType`]: The capability in the provided
     ///   slot was not a notification.
     pub fn poll(&self) -> CapResult<Option<NonZeroU64>> {
         syscalls::notification::poll(self.into_raw())
@@ -723,7 +483,7 @@ impl Captr<Notification> {
     ///
     /// - [`CapError::NotPresent`]: The notification capability was
     ///   not present.
-    /// - [`CapError::InvalidType`]: The capabiltiy in the provided
+    /// - [`CapError::InvalidType`]: The capability in the provided
     ///   slot was not a notification.
     pub fn signal(&self) -> CapResult<()> {
         syscalls::notification::signal(self.into_raw())
@@ -741,7 +501,7 @@ impl Captr<Notification> {
     ///
     /// - [`CapError::NotPresent`]: The notification capability was
     ///   not present.
-    /// - [`CapError::InvalidType`]: The capabiltiy in the provided
+    /// - [`CapError::InvalidType`]: The capability in the provided
     ///   slot was not a notification.
     pub fn wait(&self) -> CapResult<Option<NonZeroU64>> {
         syscalls::notification::wait(self.into_raw())
@@ -787,16 +547,39 @@ pub struct UserRegisters {
 }
 
 /// An exclusive range of capability pointers.
+// TODO: IntoIterator
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct CaptrRange<C: Capability> {
     /// The low end of the range.
-    pub lo: Captr<C>,
+    pub lo: Captr,
     /// The high end of the range, exclusive.
-    pub hi: Captr<C>,
+    pub hi: Captr,
+    _phantom: PhantomData<C>,
 }
 
 impl<C: Capability> CaptrRange<C> {
+    /// Create a new `CaptrRange` from its bounding [`Captr`]s, without
+    /// checking if the capabilities are of the valid type.
+    pub fn new(lo: Captr, hi: Captr) -> Self {
+        Self {
+            lo,
+            hi,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Get the low end of the `CaptrRange`.
+    pub fn lo(self) -> C {
+        C::from_captr(self.lo)
+    }
+
+    /// Get the high end of the `CaptrRange`. Note that this is
+    /// exclusive and is thus not a valid instance of `C`.
+    pub fn hi(self) -> Captr {
+        self.hi
+    }
+
     /// TODO
     pub fn count(&self) -> usize {
         (self.hi.into_raw() - self.lo.into_raw()) + 1
@@ -848,59 +631,178 @@ impl CapRights {
 /// Dynamic capabilities.
 /// TODO
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum AnyCap {}
+pub struct AnyCap(Captr);
+
+impl Deref for AnyCap {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
 
 impl Capability for AnyCap {
-    /// Cannot allocate an `AnyCap`.
-    type AllocateSizeSpec = Infallible;
-
-    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
-        0
-    }
-
     /// The capability type cannot be known at compile-time.
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Unknown;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
 }
 
+/// TODO
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum InterruptHandler {}
+pub struct InterruptHandler(Captr);
+
+impl Deref for InterruptHandler {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
 
 impl Capability for InterruptHandler {
-    /// Cannot allocate an `InterruptHandler`.
-    type AllocateSizeSpec = Infallible;
-
-    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
-        0
-    }
-
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::InterruptHandler;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
 }
 
+impl Deref for InterruptPool {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
+
+/// TODO
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum InterruptPool {}
+#[repr(transparent)]
+pub struct InterruptPool(Captr);
 
 impl Capability for InterruptPool {
-    /// Cannot allocate an `InterruptPool`.
-    type AllocateSizeSpec = Infallible;
-
-    fn allocate_size_spec(_: Self::AllocateSizeSpec) -> usize {
-        0
-    }
-
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::InterruptPool;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
 }
 
+/// A synchronous rendezvous IPC endpoint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Endpoint {}
+#[repr(transparent)]
+pub struct Endpoint(Captr);
+
+impl Deref for Endpoint {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
 
 impl Capability for Endpoint {
-    type AllocateSizeSpec = ();
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Endpoint;
 
-    fn allocate_size_spec((): ()) -> usize {
-        0
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
+}
+
+impl Endpoint {
+    /// Create a new `Endpoint`.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn create() -> CapResult<Self> {
+        // SAFETY: notification_create is always safe.
+        let res = unsafe { syscalls::ecall0(SyscallNumber::EndpointCreate) };
+
+        res.map(|x| Captr::from_raw(x as usize))
+            .map(Self::from_captr)
+            .map_err(CapError::from)
+    }
+}
+
+/// A job is a group of [`Thread`]s that share resources via
+/// capabilities, as well as configurable policies and limits.
+///
+/// Jobs can also have child jobs, and each job except for the root
+/// job has a parent job. These child jobs inherit policies and limits
+/// (any configuration must be a subset of the parent jobs' limits),
+/// but do not inherit capabilities. This way, proper isolation can be
+/// ensured.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Job(Captr);
+
+impl Deref for Job {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
+
+impl Capability for Job {
+    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Job;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
+}
+
+impl Job {
+    /// Create a new job with the given job as its parent.
+    ///
+    /// Note that, to prevent unbounded recursion, the "height" of the
+    /// job tree is limited to 32. This limitation is tracked and
+    /// restricted by the kernel.
+    ///
+    /// # Errors
+    ///
+    /// - [`CapError::NotPresent`]: `self` or `parent` was null.
+    ///
+    /// - [`CapError::InvalidOperation`]: The job tree's height would
+    ///   be greater than 32.
+    pub fn create(parent: Job) -> CapResult<Self> {
+        // SAFETY: job_create is always safe.
+        let res = unsafe { syscalls::ecall1(SyscallNumber::JobCreate, parent.into_raw() as u64) };
+
+        res.map(|x| x as usize)
+            .map(Captr::from_raw)
+            .map(Job::from_captr)
+            .map_err(CapError::from)
     }
 
-    const CAPABILITY_TYPE: CapabilityType = CapabilityType::Endpoint;
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn link(self, _thread: Thread) -> CapResult<()> {
+        todo!()
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn create_thread(self, name: &str) -> CapResult<Thread> {
+        // SAFETY: By invariants.
+        let res = unsafe {
+            syscalls::ecall3(
+                SyscallNumber::JobCreateThread,
+                self.into_raw() as u64,
+                name.as_ptr() as u64,
+                name.len() as u64,
+            )
+        };
+
+        res.map(|x| x as usize)
+            .map(Captr::from_raw)
+            .map(Thread::from_captr)
+            .map_err(CapError::from)
+    }
 }
 
 /// A header for an IPC message. Consists of a 9-bit length (1 to 512)
@@ -987,7 +889,7 @@ impl fmt::Debug for MessageHeader {
 mod private {
     use super::{
         paging::{BasePage, GigaPage, MegaPage, Page, PageTable, PagingLevel},
-        AnyCap, Captbl, Empty, Endpoint, InterruptHandler, InterruptPool, Notification, Thread,
+        AnyCap, Empty, Endpoint, InterruptHandler, InterruptPool, Job, Notification, Thread,
     };
 
     pub trait Sealed {}
@@ -998,7 +900,6 @@ mod private {
     impl Sealed for super::paging::DynLevel {}
     impl<L: PagingLevel> Sealed for Page<L> {}
     impl Sealed for PageTable {}
-    impl Sealed for Captbl {}
     impl Sealed for Empty {}
     impl Sealed for Thread {}
     impl Sealed for Notification {}
@@ -1006,55 +907,36 @@ mod private {
     impl Sealed for InterruptPool {}
     impl Sealed for InterruptHandler {}
     impl Sealed for Endpoint {}
+    impl Sealed for Job {}
 }
 
-// These impls are just so Capability doesn't have to impl all these
-// traits, since that's just kinda annoying (clutters up all the trait
-// bounds in the docs, and since you can't construct all
-// `Capability`'s, it doesn't matter)
-
-impl<C: Capability> PartialOrd for Captr<C> {
+impl PartialOrd for Captr {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<C: Capability> PartialEq for Captr<C> {
+impl PartialEq for Captr {
     fn eq(&self, other: &Self) -> bool {
         self.inner.eq(&other.inner)
     }
 }
 
-impl<C: Capability> Eq for Captr<C> {}
+impl Eq for Captr {}
 
-impl<C: Capability> Ord for Captr<C> {
+impl Ord for Captr {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.inner.cmp(&other.inner)
     }
 }
 
-impl<C: Capability> Hash for Captr<C> {
+impl Hash for Captr {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         self.inner.hash(state);
     }
 }
 
-impl<C: Capability> PartialEq for RemoteCaptr<C> {
-    fn eq(&self, other: &Self) -> bool {
-        self.reftbl.eq(&other.reftbl) && self.index.eq(&other.index)
-    }
-}
-
-impl<C: Capability> Eq for RemoteCaptr<C> {}
-
-impl<C: Capability> Hash for RemoteCaptr<C> {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.reftbl.hash(state);
-        self.index.hash(state);
-    }
-}
-
-impl<C: Capability> fmt::Debug for Captr<C> {
+impl fmt::Debug for Captr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Captr({})", self.inner.map_or(0, NonZeroUsize::get))
     }

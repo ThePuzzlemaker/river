@@ -1,15 +1,15 @@
 //! This module defines capabilities related to paging, and their
 //! operations.
-use core::{convert::Infallible, fmt::Debug, marker::PhantomData};
+use core::{convert::Infallible, fmt::Debug, marker::PhantomData, ops::Deref};
 
 use bitflags::bitflags;
 
 use crate::{
     addr::{Identity, VirtualConst, Vpn},
-    syscalls,
+    syscalls::{self, SyscallNumber},
 };
 
-use super::{CapResult, Capability, CapabilityType, Captr};
+use super::{CapError, CapResult, Capability, CapabilityType, Captr};
 
 /// The page capability corresponds to a page of physical memory that
 /// can be mapped into a page table. The [`PagingLevel`] determines
@@ -19,21 +19,39 @@ use super::{CapResult, Capability, CapabilityType, Captr};
 ///
 /// See [`PageCaptr`] for operations on this capability.
 #[derive(Copy, Clone, Debug)]
-pub struct Page<L: PagingLevel>(#[doc(hidden)] PhantomData<L>, #[doc(hidden)] Infallible);
+#[repr(C)]
+pub struct Page<L: PagingLevel>(Captr, PhantomData<L>);
 
-/// Helper type for [`Page`] captrs.
-pub type PageCaptr<L> = Captr<Page<L>>;
+impl<L: PagingLevel> Deref for Page<L> {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
+    }
+}
 
 impl<L: PagingLevel> Capability for Page<L> {
-    /// [`PagingLevel::PAGE_SIZE_LOG2`] gives us the bit-size of this
-    /// retype operation.
-    type AllocateSizeSpec = ();
-
-    fn allocate_size_spec(_spec: Self::AllocateSizeSpec) -> usize {
-        L::PAGE_SIZE_LOG2
-    }
-
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::Page;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c, PhantomData)
+    }
+}
+
+impl<L: PagingLevel> Page<L> {
+    /// Create a new page at the given paging level.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn create() -> CapResult<Self> {
+        // SAFETY: page_create is always safe.
+        let res = unsafe { syscalls::ecall1(SyscallNumber::PageCreate, L::PAGE_SIZE_LOG2 as u64) };
+
+        res.map(|x| x as usize)
+            .map(Captr::from_raw)
+            .map(Self::from_captr)
+            .map_err(CapError::from)
+    }
 }
 
 /// The page table capability corresponds to a page table that can be
@@ -44,7 +62,8 @@ impl<L: PagingLevel> Capability for Page<L> {
 /// See [`Captr<PageTable>`][Captr#impl-Captr<PageTable>] for
 /// operations on this capability.
 #[derive(Copy, Clone, Debug)]
-pub struct PageTable(#[doc(hidden)] Infallible);
+#[repr(C)]
+pub struct PageTable(Captr);
 
 /// Page tables are divided into different "levels", where each level
 /// determines which part of the address translation hierarchy the
@@ -126,15 +145,36 @@ impl PagingLevel for DynLevel {
     const PAGE_SIZE_LOG2: usize = 0;
 }
 
-impl Capability for PageTable {
-    /// Page table sizes are constant, no matter the [`PagingLevel`].
-    type AllocateSizeSpec = ();
-
-    fn allocate_size_spec(_spec: Self::AllocateSizeSpec) -> usize {
-        0
+impl Deref for PageTable {
+    type Target = Captr;
+    fn deref(&self) -> &Captr {
+        &self.0
     }
+}
 
+impl Capability for PageTable {
     const CAPABILITY_TYPE: CapabilityType = CapabilityType::PgTbl;
+
+    fn from_captr(c: Captr) -> Self {
+        Self(c)
+    }
+}
+
+impl PageTable {
+    /// Create a new page table.
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub fn create() -> CapResult<Self> {
+        // SAFETY: pgtbl_create is always safe.
+        let res = unsafe { syscalls::ecall0(SyscallNumber::PageTableCreate) };
+
+        res.map(|x| x as usize)
+            .map(Captr::from_raw)
+            .map(Self::from_captr)
+            .map_err(CapError::from)
+    }
 }
 
 #[rustfmt::skip]
@@ -172,7 +212,7 @@ impl From<PageTableFlags> for u64 {
     }
 }
 
-impl<L: PagingLevel> PageCaptr<L> {
+impl<L: PagingLevel> Page<L> {
     /// Map a page of a given level into its corresponding page
     /// table. This makes the processor use the provided physical page
     /// for the region specified by the [`Vpn`] in the table.
@@ -187,8 +227,8 @@ impl<L: PagingLevel> PageCaptr<L> {
     ///
     /// TODO
     pub fn map(
-        self: PageCaptr<L>,
-        into: Captr<PageTable>,
+        self,
+        into: PageTable,
         vaddr: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
     ) -> CapResult<()> {
@@ -196,7 +236,7 @@ impl<L: PagingLevel> PageCaptr<L> {
     }
 }
 
-impl Captr<PageTable> {
+impl PageTable {
     /// Unmap the region specified by the [`Vpn`] in this page table.
     ///
     /// # Errors

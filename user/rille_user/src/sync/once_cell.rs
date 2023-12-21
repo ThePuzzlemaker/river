@@ -1,3 +1,4 @@
+//! A thread-safe cell that can be initialized only once.
 use core::{
     cell::UnsafeCell,
     hint,
@@ -5,6 +6,7 @@ use core::{
     sync::atomic::{self, AtomicUsize, Ordering},
 };
 
+/// A thread-safe cell that can be initialized only once.
 #[derive(Debug)]
 pub struct OnceCell<T> {
     state: AtomicUsize,
@@ -16,6 +18,7 @@ const WRITING: usize = 1;
 const READY: usize = 2;
 
 impl<T> OnceCell<T> {
+    /// Create a new, uninitialized `OnceCell`.
     pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(EMPTY),
@@ -23,6 +26,8 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Try to get the contents of the `OnceCell`, running `f()` to
+    /// initialize it if the cell was uninitialized.
     pub fn get_or_init<'a>(&'a self, f: impl FnOnce() -> T) -> &'a T
     where
         T: 'a,

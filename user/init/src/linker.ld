@@ -14,13 +14,16 @@ SECTIONS {
         . = ALIGN(4K);
 	*(.init);
 	. = ALIGN(8);
-        *(.text .text.*);
+	. = ALIGN(4K);
+        *(.text);
 	. = ALIGN(4K);
     }
     .data : {
         . = ALIGN(4K);
         *(.data .data.* .rodata .rodata.*);
         . = ALIGN(4K);
+	*(.procsvr);
+	. = ALIGN(4K);
     }
 
     . = ALIGN(8);

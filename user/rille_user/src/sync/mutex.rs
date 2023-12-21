@@ -1,3 +1,4 @@
+//! A mutex implementation using [`Notification`]s.
 use core::{
     cell::UnsafeCell,
     fmt,
@@ -6,10 +7,9 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use rille::capability::{Captr, Notification};
-// TODO: maybe try to optimize maximum usage of notification space?
-// Would require VKA equivalent first
+use rille::capability::Notification;
 
+/// A mutex implementation using [`Notification`]s.
 #[repr(C)]
 pub struct Mutex<T> {
     data: UnsafeCell<T>,
@@ -17,7 +17,7 @@ pub struct Mutex<T> {
     /// 1: locked, no waiters
     /// 2: locked, with waiters
     state: AtomicU32,
-    notif: Captr<Notification>,
+    notif: Notification,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Mutex<T> {
@@ -42,7 +42,8 @@ unsafe impl<T: Send> Send for Mutex<T> {}
 unsafe impl<T: Send> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {
-    pub fn new(data: T, notif: Captr<Notification>) -> Self {
+    /// Create a new `Mutex`.
+    pub fn new(data: T, notif: Notification) -> Self {
         Self {
             data: UnsafeCell::new(data),
             state: AtomicU32::new(0),
@@ -50,10 +51,12 @@ impl<T> Mutex<T> {
         }
     }
 
+    /// Check if the mutex is locked.
     pub fn is_locked(&self) -> bool {
         self.state.load(Ordering::Relaxed) != 0
     }
 
+    /// Try to atomically lock the mutex, blocking if it is currently locked.
     pub fn lock(&'_ self) -> MutexGuard<'_, T> {
         if self
             .state
@@ -68,6 +71,7 @@ impl<T> Mutex<T> {
         }
     }
 
+    /// Try to atomically lock the mutex, returning `None` if it is currently locked.
     pub fn try_lock(&'_ self) -> Option<MutexGuard<'_, T>> {
         if self
             .state
@@ -82,6 +86,8 @@ impl<T> Mutex<T> {
         })
     }
 
+    #[inline]
+    #[cold]
     fn lock_contended(&self) {
         let mut spin_count = 0;
 
@@ -106,6 +112,8 @@ impl<T> Mutex<T> {
     }
 }
 
+/// A guard over a locked [`Mutex`] that allows access to the inner
+/// data.
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
     _phantom: PhantomData<*const T>,
@@ -115,7 +123,7 @@ impl<'a, T: fmt::Debug> fmt::Debug for MutexGuard<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MutexGuard")
             .field("mutex", &self.mutex)
-            .field("data", self)
+            .field("data", &**self)
             .finish()
     }
 }

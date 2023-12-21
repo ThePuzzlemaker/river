@@ -2,9 +2,9 @@
 //! initialization. Some of this module is opinionated; the rest is
 //! simply the information the kernel provides to the init process.
 
-use crate::capability::{
-    paging::{BasePage, Page, PageCaptr, PageTable},
-    Captbl, Captr, CaptrRange, Empty, InterruptPool, Thread,
+use crate::prelude::{
+    paging::{BasePage, Page, PageTable},
+    *,
 };
 
 /// Information provided to the initial process.
@@ -29,16 +29,16 @@ pub struct BootInfo {
 
 /// Fixed-offset capabilities provided to the initial process.
 pub struct InitCapabilities {
-    /// The initial process's captbl.
-    pub captbl: Captr<Captbl>,
+    /// The root job.
+    pub job: Job,
     /// The initial process's page table.
-    pub pgtbl: Captr<PageTable>,
+    pub pgtbl: PageTable,
     /// The initial process's thread capability.
-    pub thread: Captr<Thread>,
+    pub thread: Thread,
     /// The page backing the [`BootInfo`] passed to the init proces.
-    pub bootinfo_page: PageCaptr<BasePage>,
+    pub bootinfo_page: Page<BasePage>,
     /// The global interrupt pool.
-    pub intr_pool: Captr<InterruptPool>,
+    pub intr_pool: InterruptPool,
 }
 
 impl InitCapabilities {
@@ -50,11 +50,11 @@ impl InitCapabilities {
     /// sharing its [`Captbl`].
     pub unsafe fn new() -> Self {
         Self {
-            captbl: Captr::from_raw_unchecked(1),
-            pgtbl: Captr::from_raw_unchecked(2),
-            thread: Captr::from_raw_unchecked(3),
-            bootinfo_page: Captr::from_raw_unchecked(5),
-            intr_pool: Captr::from_raw_unchecked(6),
+            job: Job::from_captr(Captr::from_raw(1)),
+            pgtbl: PageTable::from_captr(Captr::from_raw(2)),
+            thread: Thread::from_captr(Captr::from_raw(3)),
+            bootinfo_page: Page::from_captr(Captr::from_raw(5)),
+            intr_pool: InterruptPool::from_captr(Captr::from_raw(6)),
         }
     }
 }

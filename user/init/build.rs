@@ -4,20 +4,16 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/linker.ld");
 
-    let mut init = PathBuf::from(env::var("OUT_DIR").unwrap());
-    init.pop();
-    init.pop();
-    init.pop();
-    init.push("init");
-    println!("cargo:rerun-if-changed={}", init.display());
-    let init_bin = init.with_file_name("init.bin");
+    let mut procsvr = PathBuf::from(env::var("CARGO_BIN_FILE_PROCSVR").unwrap());
+    println!("cargo:rerun-if-changed={}", procsvr.display());
+    let procsvr_bin = procsvr.with_file_name("procsvr.bin");
 
     Command::new("rust-objcopy")
         .args([
             "-O",
             "binary",
-            init.to_str().unwrap(),
-            init_bin.to_str().unwrap(),
+            procsvr.to_str().unwrap(),
+            procsvr_bin.to_str().unwrap(),
             "--remove-section=.stack",
             "--keep-section=.sbss",
             "--keep-section=.bss",
@@ -26,8 +22,8 @@ fn main() {
         .unwrap();
 
     println!(
-        "cargo:rustc-env=CARGO_BUILD_INIT_PATH={}",
-        init_bin.display()
+        "cargo:rustc-env=CARGO_BUILD_PROCSVR_PATH={}",
+        procsvr_bin.display()
     );
 
     println!(

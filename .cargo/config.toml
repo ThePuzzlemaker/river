@@ -1,2 +1,6 @@
+[unstable]
+bindeps = true
+
+
 [alias]
 xtask = "run --manifest-path ./xtask/Cargo.toml --"

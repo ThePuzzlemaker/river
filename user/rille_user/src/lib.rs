@@ -1,3 +1,4 @@
+//! Opinionated userspace utilities that don't quite belong in `rille`.
 #![no_std]
 #![warn(
     clippy::undocumented_unsafe_blocks,
@@ -17,6 +18,5 @@
 )]
 #![feature(doc_cfg, doc_auto_cfg, allocator_api, slice_ptr_get)]
 
-pub mod capalloc;
 pub mod malloc;
 pub mod sync;

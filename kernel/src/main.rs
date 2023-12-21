@@ -11,7 +11,8 @@
     slice_ptr_get,
     get_many_mut,
     thread_local,
-    stmt_expr_attributes
+    stmt_expr_attributes,
+    pointer_is_aligned
 )]
 #![no_std]
 #![no_main]
@@ -68,7 +69,7 @@ use owo_colors::OwoColorize;
 use paging::{root_page_table, PageTableFlags};
 use rille::{
     addr::{DirectMapped, Identity, Kernel, Physical, PhysicalMut, Virtual, VirtualConst},
-    capability::{paging::PageSize, Captr, CaptrRange, Empty},
+    capability::{paging::PageSize, Captr, CaptrRange},
     init::BootInfo,
     symbol,
     units::StorageUnits,
@@ -78,7 +79,7 @@ use uart::UART;
 use crate::{
     asm::InterruptDisabler,
     boot::HartBootData,
-    capability::{captbl::Captbl, global_interrupt_pool, Page, Thread, ThreadState},
+    capability::{global_interrupt_pool, Job, Page, Thread, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
@@ -131,14 +132,12 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         Err(e) => panic!("error loading fdt: {}", e),
     };
 
-    LOCAL_HART.with(|hart| {
-        let timebase_freq = fdt
-            .cpus()
-            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
-            .expect("Could not find boot hart in FDT")
-            .timebase_frequency() as u64;
-        hart.timebase_freq.set(timebase_freq);
-    });
+    let timebase_freq = fdt
+        .cpus()
+        .find(|cpu| cpu.ids().first() == LOCAL_HART.hartid.get() as usize)
+        .expect("Could not find boot hart in FDT")
+        .timebase_frequency() as u64;
+    LOCAL_HART.timebase_freq.set(timebase_freq);
 
     {
         let mut pgtbl = root_page_table().lock();
@@ -196,29 +195,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    let captbl_mem = {
-        let mut pma = PMAlloc::get();
-        let page = pma
-            .allocate(kalloc::phys::what_order(1 << (16 + 6)))
-            .unwrap();
-        let page_virt = page.into_virt();
-        {
-            // SAFETY: PMAlloc guarantees this is safe
-            let slice =
-                unsafe { slice::from_raw_parts_mut(page_virt.into_ptr_mut(), 1 << (16 + 6)) };
-            slice.fill(0);
-        }
-        page_virt
-    };
-
-    // SAFETY: We have just initialized this memory and it is valid for this amount of slots.
-    let captbl = unsafe { Captbl::new(captbl_mem, 16) };
-
-    {
-        let slot = captbl.get_mut::<Empty>(1).unwrap();
-        slot.replace(Captbl::clone(&captbl).downgrade());
-    }
-
     let init_padded = INIT.len().next_multiple_of(4.kib());
     let init = {
         let mut pma = PMAlloc::get();
@@ -237,7 +213,9 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
     let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
-    let proc = Thread::new(String::from("user_mode_woo"), Some(captbl), Some(pgtbl));
+    let job = Job::new(None).unwrap();
+    // TODO: phase out name and have it done in userspace?
+    let proc = Thread::new(String::from("init"), Some(pgtbl), job.clone());
     let mut free_slot_ctr = 7;
     let mut init_pages_range = 0..0;
     proc.setup_page_table();
@@ -255,13 +233,11 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         );
 
         {
-            let slot = private
-                .captbl
-                .as_ref()
-                .unwrap()
-                .get_mut::<Empty>(2)
-                .unwrap();
+            let mut captbl = job.captbl.write();
+            let slot = captbl.get_or_insert_mut(2).unwrap();
             slot.replace(private.root_pgtbl.clone().unwrap());
+            let slot = captbl.get_or_insert_mut(1).unwrap();
+            slot.replace(job.clone());
         }
         let mut trapframe = proc.trapframe.lock();
         trapframe.user_epc = 0x1040_0000;
@@ -278,12 +254,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             );
 
             {
-                let slot = private
-                    .captbl
-                    .as_ref()
-                    .unwrap()
-                    .get_mut::<Empty>(free_slot_ctr)
-                    .unwrap();
+                let mut captbl = job.captbl.write();
+                let slot = captbl.get_or_insert_mut(free_slot_ctr).unwrap();
                 // SAFETY: This page is valid for 1 page size (12 address bits)
                 // TODO - this isn't entirely valid -- PMA dealloc
                 slot.replace(unsafe { Page::new(phys, 12) });
@@ -296,20 +268,10 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     }
 
     {
-        let private = proc.private.lock();
-        let slot = private
-            .captbl
-            .as_ref()
-            .unwrap()
-            .get_mut::<Empty>(3)
-            .unwrap();
+        let mut captbl = job.captbl.write();
+        let slot = captbl.get_or_insert_mut(3).unwrap();
         slot.replace(proc.clone());
-        let slot = private
-            .captbl
-            .as_ref()
-            .unwrap()
-            .get_mut::<Empty>(6)
-            .unwrap();
+        let slot = captbl.get_or_insert_mut(6).unwrap();
         // TODO: make sure interrupt handlers/pools can't be copied in slots, only moved.
         slot.replace(global_interrupt_pool().clone());
     }
@@ -343,13 +305,9 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
                 PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::READ,
                 PageSize::Base,
             );
+            let mut captbl = job.captbl.write();
 
-            let slot = private
-                .captbl
-                .as_ref()
-                .unwrap()
-                .get_mut::<Empty>(free_slot_ctr)
-                .unwrap();
+            let slot = captbl.get_or_insert_mut(free_slot_ctr).unwrap();
             // SAFETY: This page is valid for 1 page size (12 address bits)
             // TODO: this isn't entirely valid--PMA dealloc
             slot.replace(unsafe { Page::new(phys, 12) });
@@ -370,12 +328,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::READ,
             PageSize::Base,
         );
-        let slot = private
-            .captbl
-            .as_ref()
-            .unwrap()
-            .get_mut::<Empty>(5)
-            .unwrap();
+        let mut captbl = job.captbl.write();
+        let slot = captbl.get_or_insert_mut(5).unwrap();
         // SAFETY: This page is valid for 1 page size (12 address bits)
         // TODO: this isn't entirely valid -- PMA dealloc
         slot.replace(unsafe { Page::new(bootinfo_page, 12) });
@@ -384,13 +338,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     let mut dev_pages_range = 0..0;
     {
         dev_pages_range.start = free_slot_ctr;
-        let private = proc.private.lock();
-        let slot = private
-            .captbl
-            .as_ref()
-            .unwrap()
-            .get_mut::<Empty>(free_slot_ctr)
-            .unwrap();
+        let mut captbl = job.captbl.write();
+        let slot = captbl.get_or_insert_mut(free_slot_ctr).unwrap();
         // SAFETY: This memory is device memory and is valid for a page.
         slot.replace(unsafe {
             Page::new_device(
@@ -411,30 +360,19 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     let boot_info = BootInfo {
         captbl_size_log2: 16,
-        init_pages: CaptrRange {
-            // SAFETY: We know these slots contain pages.
-            lo: unsafe { Captr::from_raw_unchecked(init_pages_range.start) },
-            // SAFETY: See above.
-            hi: unsafe { Captr::from_raw_unchecked(init_pages_range.end) },
-        },
-        fdt_pages: CaptrRange {
-            // SAFETY: We know these slots contain pages.
-            lo: unsafe { Captr::from_raw_unchecked(fdt_pages_range.start) },
-            // SAFETY: See above.
-            hi: unsafe { Captr::from_raw_unchecked(fdt_pages_range.end) },
-        },
-        dev_pages: CaptrRange {
-            // SAFETY: We know these slots contain pages.
-            lo: unsafe { Captr::from_raw_unchecked(dev_pages_range.start) },
-            // SAFETY: See above.
-            hi: unsafe { Captr::from_raw_unchecked(dev_pages_range.end) },
-        },
-        free_slots: CaptrRange {
-            // SAFETY: We know this slot is free.
-            lo: unsafe { Captr::from_raw_unchecked(free_slot_ctr) },
-            // SAFETY: See above.
-            hi: unsafe { Captr::from_raw_unchecked(1 << 16) },
-        },
+        init_pages: CaptrRange::new(
+            Captr::from_raw(init_pages_range.start),
+            Captr::from_raw(init_pages_range.end),
+        ),
+        fdt_pages: CaptrRange::new(
+            Captr::from_raw(fdt_pages_range.start),
+            Captr::from_raw(fdt_pages_range.end),
+        ),
+        dev_pages: CaptrRange::new(
+            Captr::from_raw(dev_pages_range.start),
+            Captr::from_raw(dev_pages_range.end),
+        ),
+        free_slots: CaptrRange::new(Captr::from_raw(free_slot_ctr), Captr::from_raw(1 << 16)),
         fdt_ptr: 0x2000_1000 as *const u8,
     };
 
@@ -449,9 +387,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
     N_HARTS.store(fdt.cpus().count(), Ordering::Relaxed);
 
-    LOCAL_HART.with(move |hart| {
-        //hart.push_off();
-
+    {
         info!("{}", r"  ___   .  _  _ __   ___".bright_purple());
         info!("{}", r" /  /  /  /  / /__| /  /".bright_purple());
         info!("{}", r"/   \_/\__\_/_/\___/   \".bright_purple());
@@ -461,8 +397,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             "river v0.0.-Inf".bright_magenta().bold(),
             "====".bright_white().bold(),
         );
-        info!("boot hart id: {}", hart.hartid.get());
-        info!("timebase freq: {}", hart.timebase_freq.get());
+        info!("boot hart id: {}", LOCAL_HART.hartid.get());
+        info!("timebase freq: {}", LOCAL_HART.timebase_freq.get());
 
         let (free, total) = {
             let pma = PMAlloc::get();
@@ -479,10 +415,13 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         // panic!("{:#?}", asm::get_pagetable());
 
         let mut scheduler_map = BTreeMap::new();
-        scheduler_map.insert(hart.hartid.get(), SpinMutex::new(SchedulerInner::default()));
+        scheduler_map.insert(
+            LOCAL_HART.hartid.get(),
+            SpinMutex::new(SchedulerInner::default()),
+        );
         for hart in fdt
             .cpus()
-            .filter(|cpu| cpu.ids().first() != hart.hartid.get() as usize)
+            .filter(|cpu| cpu.ids().first() != LOCAL_HART.hartid.get() as usize)
         {
             let id = hart.ids().first();
             info!("found FDT node for hart {id}");
@@ -528,16 +467,16 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
 
         let timebase_freq = fdt
             .cpus()
-            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
+            .find(|cpu| cpu.ids().first() == LOCAL_HART.hartid.get() as usize)
             .expect("Could not find boot hart in FDT")
             .timebase_frequency() as u64;
 
         // About 1/10 sec.
-        hart.timer_interval.set(timebase_freq / 10);
-        let interval = hart.timer_interval.get();
+        LOCAL_HART.timer_interval.set(timebase_freq / 10);
+        let interval = LOCAL_HART.timer_interval.get();
         sbi::timer::set_timer(asm::read_time() + interval).unwrap();
         //sbi::timer::set_timer(5 * timebase_freq).unwrap();
-    });
+    };
     N_STARTED.fetch_add(1, Ordering::Relaxed);
 
     while N_STARTED.load(Ordering::Relaxed) != fdt.cpus().count() {
@@ -563,14 +502,12 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
         Err(e) => panic!("error loading fdt: {e}"),
     };
 
-    LOCAL_HART.with(|hart| {
-        let timebase_freq = fdt
-            .cpus()
-            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
-            .expect("Could not find boot hart in FDT")
-            .timebase_frequency() as u64;
-        hart.timebase_freq.set(timebase_freq);
-    });
+    let timebase_freq = fdt
+        .cpus()
+        .find(|cpu| cpu.ids().first() == LOCAL_HART.hartid.get() as usize)
+        .expect("Could not find boot hart in FDT")
+        .timebase_frequency() as u64;
+    LOCAL_HART.timebase_freq.set(timebase_freq);
 
     info!("hart {} starting", hartid());
 
@@ -586,18 +523,16 @@ extern "C" fn kmain_hart(fdt_ptr: *const u8) -> ! {
     // Now that the PLIC is set up, it's fine to interrupt.
     asm::intr_on();
 
-    LOCAL_HART.with(|hart| {
-        let timebase_freq = fdt
-            .cpus()
-            .find(|cpu| cpu.ids().first() == hart.hartid.get() as usize)
-            .expect("Could not find hart in FDT")
-            .timebase_frequency() as u64;
+    let timebase_freq = fdt
+        .cpus()
+        .find(|cpu| cpu.ids().first() == LOCAL_HART.hartid.get() as usize)
+        .expect("Could not find hart in FDT")
+        .timebase_frequency() as u64;
 
-        // About 1/10 sec.
-        hart.timer_interval.set(timebase_freq / 10);
-        let interval = hart.timer_interval.get();
-        sbi::timer::set_timer(asm::read_time() + interval).unwrap();
-    });
+    // About 1/10 sec.
+    LOCAL_HART.timer_interval.set(timebase_freq / 10);
+    let interval = LOCAL_HART.timer_interval.get();
+    sbi::timer::set_timer(asm::read_time() + interval).unwrap();
 
     N_STARTED.fetch_add(1, Ordering::Relaxed);
 

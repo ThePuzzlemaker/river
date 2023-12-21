@@ -2,7 +2,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize};
+use core::sync::atomic::{AtomicU16, AtomicU64};
 use core::{cmp, mem};
 
 use alloc::collections::{BTreeMap, VecDeque};
@@ -20,9 +20,9 @@ use rille::capability::{
 };
 
 pub use rille::capability::{
-    paging::PageTable as PageTableCap, AnyCap, Captbl as CaptblCap, Empty as EmptyCap,
-    Endpoint as EndpointCap, InterruptHandler as InterruptHandlerCap,
-    InterruptPool as InterruptPoolCap, Notification as NotificationCap, Thread as ThreadCap,
+    paging::PageTable as PageTableCap, AnyCap, Empty as EmptyCap, Endpoint as EndpointCap,
+    InterruptHandler as InterruptHandlerCap, InterruptPool as InterruptPoolCap, Job as JobCap,
+    Notification as NotificationCap, Thread as ThreadCap,
 };
 
 pub type PageCap = rille::capability::paging::Page<DynLevel>;
@@ -38,12 +38,14 @@ use crate::paging::SharedPageTable;
 use crate::plic::PLIC;
 use crate::proc::Context;
 use crate::sched::Scheduler;
-use crate::sync::{OnceCell, SpinMutex, SpinMutexGuard, SpinRwLock, SpinRwLockWriteGuard};
+use crate::sync::{
+    OnceCell, SpinMutex, SpinMutexGuard, SpinRwLock, SpinRwLockReadGuard, SpinRwLockWriteGuard,
+};
 use crate::trampoline::Trapframe;
 use crate::trap::user_trap_ret;
 use crate::{asm, kalloc};
 
-use self::captbl::{Captbl, WeakCaptbl};
+use self::captbl::{Captbl, CaptblSlots};
 use self::slotref::{SlotRef, SlotRefMut};
 
 pub mod captbl;
@@ -72,7 +74,6 @@ pub struct CapabilitySlotInner {
 #[derive(Clone)]
 pub enum CapabilityKind {
     Empty = CapabilityType::Empty as u8,
-    Captbl(WeakCaptbl) = CapabilityType::Captbl as u8,
     PgTbl(SharedPageTable) = CapabilityType::PgTbl as u8,
     Page(Page) = CapabilityType::Page as u8,
     Thread(Arc<Thread>) = CapabilityType::Thread as u8,
@@ -80,13 +81,13 @@ pub enum CapabilityKind {
     InterruptPool(Arc<InterruptPool>) = CapabilityType::InterruptPool as u8,
     InterruptHandler(Arc<InterruptHandler>) = CapabilityType::InterruptHandler as u8,
     Endpoint(Arc<Endpoint>) = CapabilityType::Endpoint as u8,
+    Job(Arc<Job>) = CapabilityType::Job as u8,
 }
 
 impl fmt::Debug for CapabilityKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
-            Self::Captbl(captbl) => f.debug_tuple("Captbl").field(captbl).finish(),
             Self::PgTbl(pgtbl) => f.debug_tuple("PgTbl").field(pgtbl).finish(),
             Self::Page(page) => f.debug_tuple("Page").field(page).finish(),
             Self::Thread(thread) => write!(f, "Thread(<opaque:{:#p}>", Arc::as_ptr(thread)),
@@ -96,6 +97,7 @@ impl fmt::Debug for CapabilityKind {
             }
             Self::InterruptPool(pool) => f.debug_tuple("InterruptPool").field(pool).finish(),
             Self::Endpoint(endpoint) => f.debug_tuple("Endpoint").field(endpoint).finish(),
+            Self::Job(job) => f.debug_tuple("Job").field(job).finish(),
         }
     }
 }
@@ -107,14 +109,6 @@ impl CapabilityKind {
         // field, so we can read the discriminant without offsetting the pointer.
         let x = unsafe { *<*const _>::from(self).cast::<u8>() };
         CapabilityType::from(x)
-    }
-
-    pub fn captbl(&self) -> Option<&WeakCaptbl> {
-        if let Self::Captbl(captbl) = self {
-            Some(captbl)
-        } else {
-            None
-        }
     }
 
     pub fn pgtbl(&self) -> Option<&SharedPageTable> {
@@ -180,6 +174,14 @@ impl CapabilityKind {
             None
         }
     }
+
+    pub fn job(&self) -> Option<&Arc<Job>> {
+        if let Self::Job(job) = self {
+            Some(job)
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for CapabilityKind {
@@ -191,12 +193,16 @@ impl Default for CapabilityKind {
 impl PartialEq for CapabilityKind {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Captbl(l), Self::Captbl(r)) => l.eq(r),
             (Self::PgTbl(l), Self::PgTbl(r)) => l.eq(r),
             (Self::Page(l), Self::Page(r)) => l.eq(r),
             (Self::Thread(l), Self::Thread(r)) => Arc::ptr_eq(l, r),
             (Self::Notification(l), Self::Notification(r)) => Arc::ptr_eq(l, r),
-            _ => mem::discriminant(self) == mem::discriminant(other),
+            (Self::InterruptPool(l), Self::InterruptPool(r)) => Arc::ptr_eq(l, r),
+            (Self::InterruptHandler(l), Self::InterruptHandler(r)) => Arc::ptr_eq(l, r),
+            (Self::Endpoint(l), Self::Endpoint(r)) => Arc::ptr_eq(l, r),
+            (Self::Job(l), Self::Job(r)) => Arc::ptr_eq(l, r),
+            (Self::Empty, Self::Empty) => true,
+            _ => false,
         }
     }
 }
@@ -212,18 +218,22 @@ where
 }
 
 #[derive(Debug)]
-#[repr(align(64))]
-pub struct CaptblHeader {
-    n_slots_log2: u8,
-    slot_rc: AtomicUsize,
-}
-
-const _ASSERT_CAPTBLHEADER_SIZE_EQ_64: () = assert!(
-    core::mem::size_of::<CaptblHeader>() == 64,
-    "CaptblHeader size was not 64 bytes"
-);
+pub struct CaptblHeader {}
 
 impl Captbl {
+    pub fn read(&self) -> SpinRwLockReadGuard<'_, CaptblSlots> {
+        self.inner.slots.read()
+    }
+
+    pub fn write(&self) -> SpinRwLockWriteGuard<'_, CaptblSlots> {
+        self.inner.slots.write()
+    }
+}
+
+impl CaptblSlots {
+    pub fn next_slot(&self) -> usize {
+        self.0.last_key_value().map_or(1, |(&x, _)| x + 1)
+    }
     /// TODO
     ///
     /// # Errors
@@ -236,12 +246,8 @@ impl Captbl {
             return Err(CapError::NotPresent);
         }
 
-        // SAFETY: By invariants.
-        let slots = unsafe { &*self.inner.0 };
+        let slot = self.0.get(&index).ok_or(CapError::NotPresent)?;
 
-        let slot = slots.get(index).ok_or(CapError::NotPresent)?;
-        // SAFETY: By invariants.
-        let slot = unsafe { &*slot.slot };
         let guard = slot.lock.read();
 
         if !C::is_valid_type(guard.cap.cap_type()) {
@@ -267,17 +273,39 @@ impl Captbl {
             return Err(CapError::NotPresent);
         }
 
-        // SAFETY: By invariants.
-        let slots = unsafe { &*self.inner.0 };
-
-        let slot = slots.get(index).ok_or(CapError::NotPresent)?;
-        // SAFETY: By invariants.
-        let slot = unsafe { &*slot.slot };
+        let slot = self.0.get(&index).ok_or(CapError::NotPresent)?;
         let guard = slot.lock.write();
 
         if !C::is_valid_type(guard.cap.cap_type()) {
             return Err(CapError::InvalidType);
         }
+
+        Ok(SlotRefMut {
+            slot: guard,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// If the capability at this slot was out of bounds,
+    /// [`CapError::NotPresent`] will be returned. If the capability
+    /// was of the wrong type, [`CapError::InvalidType`] is returned.
+    pub fn get_or_insert_mut(&mut self, index: usize) -> CapResult<SlotRefMut<'_, EmptyCap>> {
+        if index == 0 {
+            return Err(CapError::NotPresent);
+        }
+
+        let slot = self.0.entry(index).or_insert(CapabilitySlot {
+            lock: SpinRwLock::new(CapabilitySlotInner {
+                cap: CapabilityKind::Empty,
+                badge: NonZeroU64::new(0),
+                rights: CapRights::all(),
+            }),
+        });
+        let guard = slot.lock.write();
 
         Ok(SlotRefMut {
             slot: guard,
@@ -307,7 +335,6 @@ impl<'a> CapToOwned for SlotRefMut<'a, EmptyCap> {
 #[derive(Clone, Debug)]
 pub enum AnyCapVal {
     Empty,
-    Captbl(WeakCaptbl),
     Page(Page),
     PgTbl(SharedPageTable),
     Thread(Arc<Thread>),
@@ -315,7 +342,7 @@ pub enum AnyCapVal {
     InterruptHandler(Arc<InterruptHandler>),
     InterruptPool(Arc<InterruptPool>),
     Endpoint(Arc<Endpoint>),
-    // TODO
+    Job(Arc<Job>),
 }
 
 impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
@@ -324,7 +351,6 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
     fn to_owned_cap(&self) -> AnyCapVal {
         match &self.cap {
             CapabilityKind::Empty => AnyCapVal::Empty,
-            CapabilityKind::Captbl(tbl) => AnyCapVal::Captbl(tbl.clone()),
             CapabilityKind::Page(page) => AnyCapVal::Page(page.clone()),
             CapabilityKind::PgTbl(pgtbl) => AnyCapVal::PgTbl(pgtbl.clone()),
             CapabilityKind::Thread(thread) => AnyCapVal::Thread(thread.clone()),
@@ -336,6 +362,7 @@ impl<'a> CapToOwned for SlotRef<'a, AnyCap> {
                 AnyCapVal::InterruptHandler(handler.clone())
             }
             CapabilityKind::Endpoint(endpoint) => AnyCapVal::Endpoint(endpoint.clone()),
+            CapabilityKind::Job(job) => AnyCapVal::Job(job.clone()),
         }
     }
 }
@@ -346,7 +373,6 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
     fn to_owned_cap(&self) -> AnyCapVal {
         match &self.cap {
             CapabilityKind::Empty => AnyCapVal::Empty,
-            CapabilityKind::Captbl(tbl) => AnyCapVal::Captbl(tbl.clone()),
             CapabilityKind::Page(page) => AnyCapVal::Page(page.clone()),
             CapabilityKind::PgTbl(pgtbl) => AnyCapVal::PgTbl(pgtbl.clone()),
             CapabilityKind::Thread(thread) => AnyCapVal::Thread(thread.clone()),
@@ -359,6 +385,7 @@ impl<'a> CapToOwned for SlotRefMut<'a, AnyCap> {
                 AnyCapVal::InterruptHandler(handler.clone())
             }
             CapabilityKind::Endpoint(endpoint) => AnyCapVal::Endpoint(endpoint.clone()),
+            CapabilityKind::Job(job) => AnyCapVal::Job(job.clone()),
         }
     }
 }
@@ -410,30 +437,6 @@ impl CapabilityValue for Arc<Thread> {
     fn into_kind(self) -> CapabilityKind {
         CapabilityKind::Thread(self)
     }
-
-    unsafe fn copy_hook(slot: &SpinRwLockWriteGuard<'_, CapabilitySlotInner>) {
-        // SAFETY: By invariants.
-        let thread = unsafe { slot.cap.thread().unwrap_unchecked() };
-        assert!(
-            thread.slot_refcount.fetch_add(1, Ordering::Relaxed) <= (u32::MAX - 1) as u64,
-            "too many references to thread"
-        );
-    }
-
-    unsafe fn delete_hook(slot: &mut SpinRwLockWriteGuard<'_, CapabilitySlotInner>) {
-        // SAFETY: By invariants.
-        let thread = unsafe { slot.cap.thread().unwrap_unchecked() };
-
-        // If we're an orphan, extract our captbl and drop it
-        // This breaks any cycles that prevent us from being fully
-        // dropped.
-        if thread.slot_refcount.fetch_sub(1, Ordering::Release) == 1 {
-            atomic::fence(Ordering::Acquire);
-            let mut private = thread.private.lock();
-            drop(private.captbl.take());
-            drop(private);
-        }
-    }
 }
 impl CapabilityValue for Arc<Notification> {
     type Cap = NotificationCap;
@@ -441,55 +444,11 @@ impl CapabilityValue for Arc<Notification> {
         CapabilityKind::Notification(self)
     }
 }
-impl CapabilityValue for WeakCaptbl {
-    type Cap = CaptblCap;
-    fn into_kind(self) -> CapabilityKind {
-        CapabilityKind::Captbl(self)
-    }
-
-    unsafe fn copy_hook(slot: &SpinRwLockWriteGuard<'_, CapabilitySlotInner>) {
-        // SAFETY: By invariants.
-        let captbl = unsafe { slot.cap.captbl().unwrap_unchecked() };
-        if let Some(captbl) = captbl.upgrade() {
-            let x = captbl.hdr().slot_rc.fetch_add(1, Ordering::Relaxed);
-
-            if x == 0 {
-                // Carefully leak this captbl.
-                let _ = Arc::into_raw(captbl.inner.clone());
-            }
-            assert!(
-                x <= (u32::MAX - 1) as usize,
-                "too many references to captbl"
-            );
-        }
-    }
-
-    unsafe fn delete_hook(slot: &mut SpinRwLockWriteGuard<'_, CapabilitySlotInner>) {
-        // SAFETY: By invariants.
-        let captbl = unsafe { slot.cap.captbl().unwrap_unchecked() };
-        if let Some(captbl) = captbl.upgrade() {
-            // If we're an orphan, un-leak ourself.
-            if captbl.hdr().slot_rc.fetch_sub(1, Ordering::Release) == 1 {
-                atomic::fence(Ordering::Acquire);
-                let x = Arc::into_raw(captbl.inner.clone());
-                // SAFETY: This pointer was obtained from into_raw,
-                // and if our slot_rc was > 0, we have at least one
-                // leaked captbl.
-                unsafe {
-                    Arc::decrement_strong_count(x);
-                }
-                // SAFETY: This pointer was obtained from into_raw.
-                drop(unsafe { Arc::from_raw(x) });
-            }
-        }
-    }
-}
 impl CapabilityValue for AnyCapVal {
     type Cap = AnyCap;
     fn into_kind(self) -> CapabilityKind {
         match self {
             AnyCapVal::Empty => Empty.into_kind(),
-            AnyCapVal::Captbl(captbl) => captbl.into_kind(),
             AnyCapVal::Page(pg) => pg.into_kind(),
             AnyCapVal::PgTbl(pgtbl) => pgtbl.into_kind(),
             AnyCapVal::Thread(thread) => thread.into_kind(),
@@ -497,6 +456,7 @@ impl CapabilityValue for AnyCapVal {
             AnyCapVal::InterruptHandler(handler) => handler.into_kind(),
             AnyCapVal::InterruptPool(pool) => pool.into_kind(),
             AnyCapVal::Endpoint(endpoint) => endpoint.into_kind(),
+            AnyCapVal::Job(job) => job.into_kind(),
         }
     }
 
@@ -505,7 +465,6 @@ impl CapabilityValue for AnyCapVal {
         unsafe {
             match slot.cap {
                 CapabilityKind::Empty => Empty::copy_hook(slot),
-                CapabilityKind::Captbl(_) => WeakCaptbl::copy_hook(slot),
                 CapabilityKind::PgTbl(_) => SharedPageTable::copy_hook(slot),
                 CapabilityKind::Page(_) => Page::copy_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::copy_hook(slot),
@@ -513,6 +472,7 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::copy_hook(slot),
                 CapabilityKind::InterruptPool(_) => Arc::<InterruptPool>::copy_hook(slot),
                 CapabilityKind::Endpoint(_) => Arc::<Endpoint>::copy_hook(slot),
+                CapabilityKind::Job(_) => Arc::<Job>::copy_hook(slot),
             }
         }
     }
@@ -522,7 +482,6 @@ impl CapabilityValue for AnyCapVal {
         unsafe {
             match slot.cap {
                 CapabilityKind::Empty => Empty::delete_hook(slot),
-                CapabilityKind::Captbl(_) => WeakCaptbl::delete_hook(slot),
                 CapabilityKind::PgTbl(_) => SharedPageTable::delete_hook(slot),
                 CapabilityKind::Page(_) => Page::delete_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::delete_hook(slot),
@@ -530,6 +489,7 @@ impl CapabilityValue for AnyCapVal {
                 CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::delete_hook(slot),
                 CapabilityKind::InterruptPool(_) => Arc::<InterruptPool>::delete_hook(slot),
                 CapabilityKind::Endpoint(_) => Arc::<Endpoint>::delete_hook(slot),
+                CapabilityKind::Job(_) => Arc::<Job>::delete_hook(slot),
             }
         }
     }
@@ -723,7 +683,6 @@ impl<'a> SlotRef<'a, ThreadCap> {
     /// [1]: rille::capability::Captr::<rille::capability::Thread>::configure
     pub fn configure(
         &self,
-        captbl: Captbl,
         pgtbl: SharedPageTable,
         ipc_buffer: Option<PhysicalMut<u8, DirectMapped>>,
     ) -> CapResult<()> {
@@ -736,7 +695,6 @@ impl<'a> SlotRef<'a, ThreadCap> {
             return Err(CapError::InvalidOperation);
         }
 
-        private.captbl = Some(captbl);
         let old_pgtbl = private.root_pgtbl.replace(pgtbl);
         if let Some(_pgtbl) = old_pgtbl {
             // TODO: pgtbl.unmap(VirtualConst::from(private.trapframe_addr))
@@ -791,15 +749,13 @@ impl<'a> SlotRef<'a, ThreadCap> {
     ///
     /// # Errors
     ///
-    /// See [`Captr::<Thread>::write_regsters`][1].
+    /// See [`Captr::<Thread>::write_registers`][1].
     ///
     /// [1]: rille::capability::Captr::<rille::capability::Thread>::write_registers
     pub fn write_registers(
         &self,
-        registers: VirtualConst<UserRegisters, Identity>,
+        addr: VirtualConst<UserRegisters, DirectMapped>,
     ) -> CapResult<()> {
-        use crate::paging::PageTableFlags as KernelFlags;
-
         // SAFETY: Type check.
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
 
@@ -809,19 +765,8 @@ impl<'a> SlotRef<'a, ThreadCap> {
             return Err(CapError::InvalidOperation);
         }
 
-        let Some((addr, flags)) = private
-            .root_pgtbl
-            .as_ref()
-            .ok_or(CapError::InvalidOperation)?
-            .walk(registers)
-        else {
-            return Err(CapError::InvalidOperation);
-        };
-        if !flags.contains(KernelFlags::USER) {
-            return Err(CapError::InvalidOperation);
-        }
         // SAFETY: This pointer is valid and non-null.
-        let registers = unsafe { &*addr.into_virt().cast::<UserRegisters>().into_ptr() };
+        let registers = unsafe { &*addr.into_ptr() };
 
         let mut trapframe = thread.trapframe.lock();
         let trapframe = &mut **trapframe;
@@ -873,10 +818,10 @@ pub struct Thread {
     pub context: SpinMutex<Context>,
     pub tid: usize,
     pub waiting_on: AtomicU64,
-    pub slot_refcount: AtomicU64,
     pub blocking_wqs: SpinMutex<Vec<Arc<SpinMutex<WaitQueue>>>>,
     pub blocked_on_wq: SpinMutex<Option<Weak<SpinMutex<WaitQueue>>>>,
     pub affinity: SpinMutex<HartMask>,
+    pub job: Arc<Job>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1148,18 +1093,13 @@ unsafe impl Send for OwnedTrapframe {}
 
 impl Thread {
     #[allow(clippy::missing_panics_doc)]
-    pub fn new(
-        name: String,
-        captbl: Option<Captbl>,
-        pgtbl: Option<SharedPageTable>,
-    ) -> Arc<Thread> {
+    pub fn new(name: String, pgtbl: Option<SharedPageTable>, job: Arc<Job>) -> Arc<Thread> {
         let tid = next_tid();
 
         let this = Arc::new(Thread {
             trapframe: SpinMutex::new(OwnedTrapframe::new()),
             stack: ThreadKernelStack::new(),
             private: SpinMutex::new(ThreadProtected {
-                captbl,
                 root_pgtbl: pgtbl,
                 asid: 1, /*TODO*/
                 name,
@@ -1178,10 +1118,10 @@ impl Thread {
             context: SpinMutex::new(Context::default()),
             tid: tid as usize,
             waiting_on: AtomicU64::new(0),
-            slot_refcount: AtomicU64::new(0),
             blocking_wqs: SpinMutex::new(Vec::new()),
             blocked_on_wq: SpinMutex::new(None),
             affinity: SpinMutex::new(HartMask(0xFFFF_FFFF_FFFF_FFFF)),
+            job,
         });
 
         {
@@ -1312,7 +1252,6 @@ impl fmt::Debug for Thread {
 }
 
 pub struct ThreadProtected {
-    pub captbl: Option<Captbl>,
     pub root_pgtbl: Option<SharedPageTable>,
     pub asid: u16,
     pub name: String,
@@ -1661,6 +1600,46 @@ impl CapabilityValue for Arc<Endpoint> {
     }
 }
 
+pub struct Job {
+    pub parent: Option<Arc<Job>>,
+    pub max_depth: u8,
+    pub captbl: Captbl,
+}
+
+impl fmt::Debug for Job {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Job")
+            .field("parent", &self.parent)
+            .field("max_depth", &self.max_depth)
+            .field("captbl", &Arc::as_ptr(&self.captbl.inner))
+            .finish()
+    }
+}
+
+impl Job {
+    /// Create a new job.
+    ///
+    /// This function will return `None` if the maximum job tree depth
+    /// has been encountered.
+    pub fn new(parent: Option<Arc<Job>>) -> Option<Arc<Job>> {
+        let max_depth = parent
+            .as_ref()
+            .map_or(Some(32), |x| x.max_depth.checked_sub(1))?;
+        Some(Arc::new(Job {
+            parent,
+            max_depth,
+            captbl: Captbl::new(),
+        }))
+    }
+}
+
+impl CapabilityValue for Arc<Job> {
+    type Cap = JobCap;
+    fn into_kind(self) -> CapabilityKind {
+        CapabilityKind::Job(self)
+    }
+}
+
 mod impls {
     use alloc::sync::Arc;
     use rille::capability::CapabilityType;
@@ -1668,20 +1647,14 @@ mod impls {
     use crate::paging::SharedPageTable;
 
     use super::{
-        AnyCap, AnyCapVal, Capability, CaptblCap, Empty, EmptyCap, Endpoint, EndpointCap,
-        InterruptHandler, InterruptHandlerCap, InterruptPool, InterruptPoolCap, Notification,
-        NotificationCap, PageCap, PageTableCap, ThreadCap, WeakCaptbl,
+        AnyCap, AnyCapVal, Capability, Empty, EmptyCap, Endpoint, EndpointCap, InterruptHandler,
+        InterruptHandlerCap, InterruptPool, InterruptPoolCap, Job, JobCap, Notification,
+        NotificationCap, PageCap, PageTableCap, ThreadCap,
     };
     impl Capability for EmptyCap {
         type Value = Empty;
         fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Empty
-        }
-    }
-    impl Capability for CaptblCap {
-        type Value = WeakCaptbl;
-        fn is_valid_type(cap_type: CapabilityType) -> bool {
-            cap_type == CapabilityType::Captbl
         }
     }
     impl Capability for PageTableCap {
@@ -1732,6 +1705,13 @@ mod impls {
         type Value = Arc<Endpoint>;
         fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Endpoint
+        }
+    }
+
+    impl Capability for JobCap {
+        type Value = Arc<Job>;
+        fn is_valid_type(cap_type: CapabilityType) -> bool {
+            cap_type == CapabilityType::Job
         }
     }
 }

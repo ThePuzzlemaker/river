@@ -45,3 +45,11 @@ pub mod io_traits;
 pub mod symbol;
 pub mod syscalls;
 pub mod units;
+
+/// Commonly used imports for `rille`.
+pub mod prelude {
+    pub use super::capability::*;
+    pub use super::io_traits::*;
+    pub use super::syscalls;
+    pub use super::units::*;
+}

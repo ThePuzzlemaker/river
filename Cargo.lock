@@ -274,6 +274,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce23b50ad8242c51a442f3ff322d56b02f08852c77e4c0b4d3fd684abc89c683"
 
 [[package]]
+name = "init"
+version = "0.1.0"
+dependencies = [
+ "fdt",
+ "owo-colors",
+ "panic_handler",
+ "procsvr",
+ "rand",
+ "rille",
+ "rille_user",
+]
+
+[[package]]
 name = "itertools"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -439,6 +452,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "134c189feb4956b20f6f547d2cf727d4c0fe06722b20a0eec87ed445a97f92da"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "procsvr"
+version = "0.1.0"
+dependencies = [
+ "rille",
+ "rille_user",
 ]
 
 [[package]]
@@ -652,18 +673,6 @@ name = "unicode-ident"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3354b9ac3fae1ff6755cb6db53683adb661634f67557942dea4facebec0fee4b"
-
-[[package]]
-name = "userspace_testing"
-version = "0.1.0"
-dependencies = [
- "fdt",
- "owo-colors",
- "panic_handler",
- "rand",
- "rille",
- "rille_user",
-]
 
 [[package]]
 name = "utf8parse"

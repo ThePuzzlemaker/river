@@ -1,7 +1,7 @@
 use crate::{asm, hart_local::LOCAL_HART};
 
 pub fn time() -> (u64, u64) {
-    let timebase_freq = LOCAL_HART.with(|hart| hart.timebase_freq.get());
+    let timebase_freq = LOCAL_HART.timebase_freq.get();
     let time = asm::read_time();
 
     let time_ns = time * (1_000_000_000 / timebase_freq);

@@ -12,6 +12,7 @@ rustflags = [
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]
 build-std-features = ["compiler-builtins-mem"]
+bindeps = true
 
 [profile.dev]
 # opt-level=1 is necessary because LLVM is weird

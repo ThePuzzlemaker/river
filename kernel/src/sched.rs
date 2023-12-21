@@ -17,7 +17,7 @@ use rille::{
 
 use crate::{
     asm::{self, hartid, InterruptDisabler},
-    capability::{HartMask, Thread, ThreadPriorities, ThreadProtected, ThreadState},
+    capability::{HartMask, Job, Thread, ThreadPriorities, ThreadProtected, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::phys::PMAlloc,
     paging::{PageTableFlags, PagingAllocator, SharedPageTable},
@@ -49,11 +49,11 @@ impl Default for SchedulerInner {
     fn default() -> Self {
         let idle_thread = Thread::new(
             String::from("<kernel:idle>"),
-            None,
             Some(SharedPageTable::from_inner(Arc::new(SpinRwLock::new(
                 // SAFETY: A zeroed page table is valid.
                 unsafe { Box::new_zeroed_in(PagingAllocator).assume_init() },
             )))),
+            Job::new(None).unwrap(),
         );
 
         let pg = {

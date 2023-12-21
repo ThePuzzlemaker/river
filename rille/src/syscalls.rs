@@ -6,48 +6,65 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, FromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum SyscallNumber {
-    /// [`Captr::<Allocator>::allocate_many`][crate::capability::Captr::<Allocator>::allocate_many]
-    AllocateMany = 0,
-    /// [`RemoteCaptr::<Captbl>::copy_deep`][crate::capability::RemoteCaptr::<Captbl>::copy_deep]
-    CopyDeep = 1,
     /// [`RemoteCaptr::<Captbl>::delete`][crate::capability::RemoteCaptr::<Captbl>::delete]
-    Delete = 2,
-    /// [`RemoteCaptr::<Captbl>::swap`][crate::capability::RemoteCaptr::<Captbl>::swap]
-    Swap = 3,
+    CaptrDelete = 0,
+    /// [`Page<L>::create`][crate::capability::paging::Page<L>::create]
+    PageCreate,
     /// [`Captr::<Page<L>>::map`][crate::capability::Captr::<Page<L>>::map]
-    PageMap = 4,
-    /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::map]
-    PageTableMap = 5,
-    /// [`Captr::<PageTable<L>>::map`][crate::capability::Captr::<PageTable<L>>::unmap]
-    PageTableUnmap = 6,
+    PageMap,
+    /// [`PageTable::create`][crate::capability::paging::PageTable::create]
+    PageTableCreate,
+    /// [`Captr::<PageTable>::unmap`][crate::capability::Captr::<PageTable>::unmap]
+    PageTableUnmap,
     /// [`Captr::<Thread>::suspend`][crate::capability::Captr::<Thread>::suspend]
-    ThreadSuspend = 7,
+    ThreadSuspend,
     /// [`Captr::<Thread>::configure`][crate::capability::Captr::<Thread>::configure]
-    ThreadConfigure = 8,
+    ThreadConfigure,
     /// [`Captr::<Thread>::resume`][crate::capability::Captr::<Thread>::resume]
-    ThreadResume = 9,
+    ThreadResume,
     /// [`Captr::<Thread>::write_registers`][crate::capability::Captr::<Thread>::write_registers]
-    ThreadWriteRegisters = 10,
-    Grant = 11,
-    /// [`Captr::<Notification>::wait`][crate::capability::Captr::<Notification>::wait]
-    NotificationWait = 12,
-    /// [`Captr::<Notification>::signal`][crate::capability::Captr::<Notification>::signal]
-    NotificationSignal = 13,
-    /// [`Captr::<Notification>::poll`][crate::capability::Captr::<Notification>::poll]
-    NotificationPoll = 14,
-    Yield = 15,
-    IntrHandlerAck = 16,
-    IntrHandlerBind = 17,
-    IntrHandlerUnbind = 18,
-    IntrPoolGet = 19,
-    EndpointSend = 20,
-    EndpointRecv = 21,
-    ThreadSetPriority = 22,
-    ThreadSetIpcBuffer = 23,
-    EndpointReply = 24,
-    EndpointCall = 25,
-    SaveCaller = 26,
-    RestoreCaller = 27,
+    ThreadWriteRegisters,
+    ThreadStart,
+    /// TODO
+    CaptrGrant,
+    /// [`Notification::create`][crate::capability::Notification::create]
+    NotificationCreate,
+    /// [`Notification::wait`][crate::capability::Notification::wait]
+    NotificationWait,
+    /// [`Notification::signal`][crate::capability::Notification::signal]
+    NotificationSignal,
+    /// [`Notification::poll`][crate::capability::Notification::poll]
+    NotificationPoll,
+    /// TODO
+    Yield,
+    /// TODO
+    IntrHandlerAck,
+    /// TODO
+    IntrHandlerBind,
+    /// TODO
+    IntrHandlerUnbind,
+    /// TODO
+    IntrPoolGet,
+    /// TODO
+    EndpointSend,
+    /// TODO
+    EndpointRecv,
+    /// TODO
+    ThreadSetPriority,
+    /// TODO
+    ThreadSetIpcBuffer,
+    // [`Endpoint::create`][crate::capability::Endpoint::create]
+    EndpointCreate,
+    /// TODO
+    EndpointReply,
+    /// TODO
+    EndpointCall,
+    /// [`Job::create`][crate::capability::Job::create]
+    JobCreate,
+    /// [`Job::link`][crate::capability::Job::link]
+    JobLink,
+    /// [`Job::create_thread`][crate::capability::Job::create_thread]
+    JobCreateThread,
     /// Print the debug representation of a capability to the kernel
     /// console.
     DebugCapSlot = 0xFFFF_0000,
@@ -132,209 +149,20 @@ impl_ecall! {
     ecall7 => [arg1: "a1", arg2: "a2", arg3: "a3", arg4: "a4", arg5: "a5", arg6: "a6", arg7: "a7"]
 }
 
-/// Syscalls relating to the [`Captbl`][super::capability::Captbl]
-/// capability.
-pub mod captbl {
+/// Syscalls available for all [`Captr`][super::capability::Captr]s.
+pub mod captr {
     use crate::capability::{CapError, CapResult};
 
     use super::SyscallNumber;
 
-    /// Copy a capability from one deeply nested slot to another
-    /// deeply nested slot.
-    ///
-    /// See [`RemoteCaptr::<Captbl>::copy_deep`][1].
-    ///
-    /// # Description
-    ///
-    /// - `from_tbl_ref` may be a valid index of a [`Captbl`][2]
-    /// capability in the thread's root captbl, or null. If null, this
-    /// index is taken to be the thread's root captbl.
-    ///
-    /// - `from_tbl_index` must be a valid index of a [`Captbl`][2]
-    /// capability in `from_tbl_ref`; or, if `from_tbl_ref` is null,
-    /// the thread's root captbl.
-    ///
-    /// - `from_index` must be a valid empty slot in
-    /// `from_tbl_ref[from_tbl_index]`; or, if the former is null,
-    /// `from_tbl_index` itself.
-    ///
-    /// - `into_tbl_ref` may be a valid index of a [`Captbl`][2]
-    /// capability in the thread's root captbl, or null. If null, this
-    /// index is taken to be the thread's root captbl.
-    ///
-    /// - `into_tbl_index` must be a valid index of a [`Captbl`][2]
-    /// capability in `into_tbl_ref`; or, if `into_tbl_ref` is null,
-    /// the thread's root captbl.
-    ///
-    /// - `into_index` must be a valid empty slot in
-    /// `into_tbl_ref[into_tbl_index]`; or, if the former is null,
-    /// `into_tbl_index` itself.
-    ///
-    /// If these requirements are met, the capability described by the
-    /// `from` indices will be copied (derived) with the exact same
-    /// rights into the capability slot described by the `into`
-    /// indices.
-    ///
-    /// # Errors
-    ///
-    /// If any capability was not present and was required,
-    /// [`CapError::NotPresent`] will be returned. If any capability
-    /// was of an invalid type, [`CapError::InvalidType`] is returned.
-    ///
-    /// [1]: crate::capability::RemoteCaptr::<Captbl>::copy_deep
-    /// [2]: crate::capability::Captbl
-    pub fn copy_deep(
-        from_tbl_ref: usize,
-        from_tbl_index: usize,
-        from_index: usize,
-        into_tbl_ref: usize,
-        into_tbl_index: usize,
-        into_index: usize,
-    ) -> CapResult<()> {
-        // SAFETY: copy_deep is always safe.
-        let res = unsafe {
-            super::ecall6(
-                SyscallNumber::CopyDeep,
-                from_tbl_ref as u64,
-                from_tbl_index as u64,
-                from_index as u64,
-                into_tbl_ref as u64,
-                into_tbl_index as u64,
-                into_index as u64,
-            )
-        };
-
-        if let Err(e) = res {
-            Err(CapError::from(e))
-        } else {
-            Ok(())
-        }
-    }
-
     /// TODO
     ///
     /// # Errors
     ///
     /// TODO
-    pub fn swap(
-        cap1_table: usize,
-        cap1_index: usize,
-        cap2_table: usize,
-        cap2_index: usize,
-    ) -> CapResult<()> {
-        // SAFETY: swap is always safe.
-        let res = unsafe {
-            super::ecall4(
-                SyscallNumber::Swap,
-                cap1_table as u64,
-                cap1_index as u64,
-                cap2_table as u64,
-                cap2_index as u64,
-            )
-        };
-
-        if let Err(e) = res {
-            Err(CapError::from(e))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// TODO
-    ///
-    /// # Errors
-    ///
-    /// TODO
-    pub fn delete(table: usize, index: usize) -> CapResult<()> {
+    pub fn delete(index: usize) -> CapResult<()> {
         // SAFETY: delete is always safe.
-        let res = unsafe { super::ecall2(SyscallNumber::Delete, table as u64, index as u64) };
-
-        if let Err(e) = res {
-            Err(CapError::from(e))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// Syscalls relating to the [`Allocator`][super::capability::Allocator]
-/// capability.
-#[allow(clippy::missing_errors_doc)]
-pub mod allocator {
-    use crate::capability::{CapError, CapResult, CapabilityType};
-
-    use super::SyscallNumber;
-
-    /// Allocate 1 or more capabilities from an capability.
-    ///
-    /// See [`RemoteCaptr::<Captbl>::allocate_many`][1].
-    ///
-    /// # Description
-    ///
-    /// - `into_ref` may be a valid index to a [`Captbl`][3], or
-    /// null. If null, it is taken to be the thread's root captbl.
-    ///
-    /// - `into_index` must be a valid index to a [`Captbl`][3] in
-    /// `into_ref`; or, if `into_ref` is null, the thread's root
-    /// captbl.
-    ///
-    /// - `starting_at` must be a valid index to a range of empty
-    /// capability slots, with length provided by `count`, in the
-    /// captbl referred to by the combination of `into_ref` and
-    /// `into_index`.
-    ///
-    /// - `count` must be more than 0.
-    ///
-    /// - `cap_type` must be a valid capability type.
-    ///
-    /// - `size` must contain valid size data for dynamically-sized
-    /// capabilities.
-    ///
-    /// When these requirements are met, and kernel resources allow,
-    /// the slots `into_ref[into_index][starting_at]` to
-    /// `into_ref[into_index][starting_at + count]` are filled with
-    /// new capabilities of the type requested.
-    ///
-    /// # Errors
-    ///
-    /// - This function will return [`CapError::NotPresent`] if any
-    /// required capability was not present.
-    ///
-    /// - This function will return [`CapError::InvalidType`] if any
-    /// capability was not of the correct type.
-    ///
-    /// - This function will return [`CapError::InvalidOperation`] if
-    /// the capability requested cannot be allocated.
-    ///
-    /// - This function will return [`CapError::NotEnoughResources`]
-    /// if the capability table or allocator did not have enough space
-    /// for the requested capabilities.
-    ///
-    /// - This function will return [`CapError::InvalidSize`] if
-    /// `size` was invalid.
-    ///    
-    /// [1]: crate::capability::RemoteCaptr::<crate::capability::Captbl>::allocate_many
-    /// [3]: crate::capability::Captbl
-    pub fn allocate_many(
-        into_ref: usize,
-        into_index: usize,
-        starting_at: usize,
-        count: usize,
-        cap_type: CapabilityType,
-        size: usize,
-    ) -> CapResult<()> {
-        // SAFETY: retype_many is always safe.
-        let res = unsafe {
-            super::ecall6(
-                SyscallNumber::AllocateMany,
-                into_ref as u64,
-                into_index as u64,
-                starting_at as u64,
-                count as u64,
-                u8::from(cap_type) as u64,
-                size as u64,
-            )
-        };
+        let res = unsafe { super::ecall1(SyscallNumber::CaptrDelete, index as u64) };
 
         if let Err(e) = res {
             Err(CapError::from(e))
@@ -358,20 +186,13 @@ pub mod paging {
     /// # Errors
     ///
     /// TODO
-    pub fn pgtbl_map(
-        from_pgtbl: usize,
-        into_pgtbl: usize,
-        vpn: Vpn,
-        flags: PageTableFlags,
-    ) -> CapResult<()> {
+    pub fn pgtbl_unmap(from_pgtbl: usize, vpn: Vpn) -> CapResult<()> {
         // SAFETY: pgtbl_map is always safe.
         let res = unsafe {
-            super::ecall4(
-                SyscallNumber::PageTableMap,
+            super::ecall2(
+                SyscallNumber::PageTableUnmap,
                 from_pgtbl as u64,
-                into_pgtbl as u64,
                 vpn.into_usize() as u64,
-                flags.bits() as u64,
             )
         };
 
@@ -421,24 +242,13 @@ pub mod debug {
     /// Print the debug representation of a capability to the kernel
     /// console.
     ///
-    /// # Description
-    ///
-    /// - `table` is the table to index into. If null, it is the root
-    /// table.
-    ///
-    /// - `index` is a non-null index to a capability in `table`, or
-    /// if `table` is null, the root table.
-    ///
     /// # Errors
     ///
     /// - This function will return [`CapError::NotPresent`] if any
     /// capability index was out of bounds.
-    ///
-    /// - This function will return [`CapError::InvalidType`] if the
-    /// `table` index did not refer to a capability table.
-    pub fn debug_cap_slot(table: usize, index: usize) -> CapResult<()> {
+    pub fn debug_cap_slot(index: usize) -> CapResult<()> {
         // SAFETY: debug_cap_slot is always safe.
-        let res = unsafe { super::ecall2(SyscallNumber::DebugCapSlot, table as u64, index as u64) };
+        let res = unsafe { super::ecall1(SyscallNumber::DebugCapSlot, index as u64) };
 
         if let Err(e) = res {
             Err(CapError::from(e))
@@ -471,13 +281,9 @@ pub mod debug {
     ///
     /// - This function will return [`CapError::NotPresent`] if any
     /// capability index was out of bounds.
-    ///
-    /// - This function will return [`CapError::InvalidType`] if the
-    /// `table` index did not refer to a capability table.
-    pub fn debug_cap_identify(table: usize, index: usize) -> CapResult<CapabilityType> {
+    pub fn debug_cap_identify(index: usize) -> CapResult<CapabilityType> {
         // SAFETY: debug_cap_identify is always safe
-        let res =
-            unsafe { super::ecall2(SyscallNumber::DebugCapIdentify, table as u64, index as u64) };
+        let res = unsafe { super::ecall1(SyscallNumber::DebugCapIdentify, index as u64) };
 
         match res {
             Err(e) => Err(CapError::from(e)),
@@ -523,18 +329,12 @@ pub mod thread {
 
     /// See [`Captr::<Thread>::configure`].
     #[allow(clippy::missing_errors_doc, clippy::missing_safety_doc)]
-    pub unsafe fn configure(
-        thread: usize,
-        captbl: usize,
-        pgtbl: usize,
-        ipc_buffer: usize,
-    ) -> CapResult<()> {
+    pub unsafe fn configure(thread: usize, pgtbl: usize, ipc_buffer: usize) -> CapResult<()> {
         // SAFETY: By invariants.
         let res = unsafe {
-            super::ecall4(
+            super::ecall3(
                 SyscallNumber::ThreadConfigure,
                 thread as u64,
-                captbl as u64,
                 pgtbl as u64,
                 ipc_buffer as u64,
             )

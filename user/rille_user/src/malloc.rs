@@ -8,16 +8,11 @@ use core::{
     slice,
 };
 
-use rille::{
-    addr::Virtual,
-    capability::{
-        paging::{BasePage, PageCaptr, PageTable, PageTableFlags},
-        Captbl, Captr, Notification, RemoteCaptr,
-    },
-};
+use rille::capability::{paging::PageTable, Notification};
 
 use crate::sync::{mutex::Mutex, once_cell::OnceCell};
 
+/// A linked list allocator.
 #[derive(Debug)]
 pub struct LinkedListAlloc {
     inner: Mutex<LinkedListAllocInner>,
@@ -42,7 +37,9 @@ unsafe impl GlobalAlloc for OnceCell<LinkedListAlloc> {
 }
 
 impl LinkedListAlloc {
-    pub fn new(notif: Captr<Notification>, pgtbl: Captr<PageTable>, captbl: Captr<Captbl>) -> Self {
+    /// Create a new `LinkedListAlloc`. The `PageTable` must be the
+    /// current process's page table.
+    pub fn new(notif: Notification, pgtbl: PageTable) -> Self {
         Self {
             inner: Mutex::new(
                 LinkedListAllocInner {
@@ -52,7 +49,6 @@ impl LinkedListAlloc {
                     unmanaged_ptr: ptr::null_mut(),
                     free_list: ptr::null_mut(),
                     pgtbl,
-                    captbl,
                 },
                 notif,
             ),
@@ -60,6 +56,7 @@ impl LinkedListAlloc {
     }
 
     // TODO: make sure there's a limiting address.
+    // TODO: combine init and new.
 
     /// Initialize the [`LinkedListAlloc`].
     ///
@@ -80,8 +77,7 @@ struct LinkedListAllocInner {
     base: *mut u8,
     unmanaged_ptr: *mut u8,
     free_list: *mut FreeNode,
-    pgtbl: Captr<PageTable>,
-    captbl: Captr<Captbl>,
+    pgtbl: PageTable,
 }
 
 impl fmt::Debug for LinkedListAllocInner {
@@ -93,8 +89,7 @@ impl fmt::Debug for LinkedListAllocInner {
             .field("unmanaged_ptr", &self.unmanaged_ptr)
             .field("free_list", &FreeListDebugAdapter(self.free_list))
             .field("pgtbl", &self.pgtbl)
-            .field("captbl", &self.captbl)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -343,17 +338,16 @@ unsafe impl Allocator for LinkedListAlloc {
                         todo!();
                     }
 
-                    // TODO
-                    let pg: PageCaptr<BasePage> = RemoteCaptr::local(alloc.captbl)
-                        .allocate(unsafe { Captr::from_raw_unchecked(49562) }, ())
-                        .unwrap();
-                    pg.map(
-                        alloc.pgtbl,
-                        Virtual::from_usize(alloc.base as usize + alloc.mapped_size),
-                        PageTableFlags::RW,
-                    )
-                    .unwrap();
-                    alloc.mapped_size += 4096 * n_pages;
+                    // let pg: PageCaptr<BasePage> =
+                    //     RemoteCaptr::local(alloc.captbl).create_object(()).unwrap();
+                    todo!("OOPS OOPS OOPS");
+                    // pg.map(
+                    //     alloc.pgtbl,
+                    //     Virtual::from_usize(alloc.base as usize + alloc.mapped_size),
+                    //     PageTableFlags::RW,
+                    // )
+                    // .unwrap();
+                    // alloc.mapped_size += 4096 * n_pages;
                 }
 
                 // SAFETY: This pointer, by the invariants of

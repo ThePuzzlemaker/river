@@ -328,8 +328,8 @@ unsafe extern "C" fn user_trap() -> ! {
         asm::read_sstatus()
     );
 
-    'syscall: {
-        let mut proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+    {
+        let mut thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
         // We cannot deadlock here. Full stop. Here's why:
         // 1. We are the user trap handler. If this lock was held by
@@ -339,7 +339,7 @@ unsafe extern "C" fn user_trap() -> ! {
         // before, we wouldn't have been able to interrupt unless
         // someone enabled interrupts while the lock was still held
         // (which is a bug itself).
-        let mut trapframe_lock = proc.trapframe.lock();
+        let mut trapframe_lock = thread.trapframe.lock();
         trapframe_lock.user_epc = asm::read_sepc();
 
         let scause = asm::read_scause();
@@ -349,7 +349,7 @@ unsafe extern "C" fn user_trap() -> ! {
             "user exception: {}, hart={} pid={} sepc={:#x} stval={:#x} scause={:#x}",
             describe_exception(scause),
             hartid(),
-            proc.tid,
+            thread.tid,
             asm::read_sepc(),
             asm::read_stval(),
             scause
@@ -364,52 +364,56 @@ unsafe extern "C" fn user_trap() -> ! {
             let syscall_no = trapframe_lock.a0.into();
             drop(trapframe_lock);
             match syscall_no {
-                SyscallNumber::CopyDeep => intr = sys_copy_deep(proc, intr),
-                SyscallNumber::AllocateMany => intr = sys_allocate_many(proc, intr),
-                SyscallNumber::DebugCapSlot => intr = sys_debug_cap_slot(proc, intr),
-                SyscallNumber::DebugDumpRoot => intr = sys_debug_dump_root(proc, intr),
-                SyscallNumber::DebugPrint => intr = sys_debug_print(proc, intr),
-                SyscallNumber::Swap => intr = sys_swap(proc, intr),
-                SyscallNumber::Delete => intr = sys_delete(proc, intr),
-                SyscallNumber::PageMap => intr = sys_page_map(proc, intr),
+                SyscallNumber::DebugCapSlot => intr = sys_debug_cap_slot(thread, intr),
+                SyscallNumber::DebugDumpRoot => intr = sys_debug_dump_root(thread, intr),
+                SyscallNumber::DebugPrint => intr = sys_debug_print(thread, intr),
+                SyscallNumber::CaptrDelete => intr = sys_delete(thread, intr),
+                SyscallNumber::PageMap => intr = sys_page_map(thread, intr),
                 SyscallNumber::DebugCapIdentify => {
-                    intr = sys_debug_cap_identify(proc, intr);
+                    intr = sys_debug_cap_identify(thread, intr);
                 }
-                SyscallNumber::ThreadSuspend => intr = sys_thread_suspend(proc, intr),
-                SyscallNumber::ThreadConfigure => intr = sys_thread_configure(proc, intr),
-                SyscallNumber::ThreadResume => intr = sys_thread_resume(proc, intr),
+                SyscallNumber::ThreadSuspend => intr = sys_thread_suspend(thread, intr),
+                SyscallNumber::ThreadConfigure => intr = sys_thread_configure(thread, intr),
+                SyscallNumber::ThreadResume => intr = sys_thread_resume(thread, intr),
                 SyscallNumber::ThreadWriteRegisters => {
-                    intr = sys_thread_write_registers(proc, intr);
+                    intr = sys_thread_write_registers(thread, intr);
                 }
-                SyscallNumber::Grant => intr = sys_grant(proc, intr),
-                SyscallNumber::Yield => intr = sys_yield(proc, intr),
-                SyscallNumber::NotificationWait => intr = sys_notification_wait(proc, intr),
-                SyscallNumber::NotificationSignal => intr = sys_notification_signal(proc, intr),
-                SyscallNumber::NotificationPoll => intr = sys_notification_poll(proc, intr),
-                SyscallNumber::IntrPoolGet => intr = sys_intr_pool_get(proc, intr),
-                SyscallNumber::IntrHandlerBind => intr = sys_intr_handler_bind(proc, intr),
-                SyscallNumber::IntrHandlerAck => intr = sys_intr_handler_ack(proc, intr),
-                SyscallNumber::IntrHandlerUnbind => intr = sys_intr_handler_unbind(proc, intr),
-                SyscallNumber::EndpointRecv => intr = sys_endpoint_recv(proc, intr),
-                SyscallNumber::EndpointSend => intr = sys_endpoint_send(proc, intr),
-                SyscallNumber::EndpointReply => intr = sys_endpoint_reply(proc, intr),
-                SyscallNumber::EndpointCall => intr = sys_endpoint_call(proc, intr),
+                SyscallNumber::CaptrGrant => intr = sys_grant(thread, intr),
+                SyscallNumber::Yield => intr = sys_yield(thread, intr),
+                SyscallNumber::NotificationCreate => intr = sys_notification_create(thread, intr),
+                SyscallNumber::NotificationWait => intr = sys_notification_wait(thread, intr),
+                SyscallNumber::NotificationSignal => intr = sys_notification_signal(thread, intr),
+                SyscallNumber::NotificationPoll => intr = sys_notification_poll(thread, intr),
+                SyscallNumber::IntrPoolGet => intr = sys_intr_pool_get(thread, intr),
+                SyscallNumber::IntrHandlerBind => intr = sys_intr_handler_bind(thread, intr),
+                SyscallNumber::IntrHandlerAck => intr = sys_intr_handler_ack(thread, intr),
+                SyscallNumber::IntrHandlerUnbind => intr = sys_intr_handler_unbind(thread, intr),
+                SyscallNumber::EndpointRecv => intr = sys_endpoint_recv(thread, intr),
+                SyscallNumber::EndpointSend => intr = sys_endpoint_send(thread, intr),
+                SyscallNumber::EndpointReply => intr = sys_endpoint_reply(thread, intr),
+                SyscallNumber::EndpointCall => intr = sys_endpoint_call(thread, intr),
                 // TODO: MCP
-                SyscallNumber::ThreadSetPriority => intr = sys_thread_set_priority(proc, intr),
-                SyscallNumber::ThreadSetIpcBuffer => intr = sys_thread_set_ipc_buffer(proc, intr),
+                SyscallNumber::ThreadSetPriority => intr = sys_thread_set_priority(thread, intr),
+                SyscallNumber::ThreadSetIpcBuffer => intr = sys_thread_set_ipc_buffer(thread, intr),
+                SyscallNumber::JobCreate => intr = sys_job_create(thread, intr),
+                SyscallNumber::JobCreateThread => intr = sys_job_create_thread(thread, intr),
+                SyscallNumber::PageCreate => intr = sys_page_create(thread, intr),
+                SyscallNumber::PageTableCreate => intr = sys_pgtbl_create(thread, intr),
+                SyscallNumber::ThreadStart => intr = sys_thread_start(thread, intr),
+                SyscallNumber::EndpointCreate => intr = sys_endpoint_create(thread, intr),
                 _ => {
-                    proc.trapframe.lock().a0 = CapError::InvalidOperation.into();
+                    thread.trapframe.lock().a0 = CapError::InvalidOperation.into();
                 }
             }
 
-            proc = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
+            thread = LOCAL_HART.thread.borrow().as_ref().cloned().unwrap();
 
-            let mut private = proc.private.lock();
+            let mut private = thread.private.lock();
             if private.state == ThreadState::Suspended {
                 drop(private);
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
-                    proc.yield_to_scheduler_final();
+                    thread.yield_to_scheduler_final();
                 }
             } else if private.state == ThreadState::Blocking {
                 // Make sure we don't hold any locks while we context
@@ -417,7 +421,7 @@ unsafe extern "C" fn user_trap() -> ! {
 
                 private.state = ThreadState::Runnable;
                 drop(private);
-                drop(proc);
+                drop(thread);
                 // SAFETY: This thread is currently running on this
                 // hart, or is in the wait queue.
                 unsafe {
@@ -429,12 +433,12 @@ unsafe extern "C" fn user_trap() -> ! {
             assert!(
                 kind != InterruptKind::Unknown,
                 "user trap from unknown device, pid={} sepc={:#x} stval={:#x} scause={:#x}",
-                proc.tid,
+                thread.tid,
                 trapframe_lock.user_epc,
                 asm::read_stval(),
                 scause
             );
-            let mut private = proc.private.lock();
+            let mut private = thread.private.lock();
             let state = private.state;
             if state == ThreadState::Suspended {
                 drop(trapframe_lock);
@@ -442,7 +446,7 @@ unsafe extern "C" fn user_trap() -> ! {
                 drop(intr);
                 // SAFETY: This thread is currently running on this hart.
                 unsafe {
-                    proc.yield_to_scheduler_final();
+                    thread.yield_to_scheduler_final();
                 }
                 intr = InterruptDisabler::new();
             } else if state == ThreadState::Blocking
@@ -466,12 +470,12 @@ unsafe extern "C" fn user_trap() -> ! {
                         //crate::println!("=====^before^=====");
 
                         let old_prio = private.prio.effective();
-                        Scheduler::dequeue_dl(&proc, &mut private);
-                        proc.prio_diminish_dl(&mut private);
+                        Scheduler::dequeue_dl(&thread, &mut private);
+                        thread.prio_diminish_dl(&mut private);
                         if private.prio.effective() > old_prio {
-                            Scheduler::enqueue_front_dl(&proc, Some(hartid()), &mut private);
+                            Scheduler::enqueue_front_dl(&thread, Some(hartid()), &mut private);
                         } else {
-                            Scheduler::enqueue_dl(&proc, Some(hartid()), &mut private);
+                            Scheduler::enqueue_dl(&thread, Some(hartid()), &mut private);
                         }
                         //Scheduler::debug();
                         //crate::println!("=====^after^=====");
@@ -483,7 +487,7 @@ unsafe extern "C" fn user_trap() -> ! {
                     }
                 }
                 drop(private);
-                drop(proc);
+                drop(thread);
                 drop(intr);
                 // SAFETY: This thread is currently running on this
                 // hart, or is in the wait queue.
@@ -850,23 +854,20 @@ macro_rules! define_syscall {
 }
 
 define_syscall!(sys_debug_dump_root, 0);
-define_syscall!(sys_debug_cap_slot, 2);
+define_syscall!(sys_debug_cap_slot, 1);
 define_syscall!(sys_debug_print, 2);
-define_syscall!(sys_copy_deep, 6);
-define_syscall!(sys_swap, 4);
-define_syscall!(sys_allocate_many, 6);
-define_syscall!(sys_delete, 2);
+define_syscall!(sys_delete, 1);
 define_syscall!(sys_page_map, 4);
-// define_syscall!(sys_pgtbl_map, 4);
-define_syscall!(sys_debug_cap_identify, 2);
+define_syscall!(sys_debug_cap_identify, 1);
 define_syscall!(sys_thread_suspend, 1);
-define_syscall!(sys_thread_configure, 4);
+define_syscall!(sys_thread_configure, 3);
 define_syscall!(sys_thread_resume, 1);
 define_syscall!(sys_thread_write_registers, 2);
-define_syscall!(sys_grant, 6);
+define_syscall!(sys_grant, 3);
+define_syscall!(sys_notification_create, 0);
 define_syscall!(sys_notification_signal, 1);
 define_syscall!(sys_notification_poll, 1);
-define_syscall!(sys_intr_pool_get, 4);
+define_syscall!(sys_intr_pool_get, 2);
 define_syscall!(sys_intr_handler_ack, 1);
 define_syscall!(sys_intr_handler_bind, 2);
 define_syscall!(sys_intr_handler_unbind, 1);
@@ -878,3 +879,9 @@ define_syscall!(sys_endpoint_recv, 3);
 define_syscall!(sys_endpoint_send, 3);
 define_syscall!(sys_endpoint_reply, 3);
 define_syscall!(sys_endpoint_call, 3);
+define_syscall!(sys_job_create, 1);
+define_syscall!(sys_job_create_thread, 3);
+define_syscall!(sys_page_create, 1);
+define_syscall!(sys_pgtbl_create, 0);
+define_syscall!(sys_thread_start, 5);
+define_syscall!(sys_endpoint_create, 0);
