@@ -15,7 +15,7 @@ use rille::{
         DirectMapped, Identity, PgOff, Physical, PhysicalConst, PhysicalMut, Ppn, Virtual,
         VirtualConst, VirtualMut, Vpn,
     },
-    capability::paging::PageSize,
+    capability::paging::{BasePage, GigaPage, MegaPage, PageSize, PagingLevel},
     units::StorageUnits,
 };
 
@@ -555,21 +555,38 @@ impl SharedPageTable {
         virt_addr: VirtualConst<T, Identity>,
     ) -> Option<(PhysicalConst<T, DirectMapped>, PageTableFlags)> {
         let addr = virt_addr.into_usize();
-        let page = virt_addr.page_align().into_usize();
-        let offset = addr - page;
 
         let inner = self.inner.read();
         let mut table = &**inner;
-        for vpn in virt_addr.vpns().into_iter().rev() {
+        for (lvl, vpn) in virt_addr.vpns().into_iter().rev().enumerate() {
             let entry = &table.ptes[vpn.into_usize()].decode();
 
             match entry.kind() {
                 PTEKind::Leaf => {
+                    let page = match lvl {
+                        2 => {
+                            virt_addr
+                                .into_usize()
+                                .next_multiple_of(1 << BasePage::PAGE_SIZE_LOG2)
+                                - (1 << BasePage::PAGE_SIZE_LOG2)
+                        }
+                        1 => {
+                            virt_addr
+                                .into_usize()
+                                .next_multiple_of(1 << MegaPage::PAGE_SIZE_LOG2)
+                                - (1 << MegaPage::PAGE_SIZE_LOG2)
+                        }
+                        0 => {
+                            virt_addr
+                                .into_usize()
+                                .next_multiple_of(1 << GigaPage::PAGE_SIZE_LOG2)
+                                - (1 << GigaPage::PAGE_SIZE_LOG2)
+                        }
+                        _ => unreachable!(),
+                    };
                     let ppn = entry.ppn;
-                    let phys_page = PhysicalConst::from_components(
-                        ppn,
-                        Some(PgOff::from_usize_truncate(offset)),
-                    );
+                    let phys_page = PhysicalConst::from_components(ppn, None);
+                    let phys_page = phys_page.add(addr - page);
                     return Some((phys_page, entry.flags));
                 }
                 PTEKind::Branch(phys_addr) => {

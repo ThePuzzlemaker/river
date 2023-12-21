@@ -89,6 +89,7 @@ pub fn sys_debug_cap_slot(
     let root_hdr_lock = root_hdr.read();
 
     let slot = root_hdr_lock.get::<AnyCap>(index)?;
+
     println!("{:#x?}", slot);
 
     Ok(())
@@ -100,9 +101,10 @@ pub fn sys_debug_print(
     str_ptr: VirtualConst<u8, Identity>,
     str_len: u64,
 ) {
+    //println!("{:#x?}, {:#?}", str_ptr, str_len);
     let str_len = str_len as usize;
 
-    let mut private = thread.private.lock();
+    let private = thread.private.lock();
 
     // assert!(
     //     str_ptr.add(str_len).into_usize() < private.mem_size,
@@ -116,7 +118,7 @@ pub fn sys_debug_print(
         slice::from_raw_parts(
             private
                 .root_pgtbl
-                .as_mut()
+                .as_ref()
                 .unwrap()
                 .walk(str_ptr)
                 .unwrap()
@@ -126,6 +128,7 @@ pub fn sys_debug_print(
             str_len,
         )
     };
+    //println!("{:?}", slice);
 
     let s = core::str::from_utf8(slice).unwrap();
     print!("{}", s);
@@ -856,13 +859,14 @@ pub fn sys_endpoint_recv(
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 
-    let root_hdr = thread.job.captbl.clone();
-    let root_hdr = root_hdr.read();
+    let endpoint = {
+        let root_hdr = thread.job.captbl.clone();
+        let root_hdr = root_hdr.read();
 
-    let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
-    let endpoint = endpoint.cap.endpoint().unwrap();
-
-    sys_endpoint_recv_inner(thread, intr, endpoint).map(|(x, _, _)| x)
+        let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
+        endpoint.cap.endpoint().unwrap().clone()
+    };
+    sys_endpoint_recv_inner(thread, intr, &endpoint).map(|(x, _, _)| x)
 }
 
 pub fn sys_endpoint_recv_inner(
@@ -1112,12 +1116,14 @@ pub fn sys_endpoint_send(
 ) -> CapResult<()> {
     let endpoint = endpoint as usize;
 
-    let root_hdr = thread.job.captbl.clone();
-    let root_hdr = root_hdr.read();
+    let endpoint = {
+        let root_hdr = thread.job.captbl.clone();
+        let root_hdr = root_hdr.read();
 
-    let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
-    let endpoint = endpoint.cap.endpoint().unwrap();
-    sys_endpoint_send_inner(thread, intr, endpoint, hdr).map(|_| ())
+        let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
+        endpoint.cap.endpoint().unwrap().clone()
+    };
+    sys_endpoint_send_inner(thread, intr, &endpoint, hdr).map(|_| ())
 }
 
 #[inline]
@@ -1195,16 +1201,15 @@ pub fn sys_endpoint_reply(
 ) -> CapResult<()> {
     let base_endpoint = base_endpoint as usize;
 
-    let root_hdr = thread.job.captbl.clone();
-    let root_hdr = root_hdr.read();
+    let endpoint = {
+        let root_hdr = thread.job.captbl.clone();
+        let root_hdr = root_hdr.read();
 
-    let base_endpoint = root_hdr.get::<capability::Endpoint>(base_endpoint)?;
-    let base_endpoint = base_endpoint.cap.endpoint().unwrap();
-    let endpoint = base_endpoint
-        .reply_cap
-        .lock()
-        .clone()
-        .ok_or(CapError::InvalidOperation)?;
+        let base_endpoint = root_hdr.get::<capability::Endpoint>(base_endpoint)?;
+        let base_endpoint = base_endpoint.cap.endpoint().unwrap();
+        let lock = base_endpoint.reply_cap.lock();
+        lock.clone().ok_or(CapError::InvalidOperation)?
+    };
     sys_endpoint_send_inner(thread, intr, &endpoint, hdr).map(|_| ())
 }
 
@@ -1219,12 +1224,14 @@ pub fn sys_endpoint_call(
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 
-    let root_hdr = thread.job.captbl.clone();
-    let root_hdr = root_hdr.read();
+    let endpoint = {
+        let root_hdr = thread.job.captbl.clone();
+        let root_hdr = root_hdr.read();
 
-    let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
+        let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
 
-    let endpoint = endpoint.cap.endpoint().unwrap();
+        endpoint.cap.endpoint().unwrap().clone()
+    };
 
     {
         let reply_cap = Arc::new(Endpoint {
@@ -1234,7 +1241,7 @@ pub fn sys_endpoint_call(
         });
         endpoint.reply_cap.lock().replace(reply_cap);
 
-        (thread, intr) = sys_endpoint_send_inner(thread, intr, endpoint, hdr)?;
+        (thread, intr) = sys_endpoint_send_inner(thread, intr, &endpoint, hdr)?;
     }
 
     let hdr = {

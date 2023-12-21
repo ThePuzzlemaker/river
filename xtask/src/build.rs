@@ -159,7 +159,7 @@ impl BuildCtx {
                 self.shell,
                 "{cargo} {subcommand} --profile
                 {profile} {verbose...} {extra...} {mode_extra...}
-                --target riscv64gc-unknown-none-elf"
+                --target riscv64gc-unknown-none-elf --workspace --exclude xtask"
             )
             .run()?;
         }

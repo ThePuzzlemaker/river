@@ -1,5 +1,5 @@
 #symbol-file target/riscv64gc-unknown-none-elf/debug/river
-add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/debug/init
+#add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/debug/init
 add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/debug/procsvr
 #add-symbol-file ~/Code/RISCV/river/target/riscv64gc-unknown-none-elf/release/userspace_testing
 

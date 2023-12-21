@@ -221,10 +221,12 @@ where
 pub struct CaptblHeader {}
 
 impl Captbl {
+    #[track_caller]
     pub fn read(&self) -> SpinRwLockReadGuard<'_, CaptblSlots> {
         self.inner.slots.read()
     }
 
+    #[track_caller]
     pub fn write(&self) -> SpinRwLockWriteGuard<'_, CaptblSlots> {
         self.inner.slots.write()
     }

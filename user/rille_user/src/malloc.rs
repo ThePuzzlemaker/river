@@ -8,7 +8,13 @@ use core::{
     slice,
 };
 
-use rille::capability::{paging::PageTable, Notification};
+use rille::{
+    addr::Virtual,
+    capability::{
+        paging::{BasePage, Page, PageTable, PageTableFlags},
+        Notification,
+    },
+};
 
 use crate::sync::{mutex::Mutex, once_cell::OnceCell};
 
@@ -334,13 +340,20 @@ unsafe impl Allocator for LinkedListAlloc {
                 if grow_heap {
                     let n_bytes = needed_size.next_multiple_of(4096);
                     let n_pages = n_bytes.div_ceil(4096);
-                    if n_pages > 1 {
-                        todo!();
-                    }
 
-                    // let pg: PageCaptr<BasePage> =
-                    //     RemoteCaptr::local(alloc.captbl).create_object(()).unwrap();
-                    todo!("OOPS OOPS OOPS");
+                    // TODO: mmap equivalent with procsvr, once that's done
+                    // TODO: check for when we can use huge pages
+                    for _ in 0..n_pages {
+                        let pg = Page::<BasePage>::create().unwrap();
+                        pg.map(
+                            alloc.pgtbl,
+                            Virtual::from_usize(alloc.base as usize + alloc.mapped_size),
+                            PageTableFlags::RW,
+                        )
+                        .unwrap();
+
+                        alloc.mapped_size += 4096;
+                    }
                     // pg.map(
                     //     alloc.pgtbl,
                     //     Virtual::from_usize(alloc.base as usize + alloc.mapped_size),

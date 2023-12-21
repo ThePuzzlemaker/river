@@ -209,7 +209,6 @@ li {error}, 1
             !(state >= u32::MAX as u64 && state == hartid + u32::MAX as u64),
             "SpinRwLock::read: deadlock detected"
         );
-        //crate::println!("{:#x?}", state);
 
         let old: u64;
 
