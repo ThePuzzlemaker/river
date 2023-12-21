@@ -134,9 +134,11 @@ impl BuildCtx {
             return Ok(());
         }
 
-        for (_package, dir) in Self::get_build_dirs()? {
-            let _is_last = dir.as_path() == Path::new("kernel/");
-            let _cwd = self.shell.push_dir(dir.clone());
+        //for (_package, dir) in Self::get_build_dirs()? {
+        {
+            //let _is_last = dir.as_path() == Path::new("kernel/");
+            //let _cwd = self.shell.push_dir(dir.clone());
+            let _cwd = self.shell.push_dir("kernel/");
 
             let subcommand = match mode {
                 BuildMode::Build => "build",

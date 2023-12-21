@@ -520,6 +520,7 @@ dependencies = [
  "bytemuck",
  "cc",
  "fdt",
+ "init",
  "itertools",
  "log",
  "memoffset",

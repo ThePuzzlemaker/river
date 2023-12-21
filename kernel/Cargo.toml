@@ -31,3 +31,4 @@ default-features = false
 
 [build-dependencies]
 cc = "1.0.73"
+init = { path = "../user/init", artifact = "bin", target = "riscv64gc-unknown-none-elf" }

@@ -4,7 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/linker.ld");
 
-    let mut procsvr = PathBuf::from(env::var("CARGO_BIN_FILE_PROCSVR").unwrap());
+    let procsvr = PathBuf::from(env::var("CARGO_BIN_FILE_PROCSVR").unwrap());
     println!("cargo:rerun-if-changed={}", procsvr.display());
     let procsvr_bin = procsvr.with_file_name("procsvr.bin");
 

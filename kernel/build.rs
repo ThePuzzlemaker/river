@@ -4,11 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/linker.ld");
 
-    let mut init = PathBuf::from(env::var("OUT_DIR").unwrap());
-    init.pop();
-    init.pop();
-    init.pop();
-    init.push("init");
+    let init = PathBuf::from(env::var("CARGO_BIN_FILE_INIT").unwrap());
     println!("cargo:rerun-if-changed={}", init.display());
     let init_bin = init.with_file_name("init.bin");
 
