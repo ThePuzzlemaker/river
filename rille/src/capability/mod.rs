@@ -242,8 +242,11 @@ impl Capability for Empty {
     }
 }
 
-/// Extension trait for the universal `captr_delete` syscall.
-pub trait DeleteExt {
+/// Extension trait for universal captr syscalls.
+pub trait CaptrOps
+where
+    Self: Sized,
+{
     /// Remove the capability from the slot referred to by this
     /// `RemoteCaptr`. Children capabilities derived from it are not
     /// affected.
@@ -254,15 +257,38 @@ pub trait DeleteExt {
     /// # Errors
     ///
     /// TODO
-
     fn delete(self) -> CapResult<()>;
+
+    /// TODO
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    fn grant(self, rights: CapRights, badge: Option<NonZeroU64>) -> CapResult<Self>;
 }
 
-impl<C: Capability> DeleteExt for C {
+impl<C: Capability> CaptrOps for C {
     fn delete(self) -> CapResult<()> {
         syscalls::captr::delete(self.into_raw())?;
 
         Ok(())
+    }
+
+    fn grant(self, rights: CapRights, badge: Option<NonZeroU64>) -> CapResult<Self> {
+        // SAFETY: CaptrGrant is always safe.
+        let res = unsafe {
+            syscalls::ecall3(
+                SyscallNumber::CaptrGrant,
+                self.into_raw() as u64,
+                rights.bits,
+                badge.map_or(0, NonZeroU64::get),
+            )
+        };
+
+        res.map(|x| x as usize)
+            .map(Captr::from_raw)
+            .map(C::from_captr)
+            .map_err(CapError::from)
     }
 }
 
@@ -729,7 +755,11 @@ impl Endpoint {
     /// # Errors
     ///
     /// TODO
-    pub fn recv_with_regs(self, cap: Option<&mut Captr>) -> CapResult<(MessageHeader, [u64; 4])> {
+    pub fn recv_with_regs(
+        self,
+        sender: Option<&mut Option<NonZeroU64>>,
+        cap: Option<&mut Captr>,
+    ) -> CapResult<(MessageHeader, [u64; 4])> {
         let mr0: u64;
         let mr1: u64;
         let mr2: u64;
@@ -745,7 +775,7 @@ impl Endpoint {
                 in("a1") self.into_raw() as u64,
                 lateout("a0") err,
 		lateout("a1") val,
-		in("a2") 0,
+		in("a2") sender.map(|x| x as *mut _ as u64).unwrap_or_default(),
                 in("a3") cap.map(|x| x as *mut _ as u64).unwrap_or_default(),
                 out("a4") mr0,
                 out("a5") mr1,

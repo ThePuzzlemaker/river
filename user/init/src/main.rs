@@ -4,7 +4,9 @@
 
 use core::{
     arch::{asm, global_asm},
-    cmp, fmt, mem, ptr, slice,
+    cmp, fmt, mem,
+    num::NonZeroU64,
+    ptr, slice,
 };
 
 use alloc::vec;
@@ -525,6 +527,24 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
                 .cast::<BootFsEntry>(),
             hdr.n_entries as usize,
         );
+        println!(
+            "Loaded bootfs (compressed size {} bytes) with {} {}",
+            BOOTFS.len(),
+            entries.len(),
+            if entries.len() != 1 {
+                "entries"
+            } else {
+                "entry"
+            }
+        );
+        for x in entries {
+            let s = core::str::from_utf8_unchecked(slice::from_raw_parts(
+                bootfs.as_ptr().add(x.name_offset as usize),
+                x.name_length as usize,
+            ));
+
+            println!("- {}: {} bytes", s, x.length);
+        }
 
         let procsvr_entry = entries
             .iter()
@@ -583,11 +603,51 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             .unwrap();
     }
 
+    let procsvr_endpoint = procsvr_endpoint
+        .grant(CapRights::all(), NonZeroU64::new(0xb007d00d))
+        .unwrap();
+
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *job, [0; 4])
+        .unwrap();
+
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *procsvr, [0; 4])
+        .unwrap();
+
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *procsvr_stack_1, [0; 4])
+        .unwrap();
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *procsvr_stack_2, [0; 4])
+        .unwrap();
+
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *procsvr_ipc_buf, [0; 4])
+        .unwrap();
+
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *procsvr_pgtbl, [0; 4])
+        .unwrap();
+
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *caps.thread, [0; 4])
+        .unwrap();
+    procsvr_endpoint
+        .send_with_regs(MessageHeader::new(), *caps.job, [0; 4])
+        .unwrap();
+
+    for page in procsvr_pages {
+        procsvr_endpoint
+            .send_with_regs(MessageHeader::new(), *page, [0; 4])
+            .unwrap();
+    }
+
     procsvr_endpoint
         .send_with_regs(
-            MessageHeader::new().with_length(0).with_private(0),
-            *job,
-            [0; 4],
+            MessageHeader::new().with_length(4).with_private(0xdeadbeef),
+            Captr::null(),
+            [0xDEADBEEF, 0xC0DED00D, 0xC0DEBEEF, 0xDEADD00D],
         )
         .unwrap();
 

@@ -856,10 +856,30 @@ pub fn sys_endpoint_recv(
     thread: Arc<Thread>,
     intr: InterruptDisabler,
     endpoint: u64,
-    _: u64,
+    sender_info: u64,
     _dst_slot: u64,
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
+
+    let sender_info = 'addr: {
+        let lock = thread.private.lock();
+        let Some(pgtbl) = lock.root_pgtbl.as_ref() else {
+            break 'addr ptr::null_mut();
+        };
+        let Some((addr, flags)) = pgtbl.walk(VirtualConst::from_ptr(sender_info as *const usize))
+        else {
+            break 'addr ptr::null_mut();
+        };
+        if flags.contains(
+            crate::paging::PageTableFlags::WRITE
+                | crate::paging::PageTableFlags::USER
+                | crate::paging::PageTableFlags::VALID,
+        ) {
+            addr.into_virt().into_ptr().cast_mut()
+        } else {
+            break 'addr ptr::null_mut();
+        }
+    };
 
     let endpoint = {
         let root_hdr = thread.job.captbl.clone();
@@ -868,14 +888,22 @@ pub fn sys_endpoint_recv(
         let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
         endpoint.cap.endpoint().unwrap().clone()
     };
-    sys_endpoint_recv_inner(thread, intr, &endpoint).map(|(x, _, _)| x)
+    let (hdr, badge) =
+        sys_endpoint_recv_inner(thread, intr, &endpoint).map(|(x, y, _, _)| (x, y))?;
+
+    if !sender_info.is_null() && sender_info.is_aligned() {
+        // SAFETY: This address is valid and non-null.
+        unsafe { *sender_info = badge as usize };
+    }
+
+    Ok(hdr)
 }
 
 pub fn sys_endpoint_recv_inner(
     thread: Arc<Thread>,
     mut intr: InterruptDisabler,
     endpoint: &Arc<Endpoint>,
-) -> CapResult<(MessageHeader, Arc<Thread>, InterruptDisabler)> {
+) -> CapResult<(MessageHeader, u64, Arc<Thread>, InterruptDisabler)> {
     let recv_wq = &endpoint.recv_wait_queue;
     {
         let mut recv_wq_lock = recv_wq.lock();
@@ -884,7 +912,7 @@ pub fn sys_endpoint_recv_inner(
         let mut send_wq_lock = endpoint.send_wait_queue.lock();
         if let Some(sender) = send_wq_lock.find_highest_thread() {
             let mut sender_private = sender.private.lock();
-            let msg_hdr = endpoint_recv(
+            let (msg_hdr, badge) = endpoint_recv(
                 &thread,
                 &sender,
                 &mut private,
@@ -895,7 +923,7 @@ pub fn sys_endpoint_recv_inner(
             );
             sender_private.recv_fastpath = true;
             drop(private);
-            return Ok((msg_hdr, thread, intr));
+            return Ok((msg_hdr, badge, thread, intr));
         }
         drop(send_wq_lock);
 
@@ -916,14 +944,14 @@ pub fn sys_endpoint_recv_inner(
 
     let mut private = thread.private.lock();
 
-    if let Some(hdr) = private.send_fastpath.take() {
+    if let Some((hdr, badge)) = private.send_fastpath.take() {
         drop(private);
-        return Ok((hdr, thread, intr));
+        return Ok((hdr, badge, thread, intr));
     }
 
     let mut send_wq_lock = endpoint.send_wait_queue.lock();
     let sender = send_wq_lock.find_highest_thread().unwrap();
-    let msg_hdr = endpoint_recv(
+    let (msg_hdr, badge) = endpoint_recv(
         &thread,
         &sender,
         &mut private,
@@ -933,7 +961,7 @@ pub fn sys_endpoint_recv_inner(
         false,
     );
     drop(private);
-    Ok((msg_hdr, thread, intr))
+    Ok((msg_hdr, badge, thread, intr))
 }
 
 #[inline]
@@ -945,7 +973,7 @@ fn endpoint_recv(
     endpoint: &Arc<Endpoint>,
     send_wq: &mut WaitQueue,
     send_fastpath: bool,
-) -> MessageHeader {
+) -> (MessageHeader, u64) {
     if !send_fastpath {
         endpoint.block_senders(thread, private, send_wq);
         *sender.blocked_on_wq.lock() = None;
@@ -957,10 +985,21 @@ fn endpoint_recv(
     let sender_root = sender.job.captbl.clone();
     let receiver_root = thread.job.captbl.clone();
 
-    let hdr = if send_fastpath {
+    let (hdr, badge) = if send_fastpath {
         private.send_fastpath.unwrap()
     } else {
-        MessageHeader::from_raw(sender.trapframe.lock().a2)
+        // TODO
+        let sender_captbl = &sender.job.captbl;
+        let sender_captbl = sender_captbl.read();
+
+        let slot = sender_captbl
+            .get::<capability::Endpoint>(sender.trapframe.lock().a1 as usize)
+            .unwrap();
+
+        (
+            MessageHeader::from_raw(sender.trapframe.lock().a2),
+            slot.badge.map_or(0, NonZeroU64::get),
+        )
     };
 
     'cap_transfer: {
@@ -1089,7 +1128,7 @@ fn endpoint_recv(
         endpoint.unblock_senders(thread, private, send_wq);
     }
 
-    hdr
+    (hdr, badge)
 }
 
 // TODO: extract this into a general "wake" function
@@ -1118,14 +1157,21 @@ pub fn sys_endpoint_send(
 ) -> CapResult<()> {
     let endpoint = endpoint as usize;
 
-    let endpoint = {
+    let (endpoint, badge) = {
         let root_hdr = thread.job.captbl.clone();
         let root_hdr = root_hdr.read();
 
         let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
-        endpoint.cap.endpoint().unwrap().clone()
+        (endpoint.cap.endpoint().unwrap().clone(), endpoint.badge)
     };
-    sys_endpoint_send_inner(thread, intr, &endpoint, hdr).map(|_| ())
+    sys_endpoint_send_inner(
+        thread,
+        intr,
+        &endpoint,
+        hdr,
+        badge.map_or(0, NonZeroU64::get),
+    )
+    .map(|_| ())
 }
 
 #[inline]
@@ -1134,6 +1180,7 @@ pub fn sys_endpoint_send_inner(
     mut intr: InterruptDisabler,
     endpoint: &Arc<Endpoint>,
     hdr: MessageHeader,
+    badge: u64,
 ) -> CapResult<(Arc<Thread>, InterruptDisabler)> {
     let send_wq = &endpoint.send_wait_queue;
     {
@@ -1143,7 +1190,7 @@ pub fn sys_endpoint_send_inner(
         let mut recv_wq_lock = endpoint.recv_wait_queue.lock();
         if let Some(receiver) = recv_wq_lock.find_highest_thread() {
             let mut receiver_private = receiver.private.lock();
-            receiver_private.send_fastpath = Some(hdr);
+            receiver_private.send_fastpath = Some((hdr, badge));
             drop(recv_wq_lock);
             endpoint_recv(
                 &receiver,
@@ -1203,16 +1250,26 @@ pub fn sys_endpoint_reply(
 ) -> CapResult<()> {
     let base_endpoint = base_endpoint as usize;
 
-    let endpoint = {
+    let (endpoint, badge) = {
         let root_hdr = thread.job.captbl.clone();
         let root_hdr = root_hdr.read();
 
-        let base_endpoint = root_hdr.get::<capability::Endpoint>(base_endpoint)?;
-        let base_endpoint = base_endpoint.cap.endpoint().unwrap();
+        let base_endpoint_slot = root_hdr.get::<capability::Endpoint>(base_endpoint)?;
+        let base_endpoint = base_endpoint_slot.cap.endpoint().unwrap();
         let lock = base_endpoint.reply_cap.lock();
-        lock.clone().ok_or(CapError::InvalidOperation)?
+        (
+            lock.clone().ok_or(CapError::InvalidOperation)?,
+            base_endpoint_slot.badge,
+        )
     };
-    sys_endpoint_send_inner(thread, intr, &endpoint, hdr).map(|_| ())
+    sys_endpoint_send_inner(
+        thread,
+        intr,
+        &endpoint,
+        hdr,
+        badge.map_or(0, NonZeroU64::get),
+    )
+    .map(|_| ())
 }
 
 // TODO: reply_recv a1 = endpt, a2 = hdr, a3 = &badge, a4_in=cap a4_lateout-a7 = MRs
@@ -1226,13 +1283,13 @@ pub fn sys_endpoint_call(
 ) -> CapResult<MessageHeader> {
     let endpoint = endpoint as usize;
 
-    let endpoint = {
+    let (endpoint, badge) = {
         let root_hdr = thread.job.captbl.clone();
         let root_hdr = root_hdr.read();
 
         let endpoint = root_hdr.get::<capability::Endpoint>(endpoint)?;
 
-        endpoint.cap.endpoint().unwrap().clone()
+        (endpoint.cap.endpoint().unwrap().clone(), endpoint.badge)
     };
 
     {
@@ -1243,12 +1300,18 @@ pub fn sys_endpoint_call(
         });
         endpoint.reply_cap.lock().replace(reply_cap);
 
-        (thread, intr) = sys_endpoint_send_inner(thread, intr, &endpoint, hdr)?;
+        (thread, intr) = sys_endpoint_send_inner(
+            thread,
+            intr,
+            &endpoint,
+            hdr,
+            badge.map_or(0, NonZeroU64::get),
+        )?;
     }
 
     let hdr = {
         let reply_cap = endpoint.reply_cap.lock().clone().unwrap();
-        let (hdr, _, _) = sys_endpoint_recv_inner(thread, intr, &reply_cap)?;
+        let (hdr, _, _, _) = sys_endpoint_recv_inner(thread, intr, &reply_cap)?;
         *endpoint.reply_cap.lock() = None;
         hdr
     };
