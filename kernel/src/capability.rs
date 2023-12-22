@@ -75,7 +75,7 @@ pub struct CapabilitySlotInner {
 pub enum CapabilityKind {
     Empty = CapabilityType::Empty as u8,
     PgTbl(SharedPageTable) = CapabilityType::PgTbl as u8,
-    Page(Page) = CapabilityType::Page as u8,
+    Page(Arc<Page>) = CapabilityType::Page as u8,
     Thread(Arc<Thread>) = CapabilityType::Thread as u8,
     Notification(Arc<Notification>) = CapabilityType::Notification as u8,
     InterruptPool(Arc<InterruptPool>) = CapabilityType::InterruptPool as u8,
@@ -119,15 +119,7 @@ impl CapabilityKind {
         }
     }
 
-    pub fn page(&self) -> Option<&Page> {
-        if let Self::Page(page) = self {
-            Some(page)
-        } else {
-            None
-        }
-    }
-
-    pub fn page_mut(&mut self) -> Option<&mut Page> {
+    pub fn page(&self) -> Option<&Arc<Page>> {
         if let Self::Page(page) = self {
             Some(page)
         } else {
@@ -337,7 +329,7 @@ impl<'a> CapToOwned for SlotRefMut<'a, EmptyCap> {
 #[derive(Clone, Debug)]
 pub enum AnyCapVal {
     Empty,
-    Page(Page),
+    Page(Arc<Page>),
     PgTbl(SharedPageTable),
     Thread(Arc<Thread>),
     Notification(Arc<Notification>),
@@ -422,7 +414,7 @@ impl CapabilityValue for Empty {
         CapabilityKind::Empty
     }
 }
-impl CapabilityValue for Page {
+impl CapabilityValue for Arc<Page> {
     type Cap = PageCap;
     fn into_kind(self) -> CapabilityKind {
         CapabilityKind::Page(self)
@@ -468,7 +460,7 @@ impl CapabilityValue for AnyCapVal {
             match slot.cap {
                 CapabilityKind::Empty => Empty::copy_hook(slot),
                 CapabilityKind::PgTbl(_) => SharedPageTable::copy_hook(slot),
-                CapabilityKind::Page(_) => Page::copy_hook(slot),
+                CapabilityKind::Page(_) => Arc::<Page>::copy_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::copy_hook(slot),
                 CapabilityKind::Notification(_) => Arc::<Notification>::copy_hook(slot),
                 CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::copy_hook(slot),
@@ -485,7 +477,7 @@ impl CapabilityValue for AnyCapVal {
             match slot.cap {
                 CapabilityKind::Empty => Empty::delete_hook(slot),
                 CapabilityKind::PgTbl(_) => SharedPageTable::delete_hook(slot),
-                CapabilityKind::Page(_) => Page::delete_hook(slot),
+                CapabilityKind::Page(_) => Arc::<Page>::delete_hook(slot),
                 CapabilityKind::Thread(_) => Arc::<Thread>::delete_hook(slot),
                 CapabilityKind::Notification(_) => Arc::<Notification>::delete_hook(slot),
                 CapabilityKind::InterruptHandler(_) => Arc::<InterruptHandler>::delete_hook(slot),
@@ -555,12 +547,12 @@ impl Page {
     /// - `phys` must be valid for `1 << size_log2` bytes.
     /// - `phys` must be aligned to `1 << size_log2` bytes.
     // TODO: dealloc?
-    pub unsafe fn new(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Self {
-        Self {
+    pub unsafe fn new(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Arc<Self> {
+        Arc::new(Self {
             phys,
             size_log2,
             is_device: false,
-        }
+        })
     }
 
     /// Create a page capability from MMIO.
@@ -568,11 +560,24 @@ impl Page {
     /// # Safety
     ///
     /// See [`Self::new`].
-    pub unsafe fn new_device(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Self {
-        Self {
+    pub unsafe fn new_device(phys: PhysicalMut<u8, DirectMapped>, size_log2: u8) -> Arc<Self> {
+        Arc::new(Self {
             phys,
             size_log2,
             is_device: true,
+        })
+    }
+}
+
+impl Drop for Page {
+    fn drop(&mut self) {
+        if !self.is_device {
+            let mut pma = PMAlloc::get();
+            // SAFETY: This chunk is valid and, by our invariants, was
+            // allocated with PMAlloc. Due to how PMAlloc works, it is
+            // valid to call deallocate with an order that is strictly
+            // lower than the order with which it was allocated.
+            unsafe { pma.deallocate(self.phys, kalloc::phys::what_order(1 << self.size_log2)) };
         }
     }
 }
@@ -686,7 +691,7 @@ impl<'a> SlotRef<'a, ThreadCap> {
     pub fn configure(
         &self,
         pgtbl: SharedPageTable,
-        ipc_buffer: Option<PhysicalMut<u8, DirectMapped>>,
+        ipc_buffer: Option<Arc<Page>>,
     ) -> CapResult<()> {
         use crate::paging::PageTableFlags as KernelFlags;
         // SAFETY: Type check.
@@ -713,6 +718,10 @@ impl<'a> SlotRef<'a, ThreadCap> {
         );
 
         private.state = ThreadState::Suspended;
+        if ipc_buffer.as_ref().is_some_and(|x| x.is_device) {
+            return Err(CapError::InvalidOperation);
+        }
+
         private.ipc_buffer = ipc_buffer;
 
         drop(private);
@@ -1261,9 +1270,8 @@ pub struct ThreadProtected {
     pub prio: ThreadPriorities,
     pub state: ThreadState,
     pub hartid: u64,
-    // TODO: handle `Page`s being dropped--make this an Arc
-    pub ipc_buffer: Option<PhysicalMut<u8, DirectMapped>>,
-    pub send_fastpath: Option<MessageHeader>,
+    pub ipc_buffer: Option<Arc<Page>>,
+    pub send_fastpath: Option<(MessageHeader, u64)>,
     pub recv_fastpath: bool,
 }
 
@@ -1666,7 +1674,7 @@ mod impls {
         }
     }
     impl Capability for PageCap {
-        type Value = super::Page;
+        type Value = Arc<super::Page>;
         fn is_valid_type(cap_type: CapabilityType) -> bool {
             cap_type == CapabilityType::Page
         }

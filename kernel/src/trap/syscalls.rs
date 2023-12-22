@@ -41,7 +41,6 @@ use crate::{
     print, println,
     sched::Scheduler,
     sync::{SpinMutex, SpinRwLock},
-    trampoline::Trapframe,
 };
 
 pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
@@ -60,7 +59,6 @@ pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Res
         total,
         free
     );
-    crate::info!("thread.prio={:#?}", &thread.private.lock().prio);
     Ok(())
 }
 
@@ -506,7 +504,7 @@ pub fn sys_thread_configure(
         {
             return Err(CapError::InvalidOperation);
         }
-        thread_cap.configure(pgtbl, Some(ipc_buffer.cap.page().unwrap().phys))?;
+        thread_cap.configure(pgtbl, Some(ipc_buffer.cap.page().unwrap().clone()))?;
     } else {
         thread_cap.configure(pgtbl, None)?;
     }
@@ -784,7 +782,11 @@ pub fn sys_thread_set_ipc_buffer(
         return Err(CapError::InvalidOperation);
     }
 
-    private.ipc_buffer = Some(ipc_buffer.cap.page().unwrap().phys);
+    if ipc_buffer.cap.page().unwrap().is_device {
+        return Err(CapError::InvalidOperation);
+    }
+
+    private.ipc_buffer = Some(ipc_buffer.cap.page().unwrap().clone());
 
     Ok(())
 }
@@ -1053,8 +1055,8 @@ fn endpoint_recv(
             rx_trapframe.a7 = tx_trapframe.a7;
         }
         _ => {
-            if let Some(recv_buffer) = private.ipc_buffer {
-                if let Some(send_buffer) = sender_private.ipc_buffer {
+            if let Some(recv_buffer) = &private.ipc_buffer {
+                if let Some(send_buffer) = &sender_private.ipc_buffer {
                     if recv_buffer == send_buffer {
                         // buffers are aliased, no-op (buffers must be
                         // page-aligned).
@@ -1062,8 +1064,8 @@ fn endpoint_recv(
                         // SAFETY: TODO: deal with page dealloc
                         unsafe {
                             core::ptr::copy_nonoverlapping(
-                                send_buffer.into_virt().into_ptr(),
-                                recv_buffer.into_virt().into_ptr_mut(),
+                                send_buffer.phys.into_virt().into_ptr(),
+                                recv_buffer.phys.into_virt().into_ptr_mut(),
                                 len * mem::size_of::<u64>(),
                             );
                         }
