@@ -8,6 +8,15 @@ fn main() {
     println!("cargo:rerun-if-changed={}", init.display());
     let init_bin = init.with_file_name("init.bin");
 
+    if env::var("PROFILE").unwrap() == "release" {
+        Command::new("rust-strip")
+            .args(["-s", init.to_str().unwrap()])
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
+    }
+
     Command::new("rust-objcopy")
         .args([
             "-O",
@@ -19,6 +28,8 @@ fn main() {
             "--keep-section=.bss",
         ])
         .spawn()
+        .unwrap()
+        .wait()
         .unwrap();
 
     println!(

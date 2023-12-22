@@ -10,7 +10,15 @@ fn main() {
     let procsvr = PathBuf::from(env::var("CARGO_BIN_FILE_PROCSVR").unwrap());
     println!("cargo:rerun-if-changed={}", procsvr.display());
     let procsvr_bin = procsvr.with_file_name("procsvr.bin");
-    println!("{}", procsvr_bin.display());
+
+    if env::var("PROFILE").unwrap() == "release" {
+        Command::new("rust-strip")
+            .args(["-s", procsvr.to_str().unwrap()])
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
+    }
 
     Command::new("rust-objcopy")
         .args([
@@ -31,7 +39,6 @@ fn main() {
         String::from("procsvr"),
         std::fs::read(&procsvr_bin).unwrap(),
     )];
-    println!("{:#?}", files);
 
     let mut bootfs = PathBuf::from(env::var("OUT_DIR").unwrap());
     bootfs.push("bootfs.lz4");

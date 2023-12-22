@@ -3,11 +3,7 @@ use color_eyre::eyre;
 use tokio::process::Command;
 use xshell::cmd;
 
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::Stdio,
-};
+use std::{env, path::PathBuf, process::Stdio};
 
 pub enum BuildMode {
     Build,
