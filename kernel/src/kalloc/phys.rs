@@ -91,6 +91,13 @@ impl PMAlloc {
                 );
             }
         }
+        let max_order = pma.max_order;
+        for (order, bound) in pma.lower_bounds.iter_mut().enumerate() {
+            if order > max_order as usize {
+                break;
+            }
+            *bound = Bitree::ix_of_first_(max_order, order as u32);
+        }
     }
 }
 
@@ -101,6 +108,7 @@ pub struct PMAllocInner {
     base: PhysicalMut<u8, DirectMapped>,
     max_order: u32,
     size: usize,
+    lower_bounds: [usize; (TOTAL_MAX_ORDER + 1) as usize],
 }
 
 type PMAllocLock<'a> = SpinMutexGuard<'a, PMAllocInner>;
@@ -117,6 +125,7 @@ impl PMAllocInner {
             base: Physical::null(),
             max_order: 0,
             size: 0,
+            lower_bounds: [0; (TOTAL_MAX_ORDER + 1) as usize],
         }
     }
 
@@ -140,12 +149,13 @@ impl PMAllocInner {
         let ix = self.bitree.ix_of(alloc_off, order).unwrap();
         // Set the bit of this order and all above
         self.bitree.set(ix, true);
-        self.set_above(ix);
+        self.set_above(ix, order);
         // Set below, also.
-        self.set_below(ix, true);
+        self.set_below(ix, true, order);
     }
 
-    fn set_above(&mut self, ix: usize) {
+    fn set_above(&mut self, ix: usize, mut order: u32) {
+        order += 1;
         let mut loop_ix = self.bitree.parent(ix);
 
         // Set the bit of all the orders above the provided order
@@ -154,23 +164,40 @@ impl PMAllocInner {
             if self.bitree.set(ix, true) {
                 break;
             }
+            if (0..=TOTAL_MAX_ORDER).contains(&order) && ix < self.lower_bounds[order as usize] {
+                self.lower_bounds[order as usize] = ix;
+            }
             loop_ix = self.bitree.parent(ix);
+            order += 1;
         }
     }
 
-    fn set_below(&mut self, ix: usize, val: bool) {
+    fn set_below(&mut self, ix: usize, val: bool, order: u32) {
         // Set the bit of the left child and right child, then
         // recurse. It's fine to recurse here as we will be at a max
         // of TOTAL_MAX_ORDER, which is 36, and if we don't have
         // enough stack on the kernel for a depth of 36, we have a
         // bigger problem.
+        if order == 0 {
+            return;
+        }
         if let Some(left) = self.bitree.left_child(ix) {
             self.bitree.set(left, val);
-            self.set_below(left, val);
+            if (1..=TOTAL_MAX_ORDER).contains(&order)
+                && left < self.lower_bounds[(order - 1) as usize]
+            {
+                self.lower_bounds[(order - 1) as usize] = left;
+            }
+            self.set_below(left, val, order - 1);
         }
         if let Some(right) = self.bitree.right_child(ix) {
             self.bitree.set(right, val);
-            self.set_below(right, val);
+            if (1..=TOTAL_MAX_ORDER).contains(&order)
+                && right < self.lower_bounds[(order - 1) as usize]
+            {
+                self.lower_bounds[(order - 1) as usize] = right;
+            }
+            self.set_below(right, val, order - 1);
         }
     }
 
@@ -189,20 +216,21 @@ impl PMAllocInner {
 
         let ix_base = self.bitree.ix_of_first(order);
         let n_nodes = self.bitree.num_nodes(order);
-        for ix in ix_base..ix_base + n_nodes {
+        for ix in self.lower_bounds[order as usize]..ix_base + n_nodes {
             // Set the bit. Continue if it was already set.
             if self.bitree.set(ix, true) {
                 continue;
             }
-            // The bit was not already set, so we have our chunk.
-            // We need to make sure the blocks above are split, iff necessary.
-            // The bit was not already set, so we have our chunk.  We
+            self.lower_bounds[order as usize] = ix;
+            // The bit was not already set, so we have our chunk. We
             // need to make sure the blocks above are split, iff
-            // necessary.
-            self.set_above(ix);
+            // necessary. The bit was not already set, so we have our
+            // chunk. We need to make sure the blocks above are split,
+            // iff necessary.
+            self.set_above(ix, order);
             // We also need to make sure we mark the blocks below us
             // as used.
-            self.set_below(ix, true);
+            self.set_below(ix, true, order);
 
             let alloc_off = self.bitree.alloc_off_of(ix).unwrap();
             let offset_addr = alloc_off * 4096 * (1 << order);
@@ -280,8 +308,12 @@ impl PMAllocInner {
         );
 
         // Set all blocks below us as unused.
-        self.set_below(ix, false);
+        self.set_below(ix, false, order);
+        if ix < self.lower_bounds[order as usize] {
+            self.lower_bounds[order as usize] = ix;
+        }
 
+        let mut order = order;
         let mut loop_sibling = self.bitree.sibling(ix);
         while let Some(sibling) = loop_sibling {
             // Can't coalesce, sibling was allocated.
@@ -291,8 +323,12 @@ impl PMAllocInner {
 
             // We can coalesce.
             if let Some(parent) = self.bitree.parent(sibling) {
+                order += 1;
                 // Unset the parent.
                 self.bitree.set(parent, false);
+                if ix < self.lower_bounds[order as usize] {
+                    self.lower_bounds[order as usize] = ix;
+                }
                 // Continue the loop with the parent's sibling.
                 loop_sibling = self.bitree.sibling(parent);
             } else {
@@ -500,6 +536,11 @@ impl Bitree {
     /// Get the index of the first node in the order'th level of the tree, bottom-up
     pub fn ix_of_first(&self, order: u32) -> usize {
         (1 << (self.max_order - order)) - 1
+    }
+
+    /// Get the index of the first node in the order'th level of the tree, bottom-up
+    pub fn ix_of_first_(max_order: u32, order: u32) -> usize {
+        (1 << (max_order - order)) - 1
     }
 
     /// Get the `alloc_off` of the ix'th node
