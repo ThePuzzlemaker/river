@@ -65,7 +65,6 @@ impl Default for UserMemoryManager {
         // SAFETY: The page is zeroed and thus is well-defined and valid.
         let table =
             unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
-        let table = Arc::new(SpinRwLock::new(table));
         Self {
             table: SharedPageTable::from_inner(table),
             map: BTreeMap::new(),
@@ -108,7 +107,7 @@ impl UserMemoryManager {
             let from = backing_mem.add(page * 4.kib()).into_identity().into_const();
             let to = addr.add(page * 4.kib());
             let flags = req.flags;
-            self.table.map(from, to, flags, PageSize::Base);
+            self.table.map(None, from, to, flags, PageSize::Base);
         }
 
         let range = addr..addr.add(req.n_pages * 4.kib());
@@ -133,7 +132,7 @@ impl UserMemoryManager {
         to: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
     ) {
-        self.table.map(from, to, flags, PageSize::Base);
+        self.table.map(None, from, to, flags, PageSize::Base);
     }
 
     pub fn get_table(&self) -> &SharedPageTable {

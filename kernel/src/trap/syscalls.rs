@@ -44,7 +44,7 @@ use crate::{
 };
 
 pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
-    crate::println!("{:#x?}", thread.job.captbl);
+    //crate::println!("{:#x?}", thread.job.captbl);
     let (free, total) = {
         let pma = PMAlloc::get();
         (pma.num_free_pages(), pma.num_pages())
@@ -312,7 +312,6 @@ pub fn sys_pgtbl_create(thread: Arc<Thread>, _intr: InterruptDisabler) -> CapRes
     // SAFETY: The page is zeroed and thus is well-defined and valid.
     let pgtbl =
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
-    let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
 
     let _ = slot.replace(pgtbl);

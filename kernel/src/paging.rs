@@ -7,7 +7,7 @@ use core::{
     slice,
 };
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use bitflags::bitflags;
 
 use rille::{
@@ -21,6 +21,7 @@ use rille::{
 
 use crate::{
     asm::{self, get_satp},
+    capability::Page,
     kalloc::phys::PMAlloc,
     sync::{OnceCell, SpinMutex, SpinRwLock},
 };
@@ -476,7 +477,13 @@ pub fn enabled() -> bool {
 
 #[derive(Clone, Debug)]
 pub struct SharedPageTable {
-    inner: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>,
+    inner: Arc<SpinRwLock<SharedPageTableInner>>,
+}
+
+#[derive(Debug)]
+pub struct SharedPageTableInner {
+    inner: Box<RawPageTable, PagingAllocator>,
+    pages: BTreeMap<usize, Arc<Page>>,
 }
 
 impl PartialEq for SharedPageTable {
@@ -488,13 +495,18 @@ impl PartialEq for SharedPageTable {
 impl Eq for SharedPageTable {}
 
 impl SharedPageTable {
-    pub fn from_inner(x: Arc<SpinRwLock<Box<RawPageTable, PagingAllocator>>>) -> Self {
-        Self { inner: x }
+    pub fn from_inner(x: Box<RawPageTable, PagingAllocator>) -> Self {
+        Self {
+            inner: Arc::new(SpinRwLock::new(SharedPageTableInner {
+                inner: x,
+                pages: BTreeMap::new(),
+            })),
+        }
     }
 
     pub fn find_free_trapframe_addr(&self) -> Option<VirtualConst<u8, Identity>> {
         let inner = self.inner.read();
-        let table = &**inner;
+        let table = &*inner.inner;
         for l0 in 256..512 {
             if let PTEKind::Branch(paddr) = table.ptes[l0].decode().kind() {
                 // SAFETY: By invariants
@@ -557,7 +569,7 @@ impl SharedPageTable {
         let addr = virt_addr.into_usize();
 
         let inner = self.inner.read();
-        let mut table = &**inner;
+        let mut table = &*inner.inner;
         for (lvl, vpn) in virt_addr.vpns().into_iter().rev().enumerate() {
             let entry = &table.ptes[vpn.into_usize()].decode();
 
@@ -608,6 +620,7 @@ impl SharedPageTable {
     #[track_caller]
     pub fn map(
         &self,
+        page: Option<Arc<Page>>,
         from: PhysicalConst<u8, Identity>,
         to: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
@@ -634,7 +647,10 @@ impl SharedPageTable {
         };
 
         let mut inner = self.inner.write();
-        let mut table = &mut **inner;
+        if let Some(page) = page {
+            inner.pages.insert(to.into_usize(), page);
+        }
+        let mut table = &mut *inner.inner;
 
         for (iter, vpn) in to.vpns().into_iter().enumerate().rev().take(depth_max) {
             let entry = &mut table.ptes[vpn.into_usize()];
@@ -677,6 +693,6 @@ impl SharedPageTable {
     }
 
     pub fn as_physical_const(&self) -> PhysicalConst<RawPageTable, DirectMapped> {
-        Virtual::from_ptr(core::ptr::addr_of!(**self.inner.read())).into_phys()
+        Virtual::from_ptr(core::ptr::addr_of!(*self.inner.read().inner)).into_phys()
     }
 }

@@ -211,7 +211,6 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     // SAFETY: The page is zeroed and thus is well-defined and valid.
     let pgtbl =
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
-    let pgtbl = Arc::new(SpinRwLock::new(pgtbl));
     let pgtbl = SharedPageTable::from_inner(pgtbl);
     let job = Job::new(None).unwrap();
     // TODO: phase out name and have it done in userspace?
@@ -226,6 +225,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
 
         private.root_pgtbl.as_mut().unwrap().map(
+            None,
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
             PageTableFlags::VAD | PageTableFlags::RX,
@@ -246,7 +246,11 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         init_pages_range.start = free_slot_ctr;
         for i in 0..(init_padded / 4.kib() + (4.mib() / 4.kib())) {
             let phys = init.add(i * 4.kib());
+            // SAFETY: This page is valid for 1 page size (12 address
+            // bits)
+            let pg = unsafe { Page::new(phys, 12) };
             private.root_pgtbl.as_mut().unwrap().map(
+                Some(pg.clone()),
                 phys.into_identity().into_const(),
                 VirtualConst::from_usize(0x1000_0000).add(i * 4.kib()),
                 PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::RWX,
@@ -256,9 +260,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             {
                 let mut captbl = job.captbl.write();
                 let slot = captbl.get_or_insert_mut(free_slot_ctr).unwrap();
-                // SAFETY: This page is valid for 1 page size (12 address bits)
-                // TODO - this isn't entirely valid -- PMA dealloc
-                slot.replace(unsafe { Page::new(phys, 12) });
+                slot.replace(pg);
             }
             free_slot_ctr += 1;
         }
@@ -299,7 +301,11 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         fdt_pages_range.start = free_slot_ctr;
         for i in 0..(fdt_size / 4.kib()) {
             let phys = fdt_init.add(i * 4.kib());
+            // SAFETY: This page is valid for 1 page size (12 address
+            // bits)
+            let pg = unsafe { Page::new(phys, 12) };
             private.root_pgtbl.as_mut().unwrap().map(
+                Some(pg.clone()),
                 phys.into_identity().into_const(),
                 VirtualConst::from_usize(0x2000_1000).add(i * 4.kib()),
                 PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::READ,
@@ -308,9 +314,8 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             let mut captbl = job.captbl.write();
 
             let slot = captbl.get_or_insert_mut(free_slot_ctr).unwrap();
-            // SAFETY: This page is valid for 1 page size (12 address bits)
-            // TODO: this isn't entirely valid--PMA dealloc
-            slot.replace(unsafe { Page::new(phys, 12) });
+
+            slot.replace(pg);
             free_slot_ctr += 1;
         }
         fdt_pages_range.end = free_slot_ctr;
@@ -322,7 +327,10 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     };
     {
         let mut private = proc.private.lock();
+        // SAFETY: This page is valid for 1 page size (12 address bits)
+        let pg = unsafe { Page::new(bootinfo_page, 12) };
         private.root_pgtbl.as_mut().unwrap().map(
+            Some(pg.clone()),
             bootinfo_page.into_const().into_identity(),
             VirtualConst::from_usize(0x2000_0000),
             PageTableFlags::VAD | PageTableFlags::USER | PageTableFlags::READ,
@@ -330,9 +338,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         );
         let mut captbl = job.captbl.write();
         let slot = captbl.get_or_insert_mut(5).unwrap();
-        // SAFETY: This page is valid for 1 page size (12 address bits)
-        // TODO: this isn't entirely valid -- PMA dealloc
-        slot.replace(unsafe { Page::new(bootinfo_page, 12) });
+        slot.replace(pg);
     }
 
     let mut dev_pages_range = 0..0;
@@ -461,6 +467,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         Scheduler::init(scheduler_map);
         Scheduler::enqueue_dl(&proc, None, &mut proc.private.lock());
         drop(proc);
+        drop(job);
 
         // Scheduler::enqueue(proc2);
         // hart.pop_off();

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use rille::{
     capability::{
         paging::{BasePage, MegaPage, Page, PageTable},
-        Capability, Captr, Endpoint, Job, Notification, Thread,
+        Capability, Captr, CaptrOps, Endpoint, Job, Notification, Thread,
     },
     syscalls,
 };

@@ -49,10 +49,10 @@ impl Default for SchedulerInner {
     fn default() -> Self {
         let idle_thread = Thread::new(
             String::from("<kernel:idle>"),
-            Some(SharedPageTable::from_inner(Arc::new(SpinRwLock::new(
+            Some(SharedPageTable::from_inner(
                 // SAFETY: A zeroed page table is valid.
                 unsafe { Box::new_zeroed_in(PagingAllocator).assume_init() },
-            )))),
+            )),
             Job::new(None).unwrap(),
         );
 
@@ -73,6 +73,7 @@ impl Default for SchedulerInner {
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
 
         idle_thread.private.lock().root_pgtbl.as_mut().unwrap().map(
+            None,
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
             PageTableFlags::VAD | PageTableFlags::RX,
@@ -80,6 +81,8 @@ impl Default for SchedulerInner {
         );
 
         idle_thread.private.lock().root_pgtbl.as_mut().unwrap().map(
+            // Idle thread won't be deallocated.
+            None,
             pg.into_const().into_identity(),
             VirtualConst::from_usize(0x1000_0000),
             PageTableFlags::USER | PageTableFlags::RX | PageTableFlags::VAD,

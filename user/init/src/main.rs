@@ -643,6 +643,16 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             .unwrap();
     }
 
+    let captr = Notification::create().unwrap().into_captr();
+    for i in 0..procsvr_endpoint.into_raw() {
+        let captr = Captr::from_raw(i);
+        let _ = AnyCap::from_captr(captr).delete();
+    }
+    for i in (procsvr_endpoint.into_raw() + 1)..=captr.into_raw() {
+        let captr = Captr::from_raw(i);
+        let _ = AnyCap::from_captr(captr).delete();
+    }
+
     procsvr_endpoint
         .send_with_regs(
             MessageHeader::new().with_length(4).with_private(0xdeadbeef),

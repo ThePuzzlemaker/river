@@ -523,7 +523,8 @@ impl<'a, C: Capability> SlotRefMut<'a, C> {
             _phantom: PhantomData,
         };
 
-        slot.cap = CapabilityKind::Empty;
+        drop(mem::replace(&mut slot.cap, CapabilityKind::Empty));
+
         slot.badge = None;
         slot.rights = CapRights::all();
 
@@ -629,6 +630,7 @@ impl<'a> SlotRefMut<'a, PageTableCap> {
                 _ => unreachable!(),
             };
             pgtbl.map(
+                Some(page_cap.clone()),
                 page_cap.phys.into_identity().into_const(),
                 addr,
                 flags,
@@ -678,7 +680,13 @@ impl<'a> SlotRef<'a, ThreadCap> {
         // SAFETY: Type check.
         let thread = unsafe { self.cap.thread().unwrap_unchecked() };
 
-        thread.private.lock().state = ThreadState::Suspended;
+        let mut private = thread.private.lock();
+
+        // If we were runnable, but not running, dequeue us.
+        if private.state == ThreadState::Runnable {
+            Scheduler::dequeue_dl(thread, &mut private);
+        }
+        private.state = ThreadState::Suspended;
     }
 
     /// Configure the captbl and page table of a thread.
@@ -711,6 +719,7 @@ impl<'a> SlotRef<'a, ThreadCap> {
 
         // SAFETY: Type check.
         unsafe { private.root_pgtbl.as_mut().unwrap_unchecked() }.map(
+            None,
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
             KernelFlags::VAD | KernelFlags::RX,
@@ -1168,6 +1177,7 @@ impl Thread {
         // where the trapframe will be. Nothing else will be
         // accessed from the user page tables.
         private.root_pgtbl.as_mut().unwrap().map(
+            None,
             trapframe_phys.into_const().cast().into_identity(),
             trapframe_mapped_addr,
             KernelFlags::VAD | KernelFlags::RW,
