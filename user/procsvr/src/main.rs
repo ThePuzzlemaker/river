@@ -98,6 +98,12 @@ unsafe extern "C" fn entry(ep: Endpoint, n_pages: usize) -> ! {
 
     syscalls::debug::debug_dump_root();
 
+    // Kill and delete the init thread.
+    init_thread.suspend().unwrap();
+    init_thread.delete().unwrap();
+
+    syscalls::debug::debug_dump_root();
+
     loop {
         core::arch::asm!("nop");
     }

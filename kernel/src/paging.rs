@@ -696,3 +696,38 @@ impl SharedPageTable {
         Virtual::from_ptr(core::ptr::addr_of!(*self.inner.read().inner)).into_phys()
     }
 }
+
+impl Drop for SharedPageTableInner {
+    fn drop(&mut self) {
+        let table = &mut *self.inner;
+        for l0 in 0..512 {
+            if let PTEKind::Branch(paddr) = table.ptes[l0].decode().kind() {
+                // SAFETY: By invariants
+                let table = unsafe { &mut *(paddr.into_virt().into_ptr_mut()) };
+                for l1 in 0..512 {
+                    // N.B. we don't need to traverse L2 since that can't have sub-tables.
+                    if let PTEKind::Branch(paddr) = table.ptes[l1].decode().kind() {
+                        // SAFETY: We have previously allocated this
+                        // table with this allocator, and are now
+                        // deallocating it. We have exclusive access
+                        // by the invariants of Drop. PagingAllocator
+                        // is the same no matter what instance (ZST)
+                        // so it's safe to construct a new one here.
+                        drop(unsafe {
+                            Box::from_raw_in(paddr.into_virt().into_ptr_mut(), PagingAllocator)
+                        });
+                    }
+                }
+                // SAFETY: We have previously allocated this
+                // table with this allocator, and are now
+                // deallocating it. We have exclusive access
+                // by the invariants of Drop. PagingAllocator
+                // is the same no matter what instance (ZST)
+                // so it's safe to construct a new one here.
+                drop(unsafe {
+                    Box::from_raw_in(paddr.into_virt().into_ptr_mut(), PagingAllocator)
+                });
+            }
+        }
+    }
+}
