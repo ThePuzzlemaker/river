@@ -206,7 +206,6 @@ fn handle_init_calls(
                     return;
                 };
                 init.console = Some(elf);
-                println!("{:#?}", init.console);
             }
             match &mut init.console {
                 None => unreachable!(),
@@ -293,6 +292,7 @@ fn handle_init_calls(
                             }
                             let base_addr = seg.virt_addr.next_multiple_of(seg.align) - seg.align;
 
+                            // TODO: opt this so we can keep it over iterations
                             let mut file_data = vec![0; seg.file_size];
                             init.data.seek(SeekFrom::Start(seg.offset as u64)).unwrap();
                             let Ok(()) = init.data.read_exact(&mut file_data) else {
@@ -365,7 +365,7 @@ fn handle_init_calls(
                                 .unwrap()
                                 .start(
                                     init.console.as_ref().unwrap().entry_addr.into(),
-                                    (0x4000000000u64 - 4096).into(),
+                                    (0x4000000000u64).into(),
                                     Captr::null(),
                                     0,
                                 )

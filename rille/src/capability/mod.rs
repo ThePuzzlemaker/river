@@ -431,7 +431,7 @@ impl Thread {
             SyscallNumber::ThreadStart,
             self.into_raw() as u64,
             entry.into(),
-            stack.into(),
+            crate::addr::decanonicalize(stack.into()) as u64,
             arg1.into_raw() as u64,
             arg2,
         );
