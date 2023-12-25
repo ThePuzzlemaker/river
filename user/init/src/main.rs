@@ -489,6 +489,25 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         }
     }
 
+    let init_ipc_buf = Page::<BasePage>::create().unwrap();
+    // TODO: rille
+    unsafe {
+        syscalls::ecall2(
+            SyscallNumber::ThreadSetIpcBuffer,
+            caps.thread.into_raw() as u64,
+            init_ipc_buf.into_raw() as u64,
+        )
+        .unwrap();
+    }
+
+    init_ipc_buf
+        .map(
+            caps.pgtbl,
+            VirtualConst::from_usize(0xA000_0000),
+            PageTableFlags::RW,
+        )
+        .unwrap();
+
     let job = Job::create(caps.job).unwrap();
     let procsvr = job.create_thread("procsvr").unwrap();
 
@@ -515,9 +534,11 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
 
     let bootfs = lz4_flex::decompress_size_prepended(BOOTFS).unwrap();
 
+    let procsvr_data;
+    let console_driver_data;
     // SAFETY: We assume the BOOTFS to be correct, by our build
     // script. Of course, if it's not, we have bigger problems.
-    let procsvr_data = unsafe {
+    unsafe {
         let hdr = *bootfs.as_ptr().cast::<BootFsHeader>();
         debug_assert_eq!(hdr.magic, 0x0B007F50);
         let entries = slice::from_raw_parts(
@@ -546,7 +567,7 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             println!("- {}: {} bytes", s, x.length);
         }
 
-        let procsvr_entry = entries
+        let entry = entries
             .iter()
             .find(|x| {
                 let s = core::str::from_utf8_unchecked(slice::from_raw_parts(
@@ -557,10 +578,26 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
                 s == "procsvr"
             })
             .unwrap();
-        slice::from_raw_parts(
-            bootfs.as_ptr().add(procsvr_entry.offset as usize),
-            procsvr_entry.length as usize,
-        )
+        procsvr_data = slice::from_raw_parts(
+            bootfs.as_ptr().add(entry.offset as usize),
+            entry.length as usize,
+        );
+        let entry = entries
+            .iter()
+            .find(|x| {
+                let s = core::str::from_utf8_unchecked(slice::from_raw_parts(
+                    bootfs.as_ptr().add(x.name_offset as usize),
+                    x.name_length as usize,
+                ));
+
+                s == "console-driver"
+            })
+            .unwrap();
+
+        console_driver_data = slice::from_raw_parts(
+            bootfs.as_ptr().add(entry.offset as usize),
+            entry.length as usize,
+        );
     };
 
     let procsvr_n_pages = procsvr_data.len().next_multiple_of(4096) / 4096;
@@ -604,7 +641,7 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     }
 
     let procsvr_endpoint = procsvr_endpoint
-        .grant(CapRights::all(), NonZeroU64::new(0xb007d00d))
+        .grant(CapRights::all(), NonZeroU64::new(0x1))
         .unwrap();
 
     procsvr_endpoint
@@ -643,6 +680,36 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             .unwrap();
     }
 
+    // Preamble: early process init
+    let mut reply = procsvr_endpoint
+        .call_with_regs(
+            MessageHeader::new().with_length(2).with_private(0x1),
+            &mut AnnotatedCaptr::default(),
+            [
+                0x1, // console driver
+                console_driver_data.len().div_ceil(4096) as u64,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    while let 0x1 = reply.0.private() {
+        // Serve pages.
+        let pg = reply.1[0] as usize;
+
+        let console_driver_len = console_driver_data.len();
+        copy_to_ipc(&console_driver_data[pg * 4096..cmp::min((pg + 1) * 4096, console_driver_len)]);
+
+        reply = procsvr_endpoint
+            .call_with_regs(
+                MessageHeader::new().with_length(512).with_private(0x2),
+                &mut AnnotatedCaptr::default(),
+                [0; 4],
+            )
+            .unwrap();
+    }
+
+    // Delete all our caps, then tell procsvr to kill us.
     let captr = Notification::create().unwrap().into_captr();
     for i in 0..procsvr_endpoint.into_raw() {
         let captr = Captr::from_raw(i);
@@ -655,9 +722,9 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
 
     procsvr_endpoint
         .send_with_regs(
-            MessageHeader::new().with_length(4).with_private(0xdeadbeef),
+            MessageHeader::new().with_length(0).with_private(0xdead),
             Captr::null(),
-            [0xDEADBEEF, 0xC0DED00D, 0xC0DEBEEF, 0xDEADD00D],
+            [0; 4],
         )
         .unwrap();
 
@@ -666,6 +733,18 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
             core::arch::asm!("nop");
         }
     }
+}
+
+// TODO: smth like this in rille
+fn copy_to_ipc(s: &[u8]) {
+    unsafe { slice::from_raw_parts_mut(0xA000_0000 as *mut u8, cmp::min(s.len(), 4096)) }
+        .copy_from_slice(s);
+}
+
+fn copy_from_ipc(s: &mut [u8]) {
+    s.copy_from_slice(unsafe {
+        slice::from_raw_parts(0xA000_0000 as *const u8, cmp::min(s.len(), 4096))
+    });
 }
 
 struct DebugPrint;

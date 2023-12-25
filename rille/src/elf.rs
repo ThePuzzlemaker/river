@@ -120,6 +120,15 @@ impl Elf {
         Ok((0..self.sec_hdr_count).map(|_| Section::parse(reader)))
     }
 
+    /// How many segments are there?
+    pub fn n_segments(&self) -> u16 {
+        self.prog_hdr_count
+    }
+    /// How many sections are there?
+    pub fn n_sections(&self) -> u16 {
+        self.sec_hdr_count
+    }
+
     /// Parse segments into an iterator.
     ///
     /// # Errors

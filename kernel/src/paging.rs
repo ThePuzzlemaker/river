@@ -565,7 +565,7 @@ impl SharedPageTable {
     pub fn walk<T>(
         &self,
         virt_addr: VirtualConst<T, Identity>,
-    ) -> Option<(PhysicalConst<T, DirectMapped>, PageTableFlags)> {
+    ) -> Option<(PhysicalConst<T, DirectMapped>, PageSize, PageTableFlags)> {
         let addr = virt_addr.into_usize();
 
         let inner = self.inner.read();
@@ -575,31 +575,34 @@ impl SharedPageTable {
 
             match entry.kind() {
                 PTEKind::Leaf => {
-                    let page = match lvl {
-                        2 => {
+                    let (page, size) = match lvl {
+                        2 => (
                             virt_addr
                                 .into_usize()
                                 .next_multiple_of(1 << BasePage::PAGE_SIZE_LOG2)
-                                - (1 << BasePage::PAGE_SIZE_LOG2)
-                        }
-                        1 => {
+                                - (1 << BasePage::PAGE_SIZE_LOG2),
+                            PageSize::Base,
+                        ),
+                        1 => (
                             virt_addr
                                 .into_usize()
                                 .next_multiple_of(1 << MegaPage::PAGE_SIZE_LOG2)
-                                - (1 << MegaPage::PAGE_SIZE_LOG2)
-                        }
-                        0 => {
+                                - (1 << MegaPage::PAGE_SIZE_LOG2),
+                            PageSize::Mega,
+                        ),
+                        0 => (
                             virt_addr
                                 .into_usize()
                                 .next_multiple_of(1 << GigaPage::PAGE_SIZE_LOG2)
-                                - (1 << GigaPage::PAGE_SIZE_LOG2)
-                        }
+                                - (1 << GigaPage::PAGE_SIZE_LOG2),
+                            PageSize::Giga,
+                        ),
                         _ => unreachable!(),
                     };
                     let ppn = entry.ppn;
                     let phys_page = PhysicalConst::from_components(ppn, None);
                     let phys_page = phys_page.add(addr - page);
-                    return Some((phys_page, entry.flags));
+                    return Some((phys_page, size, entry.flags));
                 }
                 PTEKind::Branch(phys_addr) => {
                     // SAFETY: By our invariants, this is safe.

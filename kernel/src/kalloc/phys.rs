@@ -237,6 +237,31 @@ impl PMAllocInner {
             let addr = offset_addr + self.base.into_usize();
             return Physical::try_from_usize(addr);
         }
+
+        for ix in ix_base..self.lower_bounds[order as usize] {
+            // Set the bit. Continue if it was already set.
+            if self.bitree.set(ix, true) {
+                continue;
+            }
+            self.lower_bounds[order as usize] = ix;
+            // The bit was not already set, so we have our chunk. We
+            // need to make sure the blocks above are split, iff
+            // necessary. The bit was not already set, so we have our
+            // chunk. We need to make sure the blocks above are split,
+            // iff necessary.
+            self.set_above(ix, order);
+            // We also need to make sure we mark the blocks below us
+            // as used.
+            self.set_below(ix, true, order);
+
+            let alloc_off = self.bitree.alloc_off_of(ix).unwrap();
+            let offset_addr = alloc_off * 4096 * (1 << order);
+            let addr = offset_addr + self.base.into_usize();
+            // TODO: once i'm sure enough about this, make this no longer a warning (only on debug)
+            log::warn!("PMAlloc: lower bound was invalid, and found a free block below it");
+            return Physical::try_from_usize(addr);
+        }
+
         None
     }
 

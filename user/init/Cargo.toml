@@ -13,10 +13,11 @@ rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 owo-colors = "3.5.0"
 fdt = "0.1.5"
 rille_user = { path = "../rille_user" }
-lz4_flex = { version = "0.11.1", features = ["safe-decode", "safe-encode"], default-features = false }
+lz4_flex = { version = "0.11.1", default-features = false }
 bootfs = { path = "../bootfs" }
 
 [build-dependencies]
 procsvr = { path = "../procsvr", artifact = "bin", target = "riscv64gc-unknown-none-elf" }
-lz4_flex = { version = "0.11.1", features = ["safe-decode", "safe-encode"], default-features = false }
+ns16650 = { path = "../ns16650", artifact = "bin", target = "riscv64gc-unknown-none-elf" }
+lz4_flex = { version = "0.11.1", default-features = false }
 bootfs = { path = "../bootfs" }

@@ -80,6 +80,9 @@ impl BuildCtx {
                 .as_os_str()
                 .to_string_lossy()
                 .to_string();
+            if basename == "scripts" {
+                continue;
+            }
             dirs.push((basename, dir));
         }
         dirs.push((String::from("river"), PathBuf::from("kernel/")));

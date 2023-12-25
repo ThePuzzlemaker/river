@@ -53,7 +53,7 @@ pub enum SyscallNumber {
     ThreadSetPriority,
     /// TODO
     ThreadSetIpcBuffer,
-    // [`Endpoint::create`][crate::capability::Endpoint::create]
+    /// [`Endpoint::create`][crate::capability::Endpoint::create]
     EndpointCreate,
     /// TODO
     EndpointReply,
@@ -267,12 +267,14 @@ pub mod debug {
     }
 
     /// Print a string to the kernel console.
+    #[allow(clippy::missing_panics_doc)]
     pub fn debug_print_string(s: &str) {
         // SAFETY: By invariants of &str.
-        let _ =
+        let res =
             unsafe { super::ecall2(SyscallNumber::DebugPrint, s.as_ptr() as u64, s.len() as u64) };
 
         // print_string will never fail for valid `&str`s.
+        res.map_err(CapError::from).unwrap();
     }
 
     /// Get the capability type of a capability in the given slot.

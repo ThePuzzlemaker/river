@@ -735,6 +735,32 @@ impl Capability for Endpoint {
     }
 }
 
+/// A [`Captr`] with additional information about its type, rights,
+/// and badge.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct AnnotatedCaptr {
+    /// The inner `Captr`.
+    pub cap: Captr,
+    /// What type is this captr?
+    pub ty: CapabilityType,
+    /// What rights does this captr have?
+    pub rights: CapRights,
+    /// What is this captr's badge, if any?
+    pub badge: Option<NonZeroU64>,
+}
+
+impl Default for AnnotatedCaptr {
+    fn default() -> Self {
+        Self {
+            cap: Captr::null(),
+            ty: CapabilityType::Unknown,
+            rights: CapRights::empty(),
+            badge: None,
+        }
+    }
+}
+
 impl Endpoint {
     /// Create a new `Endpoint`.
     ///
@@ -758,7 +784,7 @@ impl Endpoint {
     pub fn recv_with_regs(
         self,
         sender: Option<&mut Option<NonZeroU64>>,
-        cap: Option<&mut Captr>,
+        cap: Option<&mut AnnotatedCaptr>,
     ) -> CapResult<(MessageHeader, [u64; 4])> {
         let mr0: u64;
         let mr1: u64;
@@ -780,7 +806,7 @@ impl Endpoint {
                 out("a4") mr0,
                 out("a5") mr1,
                 out("a6") mr2,
-                out("a7") mr3
+                out("a7") mr3,
             );
 
             if err != 0 {
@@ -802,7 +828,7 @@ impl Endpoint {
     pub fn call_with_regs(
         self,
         hdr: MessageHeader,
-        cap: &mut Captr,
+        cap: &mut AnnotatedCaptr,
         mrs: [u64; 4],
     ) -> CapResult<(MessageHeader, [u64; 4])> {
         let mut mr0: u64 = mrs[0];
@@ -814,12 +840,12 @@ impl Endpoint {
         // SAFETY: endpoint_recv is always safe.
         let hdr = unsafe {
             #[rustfmt::skip]
-	    core::arch::asm!(
+            core::arch::asm!(
                 "ecall",
                 in("a0") u64::from(SyscallNumber::EndpointCall),
-                in("a1") self.into_raw() as u64,
-                lateout("a0") err,
-		lateout("a1") val,
+		in("a1") self.into_raw() as u64,
+		lateout("a0") err,
+                lateout("a1") val,
 		in("a2") hdr.0,
                 in("a3") ptr::addr_of!(cap) as u64,
                 inout("a4") mr0,

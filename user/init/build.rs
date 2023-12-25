@@ -35,10 +35,16 @@ fn main() {
         .wait()
         .unwrap();
 
-    let files = vec![(
-        String::from("procsvr"),
-        std::fs::read(&procsvr_bin).unwrap(),
-    )];
+    let files = vec![
+        (
+            String::from("procsvr"),
+            std::fs::read(&procsvr_bin).unwrap(),
+        ),
+        (
+            String::from("console-driver"),
+            std::fs::read(env::var("CARGO_BIN_FILE_NS16650").unwrap()).unwrap(),
+        ),
+    ];
 
     let mut bootfs = PathBuf::from(env::var("OUT_DIR").unwrap());
     bootfs.push("bootfs.lz4");

@@ -23,7 +23,8 @@ use rille::{
     capability::{
         self,
         paging::{BasePage, DynLevel, GigaPage, MegaPage, PageTableFlags, PagingLevel},
-        AnyCap, CapError, CapResult, CapRights, CapabilityType, MessageHeader, UserRegisters,
+        AnnotatedCaptr, AnyCap, CapError, CapResult, CapRights, CapabilityType, Captr,
+        MessageHeader, UserRegisters,
     },
     units::StorageUnits,
 };
@@ -98,7 +99,7 @@ pub fn sys_debug_print(
     _intr: InterruptDisabler,
     str_ptr: VirtualConst<u8, Identity>,
     str_len: u64,
-) {
+) -> CapResult<()> {
     //println!("{:#x?}, {:#?}", str_ptr, str_len);
     let str_len = str_len as usize;
 
@@ -128,8 +129,9 @@ pub fn sys_debug_print(
     };
     //println!("{:?}", slice);
 
-    let s = core::str::from_utf8(slice).unwrap();
+    let s = core::str::from_utf8(slice).map_err(|_| CapError::InvalidOperation)?;
     print!("{}", s);
+    Ok(())
 }
 
 pub fn sys_grant(
@@ -525,7 +527,7 @@ pub fn sys_thread_write_registers(
     let root_hdr = thread.job.captbl.clone();
     let root_hdr = root_hdr.read();
 
-    let Some((addr, flags)) = thread
+    let Some((addr, size, flags)) = thread
         .private
         .lock()
         .root_pgtbl
@@ -544,6 +546,7 @@ pub fn sys_thread_write_registers(
     }
     let thread_cap = root_hdr.get::<capability::Thread>(thread_cap)?;
 
+    // TODO: check `size`
     thread_cap.write_registers(addr.into_virt())?;
 
     Ok(())
@@ -865,7 +868,8 @@ pub fn sys_endpoint_recv(
         let Some(pgtbl) = lock.root_pgtbl.as_ref() else {
             break 'addr ptr::null_mut();
         };
-        let Some((addr, flags)) = pgtbl.walk(VirtualConst::from_ptr(sender_info as *const usize))
+        let Some((addr, _size, flags)) =
+            pgtbl.walk(VirtualConst::from_ptr(sender_info as *const usize))
         else {
             break 'addr ptr::null_mut();
         };
@@ -1007,7 +1011,7 @@ fn endpoint_recv(
                 let Some(sender_pgtbl) = sender_private.root_pgtbl.as_ref() else {
                     break 'cap_transfer;
                 };
-                let Some((src_slot, src_flags)) =
+                let Some((src_slot, src_size, src_flags)) =
                     sender_pgtbl.walk(VirtualConst::from_ptr(src_slot as *const usize))
                 else {
                     break 'cap_transfer;
@@ -1026,8 +1030,9 @@ fn endpoint_recv(
                 let Some(receiver_pgtbl) = private.root_pgtbl.as_ref() else {
                     break 'cap_transfer;
                 };
-                let Some((dest_slot, dest_flags)) =
-                    receiver_pgtbl.walk(VirtualConst::from_ptr(dest_slot as *const usize))
+                // TODO: revive `copy_from_user` and check `dest_size`
+                let Some((dest_slot, dest_size, dest_flags)) =
+                    receiver_pgtbl.walk(VirtualConst::from_ptr(dest_slot as *const AnnotatedCaptr))
                 else {
                     break 'cap_transfer;
                 };
@@ -1041,6 +1046,7 @@ fn endpoint_recv(
                     break 'cap_transfer;
                 }
             };
+
             if !src_addr.is_null()
                 && !dest_addr.is_null()
                 && src_addr.is_aligned()
@@ -1050,12 +1056,12 @@ fn endpoint_recv(
                 let src_slot = unsafe { *src_addr };
                 // SAFETY: See above.
                 let dest_slot = unsafe { &mut *dest_addr.cast_mut() };
-                let (cap, badge, rights) = {
+                let (cap, badge, rights, ty) = {
                     let sender_root = sender_root.read();
                     let Ok(cap) = sender_root.get_mut::<AnyCap>(src_slot) else {
                         break 'cap_transfer;
                     };
-                    (cap.to_owned_cap(), cap.badge, cap.rights)
+                    (cap.to_owned_cap(), cap.badge, cap.rights, cap.cap_type())
                 };
                 let mut receiver_root = receiver_root.write();
                 let captr = receiver_root.next_slot();
@@ -1065,7 +1071,12 @@ fn endpoint_recv(
                     slot.set_badge(badge);
                     slot.update_rights(rights);
                 }
-                *dest_slot = captr;
+                *dest_slot = AnnotatedCaptr {
+                    cap: Captr::from_raw(captr),
+                    badge,
+                    rights,
+                    ty,
+                };
             }
         }
     }
@@ -1350,7 +1361,7 @@ pub fn sys_job_create_thread(
             let Some(pgtbl) = private.root_pgtbl.as_ref() else {
                 break 'addr ptr::null();
             };
-            let Some((addr, flags)) = pgtbl.walk(name_ptr) else {
+            let Some((addr, size, flags)) = pgtbl.walk(name_ptr) else {
                 break 'addr ptr::null();
             };
             if flags.contains(
@@ -1362,6 +1373,7 @@ pub fn sys_job_create_thread(
             } else {
                 break 'addr ptr::null();
             }
+            // TODO: check `size`
         };
 
         if !name_addr.is_null() {

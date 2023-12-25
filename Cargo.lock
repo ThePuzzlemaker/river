@@ -284,6 +284,7 @@ dependencies = [
  "bootfs",
  "fdt",
  "lz4_flex",
+ "ns16650",
  "owo-colors",
  "panic_handler",
  "procsvr",
@@ -368,6 +369,15 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "ns16650"
+version = "0.1.0"
+dependencies = [
+ "rille",
+ "rille_user",
+ "rt",
 ]
 
 [[package]]
@@ -540,6 +550,14 @@ dependencies = [
  "owo-colors",
  "rille",
  "sbi",
+]
+
+[[package]]
+name = "rt"
+version = "0.1.0"
+dependencies = [
+ "rille",
+ "rille_user",
 ]
 
 [[package]]
