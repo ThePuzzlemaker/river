@@ -828,7 +828,7 @@ impl Endpoint {
     pub fn call_with_regs(
         self,
         hdr: MessageHeader,
-        cap: &mut AnnotatedCaptr,
+        cap: Option<&mut AnnotatedCaptr>,
         mrs: [u64; 4],
     ) -> CapResult<(MessageHeader, [u64; 4])> {
         let mut mr0: u64 = mrs[0];
@@ -847,7 +847,7 @@ impl Endpoint {
 		lateout("a0") err,
                 lateout("a1") val,
 		in("a2") hdr.0,
-                in("a3") ptr::addr_of!(cap) as u64,
+                in("a3") cap.map(|x| x as *mut _ as u64).unwrap_or_default(),
                 inout("a4") mr0,
                 inout("a5") mr1,
                 inout("a6") mr2,

@@ -684,7 +684,7 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
     let mut reply = procsvr_endpoint
         .call_with_regs(
             MessageHeader::new().with_length(2).with_private(0x1),
-            &mut AnnotatedCaptr::default(),
+            None,
             [
                 0x1, // console driver
                 console_driver_data.len().div_ceil(4096) as u64,
@@ -703,7 +703,7 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
         reply = procsvr_endpoint
             .call_with_regs(
                 MessageHeader::new().with_length(512).with_private(0x2),
-                &mut AnnotatedCaptr::default(),
+                None,
                 [0; 4],
             )
             .unwrap();
