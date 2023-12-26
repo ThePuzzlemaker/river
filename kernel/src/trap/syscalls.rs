@@ -19,7 +19,7 @@ use alloc::{
 };
 use atomic::Ordering;
 use rille::{
-    addr::{Identity, Virtual, VirtualConst},
+    addr::{Identity, VirtualConst},
     capability::{
         self,
         paging::{BasePage, DynLevel, GigaPage, MegaPage, PageTableFlags, PagingLevel},
@@ -41,10 +41,10 @@ use crate::{
     plic::PLIC,
     print, println,
     sched::Scheduler,
-    sync::{SpinMutex, SpinRwLock},
+    sync::SpinMutex,
 };
 
-pub fn sys_debug_dump_root(thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
+pub fn sys_debug_dump_root(_thread: Arc<Thread>, _intr: InterruptDisabler) -> Result<(), CapError> {
     //crate::println!("{:#x?}", thread.job.captbl);
     let (free, total) = {
         let pma = PMAlloc::get();
@@ -527,7 +527,7 @@ pub fn sys_thread_write_registers(
     let root_hdr = thread.job.captbl.clone();
     let root_hdr = root_hdr.read();
 
-    let Some((addr, size, flags)) = thread
+    let Some((addr, _size, flags)) = thread
         .private
         .lock()
         .root_pgtbl
@@ -1011,7 +1011,7 @@ fn endpoint_recv(
                 let Some(sender_pgtbl) = sender_private.root_pgtbl.as_ref() else {
                     break 'cap_transfer;
                 };
-                let Some((src_slot, src_size, src_flags)) =
+                let Some((src_slot, _src_size, src_flags)) =
                     sender_pgtbl.walk(VirtualConst::from_ptr(src_slot as *const usize))
                 else {
                     break 'cap_transfer;
@@ -1031,7 +1031,7 @@ fn endpoint_recv(
                     break 'cap_transfer;
                 };
                 // TODO: revive `copy_from_user` and check `dest_size`
-                let Some((dest_slot, dest_size, dest_flags)) =
+                let Some((dest_slot, _dest_size, dest_flags)) =
                     receiver_pgtbl.walk(VirtualConst::from_ptr(dest_slot as *const AnnotatedCaptr))
                 else {
                     break 'cap_transfer;
@@ -1361,7 +1361,7 @@ pub fn sys_job_create_thread(
             let Some(pgtbl) = private.root_pgtbl.as_ref() else {
                 break 'addr ptr::null();
             };
-            let Some((addr, size, flags)) = pgtbl.walk(name_ptr) else {
+            let Some((addr, _size, flags)) = pgtbl.walk(name_ptr) else {
                 break 'addr ptr::null();
             };
             if flags.contains(

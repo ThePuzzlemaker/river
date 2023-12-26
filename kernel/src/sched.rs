@@ -22,7 +22,7 @@ use crate::{
     kalloc::phys::PMAlloc,
     paging::{PageTableFlags, PagingAllocator, SharedPageTable},
     proc::Context,
-    sync::{OnceCell, SpinMutex, SpinRwLock},
+    sync::{OnceCell, SpinMutex},
     N_HARTS,
 };
 

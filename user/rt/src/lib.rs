@@ -2,12 +2,14 @@
 #![allow(internal_features)]
 #![feature(lang_items, naked_functions)]
 
-use core::ptr;
+use core::{
+    ptr,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
-use rille::capability::Endpoint;
-use rille_user::sync::once_cell::OnceCell;
+use rille::capability::{Capability, Captr, Endpoint};
 
-pub static PROCSVR: OnceCell<Endpoint> = OnceCell::new();
+static PROCSVR: AtomicUsize = AtomicUsize::new(0);
 
 #[naked]
 #[link_section = ".rt.entry"]
@@ -44,11 +46,11 @@ fn lang_start<T>(main: fn() -> T, _argc: isize, _argv: *const *const u8, _: u8) 
 
 #[no_mangle]
 #[link_section = ".rt.entry"]
-unsafe extern "C" fn _rust_start(a0: Endpoint) -> ! {
+unsafe extern "C" fn _rust_start(a0: usize) -> ! {
     extern "C" {
         fn main(_: isize, _: *const *const u8) -> isize;
     }
-    PROCSVR.init(a0);
+    PROCSVR.store(a0, Ordering::Relaxed);
 
     main(0, ptr::null_mut());
 
@@ -56,4 +58,8 @@ unsafe extern "C" fn _rust_start(a0: Endpoint) -> ! {
     loop {
         core::arch::asm!("nop")
     }
+}
+
+pub fn procsvr() -> Endpoint {
+    Endpoint::from_captr(Captr::from_raw(PROCSVR.load(Ordering::Relaxed)))
 }

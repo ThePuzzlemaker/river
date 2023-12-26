@@ -736,12 +736,12 @@ extern "C" fn entry(init_info: *const BootInfo) -> ! {
 }
 
 // TODO: smth like this in rille
-fn copy_to_ipc(s: &[u8]) {
+pub fn copy_to_ipc(s: &[u8]) {
     unsafe { slice::from_raw_parts_mut(0xA000_0000 as *mut u8, cmp::min(s.len(), 4096)) }
         .copy_from_slice(s);
 }
 
-fn copy_from_ipc(s: &mut [u8]) {
+pub fn copy_from_ipc(s: &mut [u8]) {
     s.copy_from_slice(unsafe {
         slice::from_raw_parts(0xA000_0000 as *const u8, cmp::min(s.len(), 4096))
     });

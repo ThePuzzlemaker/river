@@ -1,6 +1,6 @@
 use core::{mem::MaybeUninit, ops::Range};
 
-use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 
 use rille::{
     addr::{Identity, PhysicalConst, VirtualConst},
@@ -11,7 +11,6 @@ use rille::{
 use crate::{
     kalloc::{self, phys::PMAlloc},
     paging::{PageTableFlags, PagingAllocator, SharedPageTable},
-    sync::SpinRwLock,
 };
 
 #[derive(Debug)]

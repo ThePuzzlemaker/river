@@ -61,7 +61,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc};
+use alloc::{boxed::Box, collections::BTreeMap, string::String};
 use asm::hartid;
 use fdt::Fdt;
 use log::{error, info, trace};
@@ -85,7 +85,7 @@ use crate::{
     paging::{PagingAllocator, SharedPageTable},
     plic::PLIC,
     sched::{Scheduler, SchedulerInner},
-    sync::{SpinMutex, SpinRwLock},
+    sync::SpinMutex,
     trap::{Irqs, IRQS},
 };
 

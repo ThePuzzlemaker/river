@@ -24,6 +24,7 @@ pub enum SyscallNumber {
     ThreadResume,
     /// [`Captr::<Thread>::write_registers`][crate::capability::Captr::<Thread>::write_registers]
     ThreadWriteRegisters,
+    /// [`Thread::start`][crate::capability::Thread::start]
     ThreadStart,
     /// TODO
     CaptrGrant,
