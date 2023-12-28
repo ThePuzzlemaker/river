@@ -1503,6 +1503,12 @@ pub struct InterruptHandler {
     pub irq: u16,
 }
 
+impl Drop for InterruptHandler {
+    fn drop(&mut self) {
+        PLIC.hart_sdisable(self.irq as u32);
+    }
+}
+
 impl CapabilityValue for Arc<InterruptPool> {
     type Cap = InterruptPoolCap;
 
