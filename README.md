@@ -99,9 +99,9 @@ addresses in the `.gdbinit` at some point.)
 
 Licensed under either of
 
- * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+ * Apache License, Version 2.0 ([LICENSES](LICENSES) or
    http://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or
+ * MIT license ([LICENSES](LICENSES) or
    http://opensource.org/licenses/MIT)
 
 at your option.
