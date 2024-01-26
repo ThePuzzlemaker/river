@@ -168,10 +168,10 @@ impl BuildCtx {
 
             let target_profile_path = if opts.release { "release" } else { "debug" };
 
-            let llvm = if opts.no_llvm { "" } else { " LLVM=1" };
+            let llvm = if opts.no_llvm { "" } else { "LLVM=1" };
             cmd!(
 		self.shell,
-		"make PLATFORM=generic{llvm} FW_PAYLOAD=../target/riscv64gc-unknown-none-elf/{target_profile_path}/river"
+		"make PLATFORM=generic {llvm} FW_PAYLOAD=../target/riscv64gc-unknown-none-elf/{target_profile_path}/river"
 	    ).run()?;
         }
 
