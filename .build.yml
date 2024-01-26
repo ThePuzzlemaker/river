@@ -1,0 +1,11 @@
+image: alpine/edge
+secrets:
+  - 72503cb4-16d3-41ac-8ada-4b5ff0a60222
+sources:
+  - git+ssh://git@git.sr.ht/~thepuzzlemaker/river
+tasks:
+  - mirror: |
+      cd river
+      git remote add github git@github.com:ThePuzzlemaker/river.git
+      ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+      git push --all github
