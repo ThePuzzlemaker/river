@@ -1,14 +1,15 @@
-use core::{arch::global_asm, mem};
+use core::{arch::global_asm, mem, sync::atomic::AtomicUsize};
 
 use crate::{
     asm::{self, hartid, InterruptDisabler, SCAUSE_INTR_BIT, SSTATUS_SPP},
     capability::{global_interrupt_pool, Thread, ThreadState, THREAD_STACK_SIZE},
-    hart_local::LOCAL_HART,
+    hart_local::{CURRENT_ASID, LOCAL_HART},
     paging::Satp,
     plic::PLIC,
     sched::Scheduler,
-    sync::OnceCell,
+    sync::{OnceCell, SpinMutex},
     trampoline::{self, trampoline, Trapframe},
+    MAX_HARTS,
 };
 use atomic::Ordering;
 use rille::{
@@ -537,14 +538,12 @@ pub unsafe extern "C" fn user_trap_ret() -> ! {
 
         asm::write_sepc(trapframe.user_epc);
         asm::write_sscratch(private.trapframe_addr as u64);
+        let pgtbl = private.root_pgtbl.as_ref().unwrap();
+        let asid = pgtbl.asid();
+        CURRENT_ASID[hartid() as usize].store(asid, Ordering::Relaxed);
         let satp = Satp {
-            asid: 1,
-            ppn: private
-                .root_pgtbl
-                .as_ref()
-                .unwrap()
-                .as_physical_const()
-                .ppn(),
+            asid,
+            ppn: pgtbl.as_physical_const().ppn(),
         };
         satp.encode().as_usize()
     };

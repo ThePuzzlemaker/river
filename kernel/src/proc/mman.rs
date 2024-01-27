@@ -9,6 +9,7 @@ use rille::{
 };
 
 use crate::{
+    capability::next_asid,
     kalloc::{self, phys::PMAlloc},
     paging::{PageTableFlags, PagingAllocator, SharedPageTable},
 };
@@ -65,7 +66,7 @@ impl Default for UserMemoryManager {
         let table =
             unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
         Self {
-            table: SharedPageTable::from_inner(table),
+            table: SharedPageTable::from_inner(table, next_asid()),
             map: BTreeMap::new(),
         }
     }
@@ -106,7 +107,7 @@ impl UserMemoryManager {
             let from = backing_mem.add(page * 4.kib()).into_identity().into_const();
             let to = addr.add(page * 4.kib());
             let flags = req.flags;
-            self.table.map(None, from, to, flags, PageSize::Base);
+            let _ = self.table.map(None, from, to, flags, PageSize::Base);
         }
 
         let range = addr..addr.add(req.n_pages * 4.kib());
@@ -131,7 +132,7 @@ impl UserMemoryManager {
         to: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
     ) {
-        self.table.map(None, from, to, flags, PageSize::Base);
+        let _ = self.table.map(None, from, to, flags, PageSize::Base);
     }
 
     pub fn get_table(&self) -> &SharedPageTable {

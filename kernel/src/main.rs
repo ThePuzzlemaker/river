@@ -79,7 +79,7 @@ use uart::UART;
 use crate::{
     asm::InterruptDisabler,
     boot::HartBootData,
-    capability::{global_interrupt_pool, Job, Page, Thread, ThreadState},
+    capability::{global_interrupt_pool, next_asid, Job, Page, Thread, ThreadState},
     hart_local::LOCAL_HART,
     kalloc::{linked_list::LinkedListAlloc, phys::PMAlloc},
     paging::{PagingAllocator, SharedPageTable},
@@ -116,6 +116,7 @@ pub static INIT: &[u8] = include_bytes!(env!("CARGO_BUILD_INIT_PATH"));
 
 static N_STARTED: AtomicUsize = AtomicUsize::new(0);
 pub static N_HARTS: AtomicUsize = AtomicUsize::new(0);
+pub const MAX_HARTS: usize = 64;
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -211,7 +212,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
     // SAFETY: The page is zeroed and thus is well-defined and valid.
     let pgtbl =
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
-    let pgtbl = SharedPageTable::from_inner(pgtbl);
+    let pgtbl = SharedPageTable::from_inner(pgtbl, next_asid());
     let job = Job::new(None).unwrap();
     // TODO: phase out name and have it done in userspace?
     let proc = Thread::new(String::from("init"), Some(pgtbl), job.clone());
@@ -224,7 +225,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         let trampoline_virt =
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
 
-        private.root_pgtbl.as_mut().unwrap().map(
+        let _ = private.root_pgtbl.as_mut().unwrap().map(
             None,
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
@@ -249,7 +250,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             // SAFETY: This page is valid for 1 page size (12 address
             // bits)
             let pg = unsafe { Page::new(phys, 12) };
-            private.root_pgtbl.as_mut().unwrap().map(
+            let _ = private.root_pgtbl.as_mut().unwrap().map(
                 Some(pg.clone()),
                 phys.into_identity().into_const(),
                 VirtualConst::from_usize(0x1000_0000).add(i * 4.kib()),
@@ -304,7 +305,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
             // SAFETY: This page is valid for 1 page size (12 address
             // bits)
             let pg = unsafe { Page::new(phys, 12) };
-            private.root_pgtbl.as_mut().unwrap().map(
+            let _ = private.root_pgtbl.as_mut().unwrap().map(
                 Some(pg.clone()),
                 phys.into_identity().into_const(),
                 VirtualConst::from_usize(0x2000_1000).add(i * 4.kib()),
@@ -329,7 +330,7 @@ extern "C" fn kmain(fdt_ptr: *const u8) -> ! {
         let mut private = proc.private.lock();
         // SAFETY: This page is valid for 1 page size (12 address bits)
         let pg = unsafe { Page::new(bootinfo_page, 12) };
-        private.root_pgtbl.as_mut().unwrap().map(
+        let _ = private.root_pgtbl.as_mut().unwrap().map(
             Some(pg.clone()),
             bootinfo_page.into_const().into_identity(),
             VirtualConst::from_usize(0x2000_0000),

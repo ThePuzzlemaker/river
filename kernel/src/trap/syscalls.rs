@@ -32,8 +32,9 @@ use rille::{
 use crate::{
     asm::{self, InterruptDisabler},
     capability::{
-        CapToOwned, Endpoint, InterruptHandlerCap, InterruptPoolCap, Job, JobCap, Notification,
-        NotificationCap, Page, PageCap, Thread, ThreadProtected, ThreadState, WaitQueue,
+        next_asid, CapToOwned, Endpoint, InterruptHandlerCap, InterruptPoolCap, Job, JobCap,
+        Notification, NotificationCap, Page, PageCap, Thread, ThreadProtected, ThreadState,
+        WaitQueue,
     },
     hart_local::LOCAL_HART,
     kalloc::{self, phys::PMAlloc},
@@ -314,7 +315,7 @@ pub fn sys_pgtbl_create(thread: Arc<Thread>, _intr: InterruptDisabler) -> CapRes
     // SAFETY: The page is zeroed and thus is well-defined and valid.
     let pgtbl =
         unsafe { Box::<MaybeUninit<_>, _>::assume_init(Box::new_uninit_in(PagingAllocator)) };
-    let pgtbl = SharedPageTable::from_inner(pgtbl);
+    let pgtbl = SharedPageTable::from_inner(pgtbl, next_asid());
 
     let _ = slot.replace(pgtbl);
 

@@ -30,11 +30,12 @@ pub type PageCap = rille::capability::paging::Page<DynLevel>;
 use rille::addr::{DirectMapped, Identity, Kernel, PhysicalMut, VirtualConst};
 use rille::symbol;
 use rille::units::{self, StorageUnits};
+use sbi::rfence::{remote_sfence_vma, remote_sfence_vma_asid};
 
-use crate::asm::InterruptDisabler;
-use crate::hart_local::LOCAL_HART;
+use crate::asm::{hartid, InterruptDisabler};
+use crate::hart_local::{CURRENT_ASID, LOCAL_HART};
 use crate::kalloc::phys::PMAlloc;
-use crate::paging::SharedPageTable;
+use crate::paging::{SfenceRequired, SharedPageTable};
 use crate::plic::PLIC;
 use crate::proc::Context;
 use crate::sched::Scheduler;
@@ -43,7 +44,7 @@ use crate::sync::{
 };
 use crate::trampoline::Trapframe;
 use crate::trap::user_trap_ret;
-use crate::{asm, kalloc};
+use crate::{asm, kalloc, N_HARTS};
 
 use self::captbl::{Captbl, CaptblSlots};
 use self::slotref::{SlotRef, SlotRefMut};
@@ -596,6 +597,10 @@ impl<'a> SlotRefMut<'a, PageTableCap> {
     /// # Errors
     ///
     /// TODO
+    ///
+    /// # Panics
+    ///
+    /// TODO
     pub fn map_page(
         &mut self,
         page: &mut SlotRefMut<'_, PageCap>,
@@ -608,6 +613,7 @@ impl<'a> SlotRefMut<'a, PageTableCap> {
         let page_cap = unsafe { page.cap.page().unwrap_unchecked() };
         // SAFETY: Type check.
         let pgtbl = unsafe { self.cap.pgtbl().unwrap_unchecked() };
+        let asid = pgtbl.asid();
 
         if addr.into_usize() >= 0x40_0000_0000 {
             return Err(CapError::InvalidOperation);
@@ -629,18 +635,69 @@ impl<'a> SlotRefMut<'a, PageTableCap> {
                 GigaPage::PAGE_SIZE_LOG2 => PageSize::Giga,
                 _ => unreachable!(),
             };
-            pgtbl.map(
+            let sfence = pgtbl.map(
                 Some(page_cap.clone()),
                 page_cap.phys.into_identity().into_const(),
                 addr,
                 flags,
                 page_size,
             );
+            maybe_sfence(sfence, asid, addr, page_cap.size_log2);
         }
         // TODO: sfence
         //self.add_child(page);
 
         Ok(())
+    }
+}
+
+fn maybe_sfence(
+    sfence: SfenceRequired,
+    asid: u16,
+    addr: VirtualConst<u8, Identity>,
+    size_log2: u8,
+) {
+    match sfence {
+        SfenceRequired::No => unreachable!(),
+        SfenceRequired::Asid => {
+            let mut mask = sbi::HartMask::new(0);
+            for hart in CURRENT_ASID
+                .iter()
+                .take(N_HARTS.load(Ordering::Relaxed))
+                .enumerate()
+                .filter_map(|(i, x)| (x.load(Ordering::Relaxed) == asid).then_some(i))
+            {
+                if hart == hartid() as usize {
+                    // SAFETY: sfence.vma is always safe
+                    unsafe {
+                        asm!("sfence.vma {}, {}", in(reg) 0, in(reg) asid);
+                    }
+                } else {
+                    mask = mask.with(hart);
+                }
+            }
+            remote_sfence_vma_asid(mask, 0, usize::MAX, asid as usize).unwrap();
+        }
+        SfenceRequired::Page => {
+            let mut mask = sbi::HartMask::new(0);
+            for hart in CURRENT_ASID
+                .iter()
+                .take(N_HARTS.load(Ordering::Relaxed))
+                .enumerate()
+                .filter_map(|(i, x)| (x.load(Ordering::Relaxed) == asid).then_some(i))
+            {
+                let virtaddr = addr.into_usize();
+                if hart == hartid() as usize {
+                    // SAFETY: sfence.vma is always safe
+                    unsafe {
+                        asm!("sfence.vma {}, {}", in(reg) virtaddr, in(reg) asid);
+                    }
+                } else {
+                    mask = mask.with(hart);
+                }
+            }
+            remote_sfence_vma(mask, addr.into_usize(), 1 << size_log2).unwrap();
+        }
     }
 }
 
@@ -653,16 +710,17 @@ impl<'a> SlotRefMut<'a, PageTableCap> {
 
 */
 
-// static NEXT_ASID: AtomicU16 = AtomicU16::new(1);
+// TODO: make this better
+static NEXT_ASID: AtomicU16 = AtomicU16::new(1);
 
-// fn next_asid() -> u16 {
-//     let v = NEXT_ASID.fetch_add(1, Ordering::Relaxed);
-//     assert!(
-//         core::intrinsics::likely(v != u16::MAX),
-//         "oops! ran out of ASIDs"
-//     );
-//     v
-// }
+pub fn next_asid() -> u16 {
+    let v = NEXT_ASID.fetch_add(1, Ordering::Relaxed);
+    assert!(
+        core::intrinsics::likely(v != u16::MAX),
+        "oops! ran out of ASIDs"
+    );
+    v
+}
 
 static NEXT_TID: AtomicU16 = AtomicU16::new(1);
 
@@ -710,6 +768,7 @@ impl<'a> SlotRef<'a, ThreadCap> {
             return Err(CapError::InvalidOperation);
         }
 
+        let asid = pgtbl.asid();
         let old_pgtbl = private.root_pgtbl.replace(pgtbl);
         if let Some(_pgtbl) = old_pgtbl {
             // TODO: pgtbl.unmap(VirtualConst::from(private.trapframe_addr))
@@ -718,12 +777,18 @@ impl<'a> SlotRef<'a, ThreadCap> {
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
 
         // SAFETY: Type check.
-        unsafe { private.root_pgtbl.as_mut().unwrap_unchecked() }.map(
+        let sfence = unsafe { private.root_pgtbl.as_mut().unwrap_unchecked() }.map(
             None,
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
             KernelFlags::VAD | KernelFlags::RX,
             PageSize::Base,
+        );
+        maybe_sfence(
+            sfence,
+            asid,
+            VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
+            BasePage::PAGE_SIZE_LOG2 as u8,
         );
 
         private.state = ThreadState::Suspended;
@@ -1121,7 +1186,6 @@ impl Thread {
             stack: ThreadKernelStack::new(),
             private: SpinMutex::new(ThreadProtected {
                 root_pgtbl: pgtbl,
-                asid: 1, /*TODO*/
                 name,
                 trapframe_addr: 0,
                 prio: ThreadPriorities {
@@ -1176,12 +1240,18 @@ impl Thread {
         // We only need to worry about the first page, as that's
         // where the trapframe will be. Nothing else will be
         // accessed from the user page tables.
-        private.root_pgtbl.as_mut().unwrap().map(
+        let sfence = private.root_pgtbl.as_mut().unwrap().map(
             None,
             trapframe_phys.into_const().cast().into_identity(),
             trapframe_mapped_addr,
             KernelFlags::VAD | KernelFlags::RW,
             PageSize::Base,
+        );
+        maybe_sfence(
+            sfence,
+            private.root_pgtbl.as_mut().unwrap().asid(),
+            trapframe_mapped_addr,
+            BasePage::PAGE_SIZE_LOG2 as u8,
         );
 
         private.trapframe_addr = trapframe_mapped_addr.into_usize();
@@ -1199,6 +1269,7 @@ impl Thread {
     pub unsafe fn yield_to_scheduler_final(self: Arc<Thread>) {
         let intr = InterruptDisabler::new();
 
+        CURRENT_ASID[asm::hartid() as usize].store(0, Ordering::Relaxed);
         let mut ctx_lock = self.context.lock();
         let ctx = SpinMutex::new(mem::replace(
             &mut *ctx_lock,
@@ -1240,6 +1311,7 @@ impl Thread {
     pub unsafe fn yield_to_scheduler() {
         let intr = InterruptDisabler::new();
 
+        CURRENT_ASID[asm::hartid() as usize].store(0, Ordering::Relaxed);
         let ctx_ptr = {
             let proc = LOCAL_HART.thread.borrow();
             let proc = proc.as_ref().unwrap();
@@ -1274,7 +1346,6 @@ impl fmt::Debug for Thread {
 
 pub struct ThreadProtected {
     pub root_pgtbl: Option<SharedPageTable>,
-    pub asid: u16,
     pub name: String,
     pub trapframe_addr: usize,
     pub prio: ThreadPriorities,
@@ -1393,7 +1464,6 @@ impl fmt::Debug for ThreadProtected {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ThreadProtected")
             .field("root_pgtbl", &self.root_pgtbl)
-            .field("asid", &self.asid)
             .field("name", &self.name)
             .field("trapframe_addr", &self.trapframe_addr)
             .field("prio", &self.prio)

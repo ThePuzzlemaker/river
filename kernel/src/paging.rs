@@ -8,6 +8,7 @@ use core::{
 };
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
+use atomic::Ordering;
 use bitflags::bitflags;
 
 use rille::{
@@ -22,8 +23,10 @@ use rille::{
 use crate::{
     asm::{self, get_satp},
     capability::Page,
+    hart_local::CURRENT_ASID,
     kalloc::phys::PMAlloc,
     sync::{OnceCell, SpinMutex, SpinRwLock},
+    N_HARTS,
 };
 
 static ROOT_PAGE_TABLE: OnceCell<SpinMutex<PageTable>> = OnceCell::new();
@@ -483,6 +486,7 @@ pub struct SharedPageTable {
 #[derive(Debug)]
 pub struct SharedPageTableInner {
     inner: Box<RawPageTable, PagingAllocator>,
+    pub asid: u16,
     pages: BTreeMap<usize, Arc<Page>>,
 }
 
@@ -492,13 +496,21 @@ impl PartialEq for SharedPageTable {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SfenceRequired {
+    No,
+    Asid,
+    Page,
+}
+
 impl Eq for SharedPageTable {}
 
 impl SharedPageTable {
-    pub fn from_inner(x: Box<RawPageTable, PagingAllocator>) -> Self {
+    pub fn from_inner(x: Box<RawPageTable, PagingAllocator>, asid: u16) -> Self {
         Self {
             inner: Arc::new(SpinRwLock::new(SharedPageTableInner {
                 inner: x,
+                asid,
                 pages: BTreeMap::new(),
             })),
         }
@@ -621,6 +633,7 @@ impl SharedPageTable {
     ///
     /// This function will panic if either the physical or virtual addresses are unaligned.
     #[track_caller]
+    #[must_use = "Must sfence after pgtbl modifications"]
     pub fn map(
         &self,
         page: Option<Arc<Page>>,
@@ -628,7 +641,7 @@ impl SharedPageTable {
         to: VirtualConst<u8, Identity>,
         flags: PageTableFlags,
         size: PageSize,
-    ) {
+    ) -> SfenceRequired {
         assert!(
             from.is_page_aligned(),
             "PageTable::map: tried to map from an unaligned physical address: from={from:#p}, to={to:#p}, flags={flags:?}", 
@@ -655,6 +668,7 @@ impl SharedPageTable {
         }
         let mut table = &mut *inner.inner;
 
+        let mut sfence = SfenceRequired::No;
         for (iter, vpn) in to.vpns().into_iter().enumerate().rev().take(depth_max) {
             let entry = &mut table.ptes[vpn.into_usize()];
 
@@ -669,8 +683,11 @@ impl SharedPageTable {
                     pte.ppn = from.ppn();
                     pte
                 });
+                if sfence == SfenceRequired::No {
+                    sfence = SfenceRequired::Page;
+                }
 
-                return;
+                return sfence;
             }
 
             match entry.decode().kind() {
@@ -688,15 +705,22 @@ impl SharedPageTable {
                         pte.ppn = subtable_phys.ppn();
                         pte
                     });
+                    sfence = SfenceRequired::Asid;
 
                     table = new_subtable;
                 }
             }
         }
+        debug_assert_ne!(sfence, SfenceRequired::No);
+        sfence
     }
 
     pub fn as_physical_const(&self) -> PhysicalConst<RawPageTable, DirectMapped> {
         Virtual::from_ptr(core::ptr::addr_of!(*self.inner.read().inner)).into_phys()
+    }
+
+    pub(crate) fn asid(&self) -> u16 {
+        self.inner.read().asid
     }
 }
 

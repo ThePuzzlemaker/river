@@ -17,7 +17,9 @@ use rille::{
 
 use crate::{
     asm::{self, hartid, InterruptDisabler},
-    capability::{HartMask, Job, Thread, ThreadPriorities, ThreadProtected, ThreadState},
+    capability::{
+        next_asid, HartMask, Job, Thread, ThreadPriorities, ThreadProtected, ThreadState,
+    },
     hart_local::LOCAL_HART,
     kalloc::phys::PMAlloc,
     paging::{PageTableFlags, PagingAllocator, SharedPageTable},
@@ -52,6 +54,7 @@ impl Default for SchedulerInner {
             Some(SharedPageTable::from_inner(
                 // SAFETY: A zeroed page table is valid.
                 unsafe { Box::new_zeroed_in(PagingAllocator).assume_init() },
+                next_asid(),
             )),
             Job::new(None).unwrap(),
         );
@@ -72,7 +75,7 @@ impl Default for SchedulerInner {
         let trampoline_virt =
             VirtualConst::<u8, Kernel>::from_usize(symbol::trampoline_start().into_usize());
 
-        idle_thread.private.lock().root_pgtbl.as_mut().unwrap().map(
+        let _ = idle_thread.private.lock().root_pgtbl.as_mut().unwrap().map(
             None,
             trampoline_virt.into_phys().into_identity(),
             VirtualConst::from_usize(usize::MAX - 4.kib() + 1),
@@ -80,7 +83,7 @@ impl Default for SchedulerInner {
             PageSize::Base,
         );
 
-        idle_thread.private.lock().root_pgtbl.as_mut().unwrap().map(
+        let _ = idle_thread.private.lock().root_pgtbl.as_mut().unwrap().map(
             // Idle thread won't be deallocated.
             None,
             pg.into_const().into_identity(),

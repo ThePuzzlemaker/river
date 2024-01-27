@@ -2,7 +2,7 @@ use core::{
     cell::{Cell, RefCell},
     marker::PhantomData,
     slice,
-    sync::atomic::{self, Ordering},
+    sync::atomic::{self, AtomicU16, AtomicUsize, Ordering},
 };
 
 use alloc::sync::Arc;
@@ -19,8 +19,8 @@ use crate::{
     proc::Context,
     symbol::{tdata_end, tdata_start},
     sync::SpinMutex,
+    MAX_HARTS,
 };
-
 
 /// Initialize hart-local structures for this hart.
 ///
@@ -79,6 +79,10 @@ pub fn enabled() -> bool {
 
 #[thread_local]
 pub static LOCAL_HART: HartCtx = HartCtx::new();
+
+#[allow(clippy::declare_interior_mutable_const)]
+const ATOMIC_U16_0: AtomicU16 = AtomicU16::new(0);
+pub static CURRENT_ASID: [AtomicU16; MAX_HARTS] = [ATOMIC_U16_0; MAX_HARTS];
 
 #[derive(Debug, Default)]
 #[repr(C)]

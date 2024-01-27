@@ -67,11 +67,7 @@ trampoline:
     // S-mode SATP
     ld t2, 272(t0)
 
-    sfence.vma
-
     csrw satp, t2
-
-    sfence.vma
 
     // Jump to the user trap handler.
     //
@@ -89,9 +85,7 @@ ret_user:
     // N.B. a0 = U-mode satp
     //      sscratch = trapframe addr in U-mode pgtbl
     
-    sfence.vma
     csrw satp, a0
-    sfence.vma
 
     csrr t0, sscratch
 
@@ -128,8 +122,6 @@ ret_user:
     ld x31, 240(t0)
 
     ld t0, 32(t0)
-
-//    csrs sstatus, 2 // Reenable interrupts
 
     // Return to U-mode. Our caller must have set stval and made sure SPP is
     // off.

@@ -246,7 +246,6 @@ unsafe extern "C" fn early_boot(fdt_ptr: *const u8) -> ! {
 
         # load new `satp`
         csrw satp, {satp}
-        sfence.vma
         unimp # trap & go to main
         ",
             mxr = in(reg) 1 << 19,
@@ -400,7 +399,6 @@ unsafe extern "C" fn early_boot_hart(data: PhysicalMut<HartBootData, DirectMappe
 
         # load new `satp`
         csrw satp, {satp}
-        sfence.vma
         unimp # trap & go to main
         ",
             mxr = in(reg) 1 << 19,
